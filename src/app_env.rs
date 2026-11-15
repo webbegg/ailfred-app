@@ -20,10 +20,9 @@ pub fn log_to_file() {
     unsafe { libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO) };
 }
 
-/// Where screenshots are saved: ~/Desktop.
+/// Where screenshots are saved: the folder chosen in Settings (default ~/Desktop).
 pub fn screenshots_dir() -> String {
-    let home = std::env::var("HOME").unwrap_or_default();
-    format!("{home}/Desktop")
+    crate::settings::folder_now().to_string_lossy().into_owned()
 }
 
 /// Whether Screen Recording is allowed, without prompting or logging.

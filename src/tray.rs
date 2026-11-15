@@ -15,15 +15,17 @@ pub enum Action {
     OpenFolder,
     ToggleLogin,
     OpenPermissionSettings,
+    Settings,
     Quit,
 }
 
 impl Action {
-    const ALL: [(Action, &'static str); 5] = [
+    const ALL: [(Action, &'static str); 6] = [
         (Action::Capture, "capture"),
         (Action::OpenFolder, "open-folder"),
         (Action::ToggleLogin, "login"),
         (Action::OpenPermissionSettings, "permission"),
+        (Action::Settings, "settings"),
         (Action::Quit, "quit"),
     ];
     fn id(self) -> &'static str {
@@ -37,6 +39,7 @@ impl Action {
 pub struct Tray {
     /// Dropping it removes the icon.
     _icon: TrayIcon,
+    capture: MenuItem,
     menu: Menu,
     login: CheckMenuItem,
     permission: MenuItem,
@@ -48,12 +51,8 @@ impl Tray {
     /// Main thread only, after the event loop started. `can_login` is false outside the installed
     /// bundle, where a login item would mean nothing.
     pub fn new(host: AppHandle<Host>, can_login: bool, login_enabled: bool) -> Result<Tray, String> {
-        let capture = MenuItem::with_id(
-            Action::Capture.id(),
-            "Capture Area",
-            true,
-            Some(Accelerator::new(Modifiers::META | Modifiers::SHIFT, Code::Space)),
-        );
+        // The chord is set by `show_capture_shortcut` once the saved one is registered.
+        let capture = MenuItem::with_id(Action::Capture.id(), "Capture Area", true, None);
         let folder = MenuItem::with_id(Action::OpenFolder.id(), "Open Screenshots Folder", true, None);
         let login = CheckMenuItem::with_id(Action::ToggleLogin.id(), "Launch at Login", can_login, login_enabled, None);
         let permission = MenuItem::with_id(
@@ -62,6 +61,7 @@ impl Tray {
             true,
             None,
         );
+        let settings = MenuItem::with_id(Action::Settings.id(), "Settings…", true, Some(Accelerator::new(Modifiers::META, Code::Comma)));
         let quit = MenuItem::with_id(Action::Quit.id(), "Quit ailfred", true, Some(Accelerator::new(Modifiers::META, Code::KeyQ)));
         let menu = Menu::new();
         menu.append_items(&[
@@ -69,6 +69,7 @@ impl Tray {
             &folder,
             &PredefinedMenuItem::separator(),
             &login,
+            &settings,
             &PredefinedMenuItem::separator(),
             &quit,
         ])
@@ -88,7 +89,16 @@ impl Tray {
                 host.update(move |host, tx| host.on_menu(action, tx));
             }
         }));
-        Ok(Tray { _icon: icon, menu, login, permission, permission_shown: false, can_login })
+        Ok(Tray { _icon: icon, capture, menu, login, permission, permission_shown: false, can_login })
+    }
+
+    /// Shows the capture chord next to "Capture Area" (none when cleared). Rune writes chords as
+    /// `shift+super+space`, which muda's accelerator parser reads.
+    pub fn show_capture_shortcut(&self, shortcut: Option<&rune::Shortcut>) {
+        let accelerator = shortcut.and_then(|s| s.to_string().parse::<Accelerator>().ok());
+        if let Err(e) = self.capture.set_accelerator(accelerator) {
+            eprintln!("ailfred: showing the shortcut in the menu failed: {e}");
+        }
     }
 
     pub fn set_login(&self, enabled: bool) {

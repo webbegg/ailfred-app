@@ -9,7 +9,8 @@ objc2 = "0.6"
 objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGEvent", "CGEventTypes", "CGWindow"] }
 objc2-service-management = "0.3.2"
 png = "0.18"
-rune = { version = "0.0.1", path = "../_references/rune/crates/rune" }
+rune = { version = "0.0.1", path = "../_references/rune/crates/rune", features = ["native-file-dialog"] }
+rune-kit = { version = "0.0.1", path = "../_references/rune/crates/rune-kit" }
 screencapturekit = { version = "=1.5.4", features = ["macos_14_0"] }
 tray-icon = "0.26"
 

@@ -11,6 +11,8 @@ mod app_env;
 mod capture;
 mod login;
 mod output;
+mod settings;
+mod settings_ui;
 mod shot;
 mod tray;
 
@@ -20,14 +22,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use rune::{
     App, AppSpec, Cx, DisplayTarget, El, KeyPolicy, NativeDisplayId, OverlayHandle, OverlayInput, OverlayLevel,
-    AppHandle, OverlayOptions, OverlayPlacement, OverlaySpec, RunOptions, Tx, WindowSpec, el,
+    AppHandle, OverlayOptions, WindowHandle, WindowOptions, OverlayPlacement, OverlaySpec, RunOptions, Tx, WindowSpec, el,
 };
 
 use crate::shot::Overlay;
+use crate::settings::{CaptureShortcut, Settings};
+use crate::settings_ui::SettingsUi;
 use crate::tray::{Action, Tray};
-
-/// The chord that captures the screen under the pointer.
-const CAPTURE_SHORTCUT: &str = "cmd+shift+space";
 
 /// The windowless host app: owns the overlay and the menu-bar icon; the global shortcut and the
 /// menu act on it.
@@ -40,6 +41,12 @@ pub struct Host {
     installed: bool,
     /// A capture is running on its thread; a second press waits for it.
     capturing: Arc<AtomicBool>,
+    /// The capture shortcut's registration (shared with the settings window).
+    capture_shortcut: CaptureShortcut,
+    /// The saved shortcut, registered at the loop's first turn.
+    initial_shortcut: Option<rune::Shortcut>,
+    settings_window: Option<WindowHandle>,
+    settings_ui: Option<AppHandle<SettingsUi>>,
 }
 
 impl Host {
@@ -56,6 +63,32 @@ impl Host {
         match Tray::new(handle, self.installed, false) {
             Ok(tray) => self.tray = Some(tray),
             Err(e) => eprintln!("ailfred: menu-bar icon failed: {e}"),
+        }
+    }
+
+    /// Registers the saved capture shortcut (main thread, loop running) and shows it in the menu.
+    fn register_saved_shortcut(&mut self) {
+        let Some(handle) = self.handle.clone() else { return };
+        let shortcut = self.initial_shortcut.take();
+        let label = shortcut.as_ref().map(|s| s.to_string()).unwrap_or_else(|| "none (menu only)".into());
+        match self.capture_shortcut.replace(&handle, shortcut.as_ref()) {
+            Ok(()) => {
+                eprintln!("ailfred ready: capture shortcut {label}");
+                self.show_capture_shortcut(shortcut.as_ref());
+            }
+            Err(e) => {
+                eprintln!("ailfred: the capture shortcut {label} couldn't be registered: {e}");
+                if let Some(ui) = &self.settings_ui {
+                    let message = format!("The shortcut isn't active: {e}. Record it again or pick another.");
+                    ui.update(move |ui, _| ui.shortcut_failed(message));
+                }
+            }
+        }
+    }
+
+    pub fn show_capture_shortcut(&self, shortcut: Option<&rune::Shortcut>) {
+        if let Some(tray) = &self.tray {
+            tray.show_capture_shortcut(shortcut);
         }
     }
 
@@ -88,6 +121,11 @@ impl Host {
                     });
                 });
             }
+            Action::Settings => {
+                if let Some(window) = &self.settings_window {
+                    window.open();
+                }
+            }
             Action::Quit => tx.quit(),
         }
     }
@@ -101,14 +139,24 @@ fn open(target: &str) {
 }
 
 fn host_init() -> Host {
-    Host { overlay: None, handle: None, tray: None, installed: false, capturing: Arc::default() }
+    Host {
+        overlay: None,
+        handle: None,
+        tray: None,
+        installed: false,
+        capturing: Arc::default(),
+        capture_shortcut: CaptureShortcut::default(),
+        initial_shortcut: None,
+        settings_window: None,
+        settings_ui: None,
+    }
 }
 
 fn host_view(_: &Host, _: &mut Cx<Host>) -> El {
     el()
 }
 
-fn on_shortcut(host: &mut Host, _: &mut Tx) {
+pub(crate) fn on_shortcut(host: &mut Host, _: &mut Tx) {
     start_capture(host, Duration::ZERO);
 }
 
@@ -179,19 +227,34 @@ fn main() {
                 .on_key(shot::on_key),
             Overlay::new(handle.clone()),
         );
+        let settings = Settings::open();
+        let initial_shortcut = settings.shortcut();
+        let capture_shortcut = CaptureShortcut::default();
+        let ui = SettingsUi::new(settings, handle.clone(), capture_shortcut.clone());
+        let hidden = WindowOptions { visible: false, resizable: false, min_size: Some((0.0, 0.0)), ..Default::default() };
+        let (settings_ui, settings_window) = app.window(
+            WindowSpec::new("settings", AppSpec::new("ailfred Settings", (460.0, 260.0), SettingsUi::placeholder, settings_ui::view))
+                .state(ui)
+                .options(hidden),
+        );
         let own = handle.clone();
-        let app = app
-            .init(move || Host {
-                overlay: Some(overlay),
-                handle: Some(own),
-                tray: None,
-                installed,
-                capturing: Arc::default(),
-            })
-            .global_shortcut(CAPTURE_SHORTCUT, on_shortcut);
-        // Runs on the main thread at the loop's first turn: the status item needs a running NSApp.
-        handle.update(|host, _| host.add_tray());
-        eprintln!("ailfred ready: press ⌘⇧Space to capture");
+        let app = app.init(move || Host {
+            overlay: Some(overlay),
+            handle: Some(own),
+            tray: None,
+            installed,
+            capturing: Arc::default(),
+            capture_shortcut,
+            initial_shortcut,
+            settings_window: Some(settings_window),
+            settings_ui: Some(settings_ui),
+        });
+        // Runs on the main thread at the loop's first turn: the status item needs a running NSApp,
+        // and runtime shortcut registration needs the host started.
+        handle.update(|host, _| {
+            host.add_tray();
+            host.register_saved_shortcut();
+        });
         // Off the UI thread: both talk to system services.
         std::thread::spawn(move || {
             if installed {
