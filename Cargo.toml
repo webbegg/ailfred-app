@@ -1,0 +1,26 @@
+[package]
+name = "ailfred-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+rune = { version = "0.0.1", path = "../_references/rune/crates/rune" }
+
+# Rune ships patched copies of these crates; a dependency's `[patch]` doesn't apply to the
+# workspace that depends on it, so an app that builds Rune repeats them.
+[patch.crates-io]
+wgpu-hal = { path = "../_references/rune/vendor/wgpu-hal" }
+winit = { path = "../_references/rune/vendor/winit" }
+parley_engine = { path = "../_references/rune/vendor/parley_engine" }
+accesskit_windows = { path = "../_references/rune/vendor/accesskit_windows" }
+
+# Line tables keep backtraces small; full debug info for Rune costs many GB of RAM.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
+
+[profile.release]
+codegen-units = 16
+incremental = true
