@@ -7,7 +7,9 @@
 //!
 //! Cmd+Shift+Space captures. Escape cancels. Cmd+Q quits.
 
+mod app_env;
 mod capture;
+mod login;
 mod shot;
 
 use std::sync::Arc;
@@ -81,8 +83,12 @@ impl Drop for Busy {
 }
 
 fn main() {
+    let installed = app_env::in_bundle();
+    if installed {
+        app_env::log_to_file();
+    }
     // accessory: no Dock icon and no activation at launch.
-    rune::run_windows_with(RunOptions { accessory: true }, |_displays| {
+    rune::run_windows_with(RunOptions { accessory: true }, move |_displays| {
         let mut app = App::new(AppSpec::new("ailfred", (1.0, 1.0), host_init, host_view)).windowless();
         let host = app.handle();
         let overlay = app.overlay(
@@ -106,6 +112,13 @@ fn main() {
             .init(move || Host { overlay: Some(overlay), capturing: Arc::default() })
             .global_shortcut(CAPTURE_SHORTCUT, on_shortcut);
         eprintln!("ailfred ready: press ⌘⇧Space to capture");
+        // Off the UI thread: both talk to system services.
+        std::thread::spawn(move || {
+            if installed {
+                login::register_if_needed();
+            }
+            app_env::screen_recording_allowed();
+        });
         vec![WindowSpec::from_app("host", app)]
     });
 }

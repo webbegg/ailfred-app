@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGEvent", "CGEventTypes"] }
+libc = "0.2"
+objc2 = "0.6"
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGEvent", "CGEventTypes", "CGWindow"] }
+objc2-service-management = "0.3.2"
 png = "0.18"
 rune = { version = "0.0.1", path = "../_references/rune/crates/rune" }
 screencapturekit = { version = "=1.5.4", features = ["macos_14_0"] }

@@ -1,0 +1,36 @@
+//! Launch at login with `SMAppService.mainApp` (macOS 13+), registered when the status says it
+//! never was (`NotRegistered`). Turning it off in System Settings > General > Login Items leaves
+//! a different status (it needs approval again), so the user's choice stands; a moved or
+//! reinstalled bundle that lost its registration gets it back.
+
+use objc2::rc::autoreleasepool;
+use objc2_service_management::{SMAppService, SMAppServiceStatus};
+
+/// Registers ailfred as a login item if it never was. Blocking (a call to the service manager):
+/// run it off the UI thread, and only from the installed bundle.
+pub fn register_if_needed() {
+    // A background thread has no autorelease pool of its own.
+    autoreleasepool(|_| {
+        // SAFETY: SMAppService is an XPC client, not bound to the main thread.
+        let service = unsafe { SMAppService::mainAppService() };
+        let status = unsafe { service.status() };
+        if status != SMAppServiceStatus::NotRegistered {
+            eprintln!("ailfred login item: {}", name(status));
+            return;
+        }
+        match unsafe { service.registerAndReturnError() } {
+            Ok(()) => eprintln!("ailfred login item: registered, now {}", name(unsafe { service.status() })),
+            Err(e) => eprintln!("ailfred login item: registering failed: {e:?}"),
+        }
+    });
+}
+
+fn name(status: SMAppServiceStatus) -> &'static str {
+    match status {
+        SMAppServiceStatus::NotRegistered => "not registered",
+        SMAppServiceStatus::Enabled => "enabled",
+        SMAppServiceStatus::RequiresApproval => "off (needs approval in System Settings)",
+        SMAppServiceStatus::NotFound => "not found",
+        _ => "unknown",
+    }
+}
