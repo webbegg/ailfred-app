@@ -4,7 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGEvent", "CGEventTypes"] }
+png = "0.18"
 rune = { version = "0.0.1", path = "../_references/rune/crates/rune" }
+screencapturekit = { version = "=1.5.4", features = ["macos_14_0"] }
 
 # Rune ships patched copies of these crates; a dependency's `[patch]` doesn't apply to the
 # workspace that depends on it, so an app that builds Rune repeats them.

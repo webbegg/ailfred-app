@@ -1,69 +1,82 @@
-//! ailfred: one frameless, transparent overlay covering the whole screen under the pointer,
-//! above every other window. On macOS Rune hosts it in a non-activating `NSPanel` at
-//! AppKit level 26 (above the menu bar and Dock), on every Space and over full-screen apps.
+//! ailfred: an area screenshot tool. The hotkey captures the display under the pointer, then
+//! shows it frozen in a frameless, transparent overlay above every other window. Drag to select;
+//! on release the area goes to the clipboard and to ~/Desktop as a PNG.
 //!
-//! Cmd+Shift+Space shows it on the current screen. Escape hides it. Cmd+Q quits.
+//! On macOS Rune hosts the overlay in a non-activating `NSPanel` at AppKit level 26 (above the
+//! menu bar and Dock), on every Space and over full-screen apps.
+//!
+//! Cmd+Shift+Space captures. Escape cancels. Cmd+Q quits.
+
+mod capture;
+mod shot;
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use rune::{
-    App, AppHandle, AppSpec, Color, Cx, DisplayTarget, El, Key, KeyEvent, KeyPolicy, OverlayHandle, OverlayInput,
-    OverlayLevel, OverlayOptions, OverlayPlacement, OverlaySpec, RunOptions, Tx, WindowSpec, col, el, text,
+    App, AppSpec, Cx, DisplayTarget, El, KeyPolicy, NativeDisplayId, OverlayHandle, OverlayInput, OverlayLevel,
+    OverlayOptions, OverlayPlacement, OverlaySpec, RunOptions, Tx, WindowSpec, el,
 };
 
-/// The chord that brings the overlay up on the screen under the pointer.
-const SHOW_SHORTCUT: &str = "cmd+shift+space";
+use crate::shot::Overlay;
 
-/// The overlay's own state; screenshot tools will live here. An overlay drops `Tx::close_window`
-/// and `Tx::quit` from its handlers (it has no window to ask), so it acts through the host.
-struct Overlay {
-    host: AppHandle<Host>,
-}
-
-fn overlay_view(_: &Overlay, _: &mut Cx<Overlay>) -> El {
-    let hint = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.85 };
-    col().w_full().h_full().center().gap(8.0)
-        // A light dim so the overlay is visible; the window itself stays transparent.
-        .fill(Color { r: 0.0, g: 0.0, b: 0.0, a: 0.25 })
-        .child(text("ailfred").font(rune::tok::type_::TITLE).color(hint))
-        .child(text("Esc to hide · ⌘Q to quit").color(hint))
-}
-
-fn overlay_key(s: &mut Overlay, event: &KeyEvent, _: &mut Tx) -> bool {
-    if event.key == Key::Escape {
-        // Hide, keeping the panel and its GPU surface warm for the next show.
-        s.host.update(|host, _| if let Some(overlay) = &host.overlay { overlay.hide() });
-        return true;
-    }
-    if event.is_command('q') {
-        s.host.quit();
-        return true;
-    }
-    false
-}
+/// The chord that captures the screen under the pointer.
+const CAPTURE_SHORTCUT: &str = "cmd+shift+space";
 
 /// The windowless host app: owns the overlay handle so the global shortcut can reach it.
-struct Host {
-    overlay: Option<OverlayHandle<Overlay>>,
+pub struct Host {
+    pub(crate) overlay: Option<OverlayHandle<Overlay>>,
+    /// A capture is running on its thread; a second press waits for it.
+    capturing: Arc<AtomicBool>,
+}
+
+impl Host {
+    pub fn hide_overlay(&self) {
+        if let Some(overlay) = &self.overlay {
+            overlay.hide();
+        }
+    }
 }
 
 fn host_init() -> Host {
-    Host { overlay: None }
+    Host { overlay: None, capturing: Arc::default() }
 }
 
 fn host_view(_: &Host, _: &mut Cx<Host>) -> El {
     el()
 }
 
-/// Re-resolves the screen under the pointer, then shows the overlay there and takes keys.
-/// All three requests land in the same event-loop turn, so placement happens before reveal.
-fn show_on_current_screen(overlay: &OverlayHandle<Overlay>) {
-    overlay.set_display(DisplayTarget::UnderPointer);
-    overlay.show();
-    overlay.request_keys();
+/// Captures off the UI thread, then shows the frozen display on the display it came from.
+fn on_shortcut(host: &mut Host, _: &mut Tx) {
+    let Some(overlay) = host.overlay.clone() else { return };
+    if host.capturing.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let capturing = Busy(host.capturing.clone());
+    let exclude = overlay.window_number();
+    std::thread::spawn(move || {
+        let _capturing = capturing; // cleared on drop, even if the capture panics
+        match capture::display_under_pointer(exclude) {
+            Ok(shot) => {
+                let display = shot.display_id;
+                // Queued in this order: state, placement, reveal. They may be applied over more than
+                // one event-loop turn; the update is queued before `show`, and show refreshes first.
+                overlay.update(move |s, _| s.freeze(shot));
+                overlay.set_display(DisplayTarget::Native(NativeDisplayId::MacOS(display)));
+                overlay.show();
+                overlay.request_keys();
+            }
+            Err(e) => eprintln!("ailfred: {e}"),
+        }
+    });
 }
 
-fn on_shortcut(host: &mut Host, _: &mut Tx) {
-    if let Some(overlay) = &host.overlay {
-        show_on_current_screen(overlay);
+/// Clears the "capture running" flag when dropped.
+struct Busy(Arc<AtomicBool>);
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
     }
 }
 
@@ -74,26 +87,25 @@ fn main() {
         let host = app.handle();
         let overlay = app.overlay(
             // The size is replaced by the display's size: FullScreen placement.
-            OverlaySpec::new("ailfred overlay", (0.0, 0.0), overlay_view)
+            OverlaySpec::new("ailfred overlay", (0.0, 0.0), shot::view)
                 .options(OverlayOptions {
                     display: DisplayTarget::UnderPointer,
                     placement: Some(OverlayPlacement::FullScreen),
                     level: OverlayLevel::AboveStatus,
                     input: OverlayInput::All,
                     keys: KeyPolicy::OnDemand,
-                    // Later screenshots must not capture the overlay itself.
+                    // Belt and braces: the capture filter also excludes this window by number.
                     exclude_from_capture: true,
                     prewarm: true,
                     ..Default::default()
                 })
-                .on_key(overlay_key)
-                .on_created(|created| eprintln!("ailfred overlay created {created:?}")),
-            Overlay { host },
+                .on_key(shot::on_key),
+            Overlay::new(host),
         );
-        show_on_current_screen(&overlay);
         let app = app
-            .init(move || Host { overlay: Some(overlay) })
-            .global_shortcut(SHOW_SHORTCUT, on_shortcut);
+            .init(move || Host { overlay: Some(overlay), capturing: Arc::default() })
+            .global_shortcut(CAPTURE_SHORTCUT, on_shortcut);
+        eprintln!("ailfred ready: press ⌘⇧Space to capture");
         vec![WindowSpec::from_app("host", app)]
     });
 }
