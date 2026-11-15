@@ -9,6 +9,8 @@ use crate::Host;
 use crate::capture::Shot;
 
 const DIM: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.35 };
+/// The hint's own background: it sits on the undimmed screen, so it must read on white too.
+const HINT_BG: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.7 };
 const EDGE: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.9 };
 /// A drag smaller than this (points) is a click, not a selection.
 const MIN_SIDE: f32 = 3.0;
@@ -57,9 +59,11 @@ pub fn view(s: &Overlay, _: &mut Cx<Overlay>) -> El {
     // The overlay covers the display's frame, so its size in points is the capture over its scale.
     let (sw, sh) = (f.width as f32 / f.scale, f.height as f32 / f.scale);
     let mut root = el().w_full().h_full().pixels(&s.pixels).cursor(Cursor::Crosshair).on_drag(on_drag);
+    // Before a drag the frozen screen shows as is, only the hint on top; the dim starts with the
+    // drag (its first event creates the selection).
     let Some([x, y, w, h]) = s.selection else {
-        return root.child(el().size(sw, sh).fill(DIM).pin(Some(0.0), Some(0.0), None, None)).child(
-            el().padding(10.0).radius(8.0).fill(DIM).pin(Some(24.0), Some(24.0), None, None)
+        return root.child(
+            el().padding(10.0).radius(8.0).fill(HINT_BG).pin(Some(24.0), Some(24.0), None, None)
                 .child(text("Drag to capture · Esc to cancel").color(EDGE)),
         );
     };
@@ -69,13 +73,17 @@ pub fn view(s: &Overlay, _: &mut Cx<Overlay>) -> El {
         .child(shade(0.0, 0.0, sw, y))
         .child(shade(0.0, y + h, sw, sh - y - h))
         .child(shade(0.0, y, x, h))
-        .child(shade(x + w, y, sw - x - w, h))
-        .child(el().key("selection").size(w, h).border(1.0, EDGE).pin(Some(x), Some(y), None, None))
-        .child(
-            text(format!("{} × {}", (w * f.scale).round(), (h * f.scale).round()))
-                .color(EDGE)
-                .pin(Some(x), Some((y + h + 6.0).min(sh - 20.0)), None, None),
-        );
+        .child(shade(x + w, y, sw - x - w, h));
+    // The border and size only once there's an area: not a 0 × 0 box on press.
+    if w >= MIN_SIDE && h >= MIN_SIDE {
+        root = root
+            .child(el().key("selection").size(w, h).border(1.0, EDGE).pin(Some(x), Some(y), None, None))
+            .child(
+                text(format!("{} × {}", (w * f.scale).round(), (h * f.scale).round()))
+                    .color(EDGE)
+                    .pin(Some(x), Some((y + h + 6.0).min(sh - 20.0)), None, None),
+            );
+    }
     root
 }
 
