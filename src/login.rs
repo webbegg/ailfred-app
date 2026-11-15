@@ -25,6 +25,27 @@ pub fn register_if_needed() {
     });
 }
 
+/// Whether ailfred opens at login now.
+pub fn enabled() -> bool {
+    // SAFETY: as above.
+    autoreleasepool(|_| unsafe { SMAppService::mainAppService().status() } == SMAppServiceStatus::Enabled)
+}
+
+/// Turns launch at login on or off (the menu's checkmark). Returns the state after the change.
+pub fn set(on: bool) -> bool {
+    autoreleasepool(|_| {
+        // SAFETY: as above.
+        let service = unsafe { SMAppService::mainAppService() };
+        let result = if on { unsafe { service.registerAndReturnError() } } else { unsafe { service.unregisterAndReturnError() } };
+        if let Err(e) = result {
+            eprintln!("ailfred login item: turning it {} failed: {e:?}", if on { "on" } else { "off" });
+        }
+        let now = unsafe { service.status() };
+        eprintln!("ailfred login item: {}", name(now));
+        now == SMAppServiceStatus::Enabled
+    })
+}
+
 fn name(status: SMAppServiceStatus) -> &'static str {
     match status {
         SMAppServiceStatus::NotRegistered => "not registered",

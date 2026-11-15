@@ -20,6 +20,17 @@ pub fn log_to_file() {
     unsafe { libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO) };
 }
 
+/// Where screenshots are saved: ~/Desktop.
+pub fn screenshots_dir() -> String {
+    let home = std::env::var("HOME").unwrap_or_default();
+    format!("{home}/Desktop")
+}
+
+/// Whether Screen Recording is allowed, without prompting or logging.
+pub fn screen_recording_allowed_quiet() -> bool {
+    CGPreflightScreenCaptureAccess()
+}
+
 /// Checks Screen Recording; without it, asks macOS to prompt (once per app; afterwards the
 /// user goes to System Settings). Returns whether capture is allowed now.
 pub fn screen_recording_allowed() -> bool {
