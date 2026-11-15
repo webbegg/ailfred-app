@@ -1,5 +1,6 @@
 //! Captures the display under the pointer with ScreenCaptureKit (`SCScreenshotManager`, macOS 14+),
-//! leaving out our own overlay panel. Blocking: call it off the UI thread.
+//! leaving out every window of this process (the overlay, a menu still fading out, the status
+//! item's highlight). Blocking: call it off the UI thread.
 
 use objc2_core_graphics::CGEvent;
 use screencapturekit::screenshot_manager::SCScreenshotManager;
@@ -26,9 +27,8 @@ fn pointer() -> (f64, f64) {
     (p.x, p.y)
 }
 
-/// Captures the display under the pointer. `exclude` is our overlay's CGWindowID, kept out of
-/// the image even if it is on screen.
-pub fn display_under_pointer(exclude: Option<u32>) -> Result<Shot, String> {
+/// Captures the display under the pointer, without any of our own windows.
+pub fn display_under_pointer() -> Result<Shot, String> {
     let (px, py) = pointer();
     let content = SCShareableContent::get()
         .map_err(|e| format!("listing displays failed: {e} (is Screen Recording allowed for this app?)"))?;
@@ -43,7 +43,9 @@ pub fn display_under_pointer(exclude: Option<u32>) -> Result<Shot, String> {
         .ok_or("no display found")?;
 
     let windows = content.windows();
-    let ours: Vec<&SCWindow> = windows.iter().filter(|w| Some(w.window_id()) == exclude).collect();
+    let pid = std::process::id() as i32;
+    let ours: Vec<&SCWindow> =
+        windows.iter().filter(|w| w.owning_application().is_some_and(|app| app.process_id() == pid)).collect();
     let filter = SCContentFilter::create()
         .with_display(display)
         .with_excluding_windows(&ours)

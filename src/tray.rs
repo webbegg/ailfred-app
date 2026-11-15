@@ -41,6 +41,7 @@ pub struct Tray {
     login: CheckMenuItem,
     permission: MenuItem,
     permission_shown: bool,
+    can_login: bool,
 }
 
 impl Tray {
@@ -57,7 +58,7 @@ impl Tray {
         let login = CheckMenuItem::with_id(Action::ToggleLogin.id(), "Launch at Login", can_login, login_enabled, None);
         let permission = MenuItem::with_id(
             Action::OpenPermissionSettings.id(),
-            "Screen Recording Is Off: Open Settings…",
+            "Screen Recording Is Off: Open Settings, Then Relaunch…",
             true,
             None,
         );
@@ -81,16 +82,27 @@ impl Tray {
             .map_err(|e| e.to_string())?;
 
         // muda calls this on the main thread from the menu's action; the host handles it next turn.
+        // muda keeps the first handler set in the process: build one Tray per process.
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
             if let Some(action) = Action::from_id(&event.id.0) {
                 host.update(move |host, tx| host.on_menu(action, tx));
             }
         }));
-        Ok(Tray { _icon: icon, menu, login, permission, permission_shown: false })
+        Ok(Tray { _icon: icon, menu, login, permission, permission_shown: false, can_login })
     }
 
     pub fn set_login(&self, enabled: bool) {
         self.login.set_checked(enabled);
+    }
+
+    /// The checkmark as the user left it (muda toggles it before sending the click).
+    pub fn login_checked(&self) -> bool {
+        self.login.is_checked()
+    }
+
+    /// Greys the item out while a change is in flight, so two clicks can't race.
+    pub fn set_login_busy(&self, busy: bool) {
+        self.login.set_enabled(!busy && self.can_login);
     }
 
     /// Shows the "Screen Recording is off" row at the top while capture isn't allowed.
@@ -106,7 +118,8 @@ impl Tray {
     }
 }
 
-/// A 36x36 px template icon (18 pt at 2x): four crop corners. Black with alpha; macOS tints it.
+/// A 36x36 px template icon: four crop corners. tray-icon treats pixels as points (scaling down
+/// only past 22 pt), so it shows at 22 pt. Black with alpha; macOS tints it.
 fn icon() -> Result<Icon, String> {
     const SIZE: usize = 36;
     const MARGIN: usize = 5;
