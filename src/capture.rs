@@ -56,6 +56,9 @@ pub fn display_under_pointer() -> Result<Shot, String> {
     let width = (frame.width * f64::from(scale)).round() as u32;
     let height = (frame.height * f64::from(scale)).round() as u32;
     let config = SCStreamConfiguration::new().with_width(width).with_height(height).with_shows_cursor(false);
+    // No `with_color_space_name`: in screencapturekit 1.5.4 the bridge hands ScreenCaptureKit a
+    // temporary string it doesn't retain, and the capture crashes (SIGSEGV in
+    // -[SCStreamConfiguration copyWithZone:]).
 
     let image = SCScreenshotManager::capture_image(&filter, &config).map_err(|e| format!("capture failed: {e}"))?;
     let (width, height) = (image.width() as u32, image.height() as u32);

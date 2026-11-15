@@ -10,6 +10,7 @@
 mod app_env;
 mod capture;
 mod login;
+mod output;
 mod shot;
 mod tray;
 

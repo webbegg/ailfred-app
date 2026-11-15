@@ -47,10 +47,25 @@ impl Overlay {
         self.selection = None;
     }
 
-    /// Hides the overlay. The capture stays until the next `freeze` replaces it: clearing it here
-    /// would draw one empty frame before the hide lands.
+    /// Frees the capture and hides the overlay, in one host update on the main thread. The overlay
+    /// takes all pending requests in one `sync`, which applies updates before visibility, and a
+    /// hidden overlay draws nothing: the cleared state is never shown. The clear is queued first
+    /// so a capture thread pushing `freeze` + `show` in between always wins: [clear, freeze] then
+    /// show the new shot, never a shown overlay with nothing to draw.
     fn dismiss(&mut self) {
-        self.host.update(|host, _| host.hide_overlay());
+        self.host.update(|host, _| {
+            if let Some(overlay) = &host.overlay {
+                overlay.update(|s, _| s.clear());
+            }
+            host.hide_overlay();
+        });
+    }
+
+    /// Drops the frozen capture (the export thread keeps its own reference while it runs).
+    fn clear(&mut self) {
+        self.frozen = None;
+        self.selection = None;
+        self.pixels.set(1, 1, vec![0; 4]);
     }
 }
 
@@ -128,7 +143,11 @@ fn export(frozen: &Frozen, sel: [f32; 4], host: &AppHandle<Host>) {
         }
         None => eprintln!("ailfred: image too large for the clipboard; saved to disk only"),
     }
-    save(&png, width, height);
+    let dir = std::path::PathBuf::from(crate::app_env::screenshots_dir());
+    match crate::output::save(&dir, &png) {
+        Ok(path) => eprintln!("ailfred saved {} ({width}x{height})", path.display()),
+        Err(e) => eprintln!("ailfred: {e}"),
+    }
 }
 
 /// Crops the selection (points) out of the frozen capture at native pixels and encodes a PNG.
@@ -161,17 +180,6 @@ fn encode_png(width: u32, height: u32, scale: f32, rgba: &[u8]) -> Result<Vec<u8
     writer.write_image_data(rgba).map_err(|e| e.to_string())?;
     writer.finish().map_err(|e| e.to_string())?;
     Ok(buf)
-}
-
-/// Writes the PNG to ~/Desktop. Called on the export thread.
-fn save(png: &[u8], width: u32, height: u32) {
-    let Some(home) = std::env::var_os("HOME") else { return eprintln!("ailfred: HOME is unset; not saved") };
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-    let path = std::path::Path::new(&home).join("Desktop").join(format!("ailfred-{stamp}.png"));
-    match std::fs::write(&path, png) {
-        Ok(()) => eprintln!("ailfred saved {} ({width}x{height})", path.display()),
-        Err(e) => eprintln!("ailfred: saving {} failed: {e}", path.display()),
-    }
 }
 
 pub fn on_key(s: &mut Overlay, event: &KeyEvent, _: &mut Tx) -> bool {
