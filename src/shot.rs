@@ -20,10 +20,27 @@ const INK_COLOR: Color = Color { r: INK[0] as f32, g: INK[1] as f32, b: INK[2] a
 const MIN_SIDE: f32 = 3.0;
 const TOOLBAR_H: f32 = 40.0;
 
+/// How a capture starts: drag an area, pick a window, or take the whole display.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    Area,
+    Window,
+    FullScreen,
+}
+
+/// Choosing the selection, before annotating.
+enum Pick {
+    /// Nothing yet.
+    Idle,
+    /// The area being dragged (x, y, width, height in points).
+    Dragging([f32; 4]),
+    /// Window mode: the window under the pointer, if any.
+    Window(Option<[f32; 4]>),
+}
+
 /// Where the overlay is in a capture.
 enum Stage {
-    /// Before and during the selecting drag (x, y, width, height in points).
-    Selecting(Option<[f32; 4]>),
+    Selecting(Pick),
     /// A selection being annotated.
     Editing(Edit),
 }
@@ -93,6 +110,10 @@ pub struct Overlay {
     /// Shared with the export thread, which crops it after the overlay hides.
     frozen: Option<Arc<Frozen>>,
     stage: Stage,
+    /// Other apps' windows on the frozen display, front to back (display-local points).
+    windows: Vec<[f32; 4]>,
+    /// The pointer's last known place (display-local points).
+    pointer: [f32; 2],
     /// Set by confirm/dismiss until the queued clear lands: input in between is ignored, so a held
     /// Enter (or Enter plus a Copy click) can't export twice.
     closing: bool,
@@ -100,15 +121,29 @@ pub struct Overlay {
 
 impl Overlay {
     pub fn new(host: AppHandle<Host>) -> Self {
-        Overlay { host, pixels: Pixels::new(), frozen: None, stage: Stage::Selecting(None), closing: false }
+        Overlay { host, pixels: Pixels::new(), frozen: None, stage: Stage::Selecting(Pick::Idle), windows: Vec::new(), pointer: [0.0, 0.0], closing: false }
     }
 
-    /// Shows a new capture; any previous selection and marks are dropped.
-    pub fn freeze(&mut self, shot: Shot) {
+    /// Shows a new capture in `mode`; any previous selection and marks are dropped.
+    pub fn freeze(&mut self, shot: Shot, mode: Mode) {
         self.pixels.set(shot.width, shot.height, shot.rgba.clone());
-        self.frozen = Some(Arc::new(Frozen { width: shot.width, height: shot.height, scale: shot.scale, rgba: shot.rgba }));
-        self.stage = Stage::Selecting(None);
+        let frozen = Frozen { width: shot.width, height: shot.height, scale: shot.scale, rgba: shot.rgba };
+        let full = [0.0, 0.0, frozen.width as f32 / frozen.scale, frozen.height as f32 / frozen.scale];
+        self.frozen = Some(Arc::new(frozen));
+        self.windows = shot.windows;
+        self.pointer = shot.pointer;
         self.closing = false;
+        self.stage = match mode {
+            Mode::Area => Stage::Selecting(Pick::Idle),
+            Mode::Window => Stage::Selecting(Pick::Window(window_at(&self.windows, self.pointer))),
+            Mode::FullScreen => Stage::Editing(Edit::new(full)),
+        };
+    }
+
+    /// The whole display as a selection.
+    fn full_display(&self) -> Option<[f32; 4]> {
+        let f = self.frozen.as_ref()?;
+        Some([0.0, 0.0, f.width as f32 / f.scale, f.height as f32 / f.scale])
     }
 
     /// Frees the capture and hides the overlay, in one host update on the main thread. The overlay
@@ -129,7 +164,8 @@ impl Overlay {
     /// Drops the frozen capture (the export thread keeps its own reference while it runs).
     fn clear(&mut self) {
         self.frozen = None;
-        self.stage = Stage::Selecting(None);
+        self.stage = Stage::Selecting(Pick::Idle);
+        self.windows = Vec::new();
         self.closing = false;
         self.pixels.set(1, 1, vec![0; 4]);
     }
@@ -199,15 +235,22 @@ pub fn view(s: &Overlay, _: &mut Cx<Overlay>) -> El {
     let Some(f) = &s.frozen else { return el() };
     // The overlay covers the display's frame, so its size in points is the capture over its scale.
     let (sw, sh) = (f.width as f32 / f.scale, f.height as f32 / f.scale);
-    let root = el().w_full().h_full().pixels(&s.pixels).cursor(Cursor::Crosshair).on_drag(on_drag);
+    let root = el().w_full().h_full().pixels(&s.pixels).cursor(Cursor::Crosshair).on_drag(on_drag).on_pointer_move_local(on_pointer_move);
+    let hint = |t: &str| {
+        el().padding(10.0).radius(8.0).fill(PANEL).pin(Some(24.0), Some(24.0), None, None).child(text(t.to_string()).color(EDGE))
+    };
     match &s.stage {
         // Before a drag the frozen screen shows as is, only the hint on top; the dim starts with the
         // drag (its first event creates the selection).
-        Stage::Selecting(None) => root.child(
-            el().padding(10.0).radius(8.0).fill(PANEL).pin(Some(24.0), Some(24.0), None, None)
-                .child(text("Drag to select · Esc to cancel").color(EDGE)),
-        ),
-        Stage::Selecting(Some(sel)) => {
+        Stage::Selecting(Pick::Idle) => root.child(hint("Drag to select · Space: window · F: full screen · Esc: cancel")),
+        Stage::Selecting(Pick::Window(None)) => root.child(hint("Click a window · Space: area · F: full screen · Esc: cancel")),
+        Stage::Selecting(Pick::Window(Some(win))) => {
+            let [x, y, w, h] = *win;
+            shades(root, *win, sw, sh)
+                .child(el().key("window").size(w, h).border(2.0, EDGE).fill(Color { a: 0.08, ..EDGE }).pin(Some(x), Some(y), None, None))
+                .child(hint("Click or Enter to capture this window · Space: area · F: full screen · Esc: cancel"))
+        }
+        Stage::Selecting(Pick::Dragging(sel)) => {
             let mut root = shades(root, *sel, sw, sh);
             let [x, y, w, h] = *sel;
             // The border and size only once there's an area: not a 0 × 0 box on press.
@@ -309,6 +352,7 @@ fn on_drag(s: &mut Overlay, drag: &mut Drag, tx: &mut Tx) {
         return;
     }
     match &mut s.stage {
+        Stage::Selecting(Pick::Window(_)) => window_click(s, drag),
         Stage::Selecting(_) => select_drag(s, drag),
         Stage::Editing(_) => edit_drag(s, drag),
     }
@@ -316,17 +360,47 @@ fn on_drag(s: &mut Overlay, drag: &mut Drag, tx: &mut Tx) {
 
 fn select_drag(s: &mut Overlay, drag: &Drag) {
     if drag.cancelled() {
-        s.stage = Stage::Selecting(None);
+        s.stage = Stage::Selecting(Pick::Idle);
         return;
     }
     let sel = marks::rect([drag.start_x, drag.start_y], [drag.x, drag.y]);
     s.stage = if drag.phase != Phase::Up {
-        Stage::Selecting(Some(sel))
+        Stage::Selecting(Pick::Dragging(sel))
     } else if sel[2] < MIN_SIDE || sel[3] < MIN_SIDE {
-        Stage::Selecting(None)
+        Stage::Selecting(Pick::Idle)
     } else {
         Stage::Editing(Edit::new(sel))
     };
+}
+
+/// The front-most window containing `p`.
+fn window_at(windows: &[[f32; 4]], p: [f32; 2]) -> Option<[f32; 4]> {
+    windows.iter().copied().find(|[x, y, w, h]| p[0] >= *x && p[0] < x + w && p[1] >= *y && p[1] < y + h)
+}
+
+/// Remembers the pointer; in window mode it highlights the window under it. Elsewhere nothing on
+/// screen changes, so the view isn't rebuilt (`live_only`).
+fn on_pointer_move(s: &mut Overlay, p: rune::PointerEvent, tx: &mut Tx) {
+    s.pointer = [p.window_x, p.window_y];
+    match &mut s.stage {
+        Stage::Selecting(Pick::Window(hover)) => {
+            let under = window_at(&s.windows, s.pointer);
+            if *hover != under {
+                *hover = under;
+            }
+        }
+        _ => tx.live_only(),
+    }
+}
+
+/// Window mode: a click (released over a window) selects it.
+fn window_click(s: &mut Overlay, drag: &Drag) {
+    if drag.phase != Phase::Up || drag.cancelled() {
+        return;
+    }
+    if let Some(win) = window_at(&s.windows, [drag.x, drag.y]) {
+        s.stage = Stage::Editing(Edit::new(win));
+    }
 }
 
 fn edit_drag(s: &mut Overlay, drag: &Drag) {
@@ -378,11 +452,27 @@ pub fn on_key(s: &mut Overlay, event: &KeyEvent, _: &mut Tx) -> bool {
         return true;
     }
     let Stage::Editing(edit) = &mut s.stage else {
-        if event.key == Key::Escape {
-            s.dismiss();
-            return true;
+        match &event.key {
+            Key::Escape => s.dismiss(),
+            // Space toggles window mode (not mid-drag); F takes the whole display.
+            Key::Text(t) if t == " " && !chord => match s.stage {
+                Stage::Selecting(Pick::Idle) => s.stage = Stage::Selecting(Pick::Window(window_at(&s.windows, s.pointer))),
+                Stage::Selecting(Pick::Window(_)) => s.stage = Stage::Selecting(Pick::Idle),
+                _ => {}
+            },
+            // Enter takes the highlighted window.
+            Key::Enter => match s.stage {
+                Stage::Selecting(Pick::Window(Some(win))) => s.stage = Stage::Editing(Edit::new(win)),
+                _ => return false,
+            },
+            Key::Text(t) if t.eq_ignore_ascii_case("f") && !chord => {
+                if let Some(full) = s.full_display() {
+                    s.stage = Stage::Editing(Edit::new(full));
+                }
+            }
+            _ => return false,
         }
-        return false;
+        return true;
     };
     // Typing a text mark takes the keys first.
     if let Some((_, typed)) = &mut edit.typing {
@@ -414,6 +504,16 @@ pub fn on_key(s: &mut Overlay, event: &KeyEvent, _: &mut Tx) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_at_picks_the_front_most() {
+        // Front to back: a small window on top of a big one.
+        let windows = [[100.0, 100.0, 200.0, 100.0], [0.0, 0.0, 800.0, 600.0]];
+        assert_eq!(window_at(&windows, [150.0, 150.0]), Some(windows[0]), "inside both: the front one");
+        assert_eq!(window_at(&windows, [500.0, 500.0]), Some(windows[1]));
+        assert_eq!(window_at(&windows, [900.0, 10.0]), None, "outside all");
+        assert_eq!(window_at(&windows, [300.0, 150.0]), Some(windows[1]), "right edge is exclusive");
+    }
 
     #[test]
     fn pixelate_region_crops_at_scale_and_averages() {

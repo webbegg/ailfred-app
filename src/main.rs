@@ -27,7 +27,7 @@ use rune::{
     AppHandle, OverlayOptions, WindowHandle, WindowOptions, OverlayPlacement, OverlaySpec, RunOptions, Tx, WindowSpec, el,
 };
 
-use crate::shot::Overlay;
+use crate::shot::{Mode, Overlay};
 use crate::settings::{CaptureShortcut, Settings};
 use crate::settings_ui::SettingsUi;
 use crate::tray::{Action, Tray};
@@ -104,7 +104,9 @@ impl Host {
         match action {
             // Our windows (the menu, the highlight) are excluded from the capture; the pause lets
             // the menu bar settle and the app under the menu redraw.
-            Action::Capture => start_capture(self, Duration::from_millis(200)),
+            Action::Capture => start_capture(self, Duration::from_millis(200), Mode::Area),
+            Action::CaptureWindow => start_capture(self, Duration::from_millis(200), Mode::Window),
+            Action::CaptureFullScreen => start_capture(self, Duration::from_millis(200), Mode::FullScreen),
             Action::OpenFolder => open(&app_env::screenshots_dir()),
             Action::OpenPermissionSettings => open("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"),
             Action::ToggleLogin => {
@@ -159,12 +161,12 @@ fn host_view(_: &Host, _: &mut Cx<Host>) -> El {
 }
 
 pub(crate) fn on_shortcut(host: &mut Host, _: &mut Tx) {
-    start_capture(host, Duration::ZERO);
+    start_capture(host, Duration::ZERO, Mode::Area);
 }
 
-/// Captures off the UI thread after `delay`, then shows the frozen display on the display it came
+/// Captures off the UI thread after `delay`, then shows the frozen display (starting in `mode`) on the display it came
 /// from. A missing Screen Recording permission shows in the menu.
-fn start_capture(host: &mut Host, delay: Duration) {
+fn start_capture(host: &mut Host, delay: Duration, mode: Mode) {
     let Some(overlay) = host.overlay.clone() else { return };
     if host.capturing.swap(true, Ordering::AcqRel) {
         return;
@@ -184,7 +186,7 @@ fn start_capture(host: &mut Host, delay: Duration) {
                 let display = shot.display_id;
                 // Queued in this order: state, placement, reveal. They may be applied over more than
                 // one event-loop turn; the update is queued before `show`, and show refreshes first.
-                overlay.update(move |s, _| s.freeze(shot));
+                overlay.update(move |s, _| s.freeze(shot, mode));
                 overlay.set_display(DisplayTarget::Native(NativeDisplayId::MacOS(display)));
                 overlay.show();
                 overlay.request_keys();

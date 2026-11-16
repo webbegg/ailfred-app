@@ -12,6 +12,8 @@ use crate::Host;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
     Capture,
+    CaptureWindow,
+    CaptureFullScreen,
     OpenFolder,
     ToggleLogin,
     OpenPermissionSettings,
@@ -20,8 +22,10 @@ pub enum Action {
 }
 
 impl Action {
-    const ALL: [(Action, &'static str); 6] = [
+    const ALL: [(Action, &'static str); 8] = [
         (Action::Capture, "capture"),
+        (Action::CaptureWindow, "capture-window"),
+        (Action::CaptureFullScreen, "capture-full-screen"),
         (Action::OpenFolder, "open-folder"),
         (Action::ToggleLogin, "login"),
         (Action::OpenPermissionSettings, "permission"),
@@ -53,6 +57,8 @@ impl Tray {
     pub fn new(host: AppHandle<Host>, can_login: bool, login_enabled: bool) -> Result<Tray, String> {
         // The chord is set by `show_capture_shortcut` once the saved one is registered.
         let capture = MenuItem::with_id(Action::Capture.id(), "Capture Area", true, None);
+        let window = MenuItem::with_id(Action::CaptureWindow.id(), "Capture Window", true, None);
+        let full = MenuItem::with_id(Action::CaptureFullScreen.id(), "Capture Full Screen", true, None);
         let folder = MenuItem::with_id(Action::OpenFolder.id(), "Open Screenshots Folder", true, None);
         let login = CheckMenuItem::with_id(Action::ToggleLogin.id(), "Launch at Login", can_login, login_enabled, None);
         let permission = MenuItem::with_id(
@@ -66,6 +72,9 @@ impl Tray {
         let menu = Menu::new();
         menu.append_items(&[
             &capture,
+            &window,
+            &full,
+            &PredefinedMenuItem::separator(),
             &folder,
             &PredefinedMenuItem::separator(),
             &login,

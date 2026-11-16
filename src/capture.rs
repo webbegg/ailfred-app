@@ -10,8 +10,11 @@ use std::time::Duration;
 use block2::RcBlock;
 use objc2::AllocAnyThread;
 use objc2::rc::Retained;
-use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
-use objc2_core_graphics::{CGBitmapContextCreate, CGColorSpace, CGContext, CGEvent, CGImage, CGImageAlphaInfo, kCGColorSpaceSRGB};
+use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
+use objc2_core_graphics::{
+    CGBitmapContextCreate, CGColorSpace, CGContext, CGEvent, CGImage, CGImageAlphaInfo, CGRectMakeWithDictionaryRepresentation,
+    CGWindowListCopyWindowInfo, CGWindowListOption, kCGColorSpaceSRGB, kCGWindowAlpha, kCGWindowBounds, kCGWindowLayer, kCGWindowOwnerPID,
+};
 use objc2_foundation::{NSArray, NSError};
 use objc2_screen_capture_kit::{SCContentFilter, SCScreenshotManager, SCShareableContent, SCStreamConfiguration, SCWindow};
 
@@ -27,6 +30,12 @@ pub struct Shot {
     /// Pixels per point.
     pub scale: f32,
     pub rgba: Vec<u8>,
+    /// Other apps' windows on this display, front to back, in display-local points (x, y, w, h),
+    /// clipped to the display: what window mode can pick.
+    pub windows: Vec<[f32; 4]>,
+    /// The pointer at capture time, in display-local points: window mode highlights the window
+    /// under it before the pointer moves.
+    pub pointer: [f32; 2],
 }
 
 /// A ScreenCaptureKit result carried from its completion block to the waiting thread.
@@ -116,6 +125,50 @@ fn rgba(image: &CGImage) -> Result<(Vec<u8>, u32, u32), String> {
     Ok((pixels, w as u32, h as u32))
 }
 
+/// Windows smaller than this (points, either side) aren't offered: status items, tooltips.
+const MIN_WINDOW: f64 = 40.0;
+
+/// Other apps' normal windows (layer 0) on `display` (global points), front to back, in
+/// display-local points and clipped to it. CGWindowList keeps the on-screen order;
+/// ScreenCaptureKit's list doesn't promise one.
+fn window_frames(display: CGRect) -> Vec<[f32; 4]> {
+    let option = CGWindowListOption::OptionOnScreenOnly | CGWindowListOption::ExcludeDesktopElements;
+    let Some(list) = CGWindowListCopyWindowInfo(option, 0) else { return Vec::new() };
+    // SAFETY: CGWindowListCopyWindowInfo returns an array of CFDictionary<CFString, CFType>.
+    let list: &CFArray<CFDictionary<CFString, CFType>> = unsafe { list.cast_unchecked() };
+    let pid = i64::from(std::process::id());
+    // SAFETY: CoreGraphics' static dictionary keys.
+    let (layer_key, owner_key, bounds_key, alpha_key) = unsafe { (kCGWindowLayer, kCGWindowOwnerPID, kCGWindowBounds, kCGWindowAlpha) };
+    let number = |info: &CFDictionary<CFString, CFType>, key: &CFString| {
+        info.get(key).and_then(|v| v.downcast::<CFNumber>().ok()).and_then(|n| n.as_i64())
+    };
+    let (dx, dy, dw, dh) = (display.origin.x, display.origin.y, display.size.width, display.size.height);
+    let mut out = Vec::new();
+    for info in list.iter() {
+        if number(&info, layer_key) != Some(0) || number(&info, owner_key) == Some(pid) {
+            continue;
+        }
+        // Invisible helper windows would sit on top of the one the user sees.
+        let alpha = info.get(alpha_key).and_then(|v| v.downcast::<CFNumber>().ok()).and_then(|n| n.as_f64());
+        if alpha.is_some_and(|a| a <= 0.0) {
+            continue;
+        }
+        let Some(bounds) = info.get(bounds_key).and_then(|v| v.downcast::<CFDictionary>().ok()) else { continue };
+        let mut r = CGRect::default();
+        // SAFETY: `bounds` is the window's bounds dictionary; `r` is a valid out-pointer.
+        if !unsafe { CGRectMakeWithDictionaryRepresentation(Some(&bounds), &mut r) } {
+            continue;
+        }
+        let (x0, y0) = (r.origin.x.max(dx), r.origin.y.max(dy));
+        let (x1, y1) = ((r.origin.x + r.size.width).min(dx + dw), (r.origin.y + r.size.height).min(dy + dh));
+        if x1 - x0 < MIN_WINDOW || y1 - y0 < MIN_WINDOW {
+            continue;
+        }
+        out.push([(x0 - dx) as f32, (y0 - dy) as f32, (x1 - x0) as f32, (y1 - y0) as f32]);
+    }
+    out
+}
+
 /// Captures the display under the pointer, without any of our own windows.
 pub fn display_under_pointer() -> Result<Shot, String> {
     // Waiting here on the main thread would freeze the UI (and could starve a handler on the main queue).
@@ -158,8 +211,16 @@ pub fn display_under_pointer() -> Result<Shot, String> {
         config.setColorSpaceName(kCGColorSpaceSRGB);
     }
 
+    // The window list from the same moment as the pixels, as near as we can: just before.
+    let windows = window_frames(frame);
     let image = screenshot(&filter, &config)?;
     let (rgba, width, height) = rgba(&image)?;
-    eprintln!("ailfred captured display {display_id} ({width}x{height} px, frame {}x{} pt, scale {scale})", frame.size.width, frame.size.height);
-    Ok(Shot { display_id, width, height, scale, rgba })
+    eprintln!(
+        "ailfred captured display {display_id} ({width}x{height} px, frame {}x{} pt, scale {scale}, {} windows)",
+        frame.size.width,
+        frame.size.height,
+        windows.len()
+    );
+    let pointer = [(px - frame.origin.x) as f32, (py - frame.origin.y) as f32];
+    Ok(Shot { display_id, width, height, scale, rgba, windows, pointer })
 }
