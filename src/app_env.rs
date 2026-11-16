@@ -5,9 +5,16 @@ use std::os::fd::AsRawFd;
 
 use objc2_core_graphics::{CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess};
 
+/// The bundle's name, `<BUNDLE_NAME>.app`; `scripts/install-mac` builds it with the same `NAME=`.
+pub const BUNDLE_NAME: &str = "Capibarapp";
+
 /// Whether this process runs from its installed bundle, `…/Capibarapp.app/Contents/MacOS/…`.
 pub fn in_bundle() -> bool {
-    std::env::current_exe().is_ok_and(|exe| exe.to_string_lossy().contains("/Capibarapp.app/Contents/MacOS/"))
+    std::env::current_exe().is_ok_and(|exe| is_bundle_exe(&exe.to_string_lossy()))
+}
+
+fn is_bundle_exe(path: &str) -> bool {
+    path.contains(&format!("/{BUNDLE_NAME}.app/Contents/MacOS/"))
 }
 
 /// Launched from Finder, `open` or at login, stderr goes nowhere: append it to
@@ -41,4 +48,23 @@ pub fn screen_recording_allowed() -> bool {
          Screen & System Audio Recording, then reopen it."
     );
     CGRequestScreenCaptureAccess()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recognises_only_the_installed_bundle() {
+        assert!(is_bundle_exe("/Users/x/Applications/Capibarapp.app/Contents/MacOS/capibarapp"));
+        assert!(!is_bundle_exe("/Users/x/project/target/release/capibarapp"));
+        assert!(!is_bundle_exe("/Users/x/Applications/Other.app/Contents/MacOS/capibarapp"));
+    }
+
+    #[test]
+    fn install_script_builds_the_same_bundle_name() {
+        let script = include_str!("../scripts/install-mac");
+        let name = format!("NAME={BUNDLE_NAME}");
+        assert!(script.lines().any(|l| l == name), "install-mac has no line {name}");
+    }
 }
