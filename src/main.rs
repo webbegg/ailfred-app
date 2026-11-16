@@ -9,7 +9,9 @@
 
 mod app_env;
 mod capture;
+mod export;
 mod login;
+mod marks;
 mod output;
 mod settings;
 mod settings_ui;

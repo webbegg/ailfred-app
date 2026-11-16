@@ -1,26 +1,87 @@
-//! The overlay: the frozen display, a drag to select an area, and the crop on release
-//! (PNG to the clipboard and to ~/Desktop).
+//! The overlay: the frozen display, a drag to select an area, then annotation with a toolbar.
+//! Enter or ⌘C copies and saves (export.rs); Esc cancels.
 
 use std::sync::Arc;
 
-use rune::{AppHandle, ClipboardContent, ClipboardImage, Color, Cursor, Cx, Drag, El, Key, KeyEvent, Phase, Pixels, Tx, el, text};
+use rune::{AppHandle, Color, Cursor, Cx, Drag, El, Key, KeyEvent, LineCap, Phase, Pixels, Shape, TextStyle, Tx, canvas, el, row, text};
 
 use crate::Host;
 use crate::capture::Shot;
+use crate::export::{self, Frozen, INK};
+use crate::marks::{self, Mark, Tool};
 
 const DIM: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.35 };
-/// The hint's own background: it sits on the undimmed screen, so it must read on white too.
-const HINT_BG: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.7 };
+/// The hint's and toolbar's own background: they sit on the screen, so they must read on white.
+const PANEL: Color = Color { r: 0.08, g: 0.08, b: 0.09, a: 0.92 };
 const EDGE: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.9 };
+const ACTIVE: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.18 };
+const INK_COLOR: Color = Color { r: INK[0] as f32, g: INK[1] as f32, b: INK[2] as f32, a: INK[3] as f32 };
 /// A drag smaller than this (points) is a click, not a selection.
 const MIN_SIDE: f32 = 3.0;
+const TOOLBAR_H: f32 = 40.0;
 
-/// The display as captured, kept for cropping at native resolution.
-struct Frozen {
-    width: u32,
-    height: u32,
-    scale: f32,
-    rgba: Vec<u8>,
+/// Where the overlay is in a capture.
+enum Stage {
+    /// Before and during the selecting drag (x, y, width, height in points).
+    Selecting(Option<[f32; 4]>),
+    /// A selection being annotated.
+    Editing(Edit),
+}
+
+struct Edit {
+    sel: [f32; 4],
+    tool: Tool,
+    marks: Vec<Mark>,
+    /// The pixelated preview of each mark (Some for Pixelate marks), index-aligned with `marks`.
+    previews: Vec<Option<Pixels>>,
+    /// The mark being dragged.
+    draft: Option<Mark>,
+    /// Text being typed: where, and what so far.
+    typing: Option<([f32; 2], String)>,
+}
+
+impl Edit {
+    fn new(sel: [f32; 4]) -> Edit {
+        Edit { sel, tool: Tool::Arrow, marks: Vec::new(), previews: Vec::new(), draft: None, typing: None }
+    }
+
+    fn push(&mut self, mark: Mark, preview: Option<Pixels>) {
+        self.marks.push(mark);
+        self.previews.push(preview);
+    }
+
+    /// Ends typing, keeping the text if there is any.
+    fn finish_typing(&mut self) {
+        if let Some((at, text)) = self.typing.take() {
+            let mark = Mark::Text { at, text };
+            if mark.is_meaningful() {
+                self.push(mark, None);
+            }
+        }
+    }
+
+    fn undo(&mut self) {
+        // Undo drops text being typed; an empty caret just goes, and the undo reaches the last mark.
+        if let Some((_, typed)) = self.typing.take() {
+            if !typed.trim().is_empty() {
+                return;
+            }
+        }
+        self.marks.pop();
+        self.previews.pop();
+    }
+
+    /// Everything to burn in, including text still being typed.
+    fn all_marks(&self) -> Vec<Mark> {
+        let mut all = self.marks.clone();
+        if let Some((at, text)) = &self.typing {
+            let mark = Mark::Text { at: *at, text: text.clone() };
+            if mark.is_meaningful() {
+                all.push(mark);
+            }
+        }
+        all
+    }
 }
 
 /// The overlay's state. An overlay drops `Tx::close_window`/`Tx::quit` from its handlers (it has
@@ -31,20 +92,23 @@ pub struct Overlay {
     pixels: Pixels,
     /// Shared with the export thread, which crops it after the overlay hides.
     frozen: Option<Arc<Frozen>>,
-    /// x, y, width, height in points.
-    selection: Option<[f32; 4]>,
+    stage: Stage,
+    /// Set by confirm/dismiss until the queued clear lands: input in between is ignored, so a held
+    /// Enter (or Enter plus a Copy click) can't export twice.
+    closing: bool,
 }
 
 impl Overlay {
     pub fn new(host: AppHandle<Host>) -> Self {
-        Overlay { host, pixels: Pixels::new(), frozen: None, selection: None }
+        Overlay { host, pixels: Pixels::new(), frozen: None, stage: Stage::Selecting(None), closing: false }
     }
 
-    /// Shows a new capture; any previous selection is dropped.
+    /// Shows a new capture; any previous selection and marks are dropped.
     pub fn freeze(&mut self, shot: Shot) {
         self.pixels.set(shot.width, shot.height, shot.rgba.clone());
         self.frozen = Some(Arc::new(Frozen { width: shot.width, height: shot.height, scale: shot.scale, rgba: shot.rgba }));
-        self.selection = None;
+        self.stage = Stage::Selecting(None);
+        self.closing = false;
     }
 
     /// Frees the capture and hides the overlay, in one host update on the main thread. The overlay
@@ -53,6 +117,7 @@ impl Overlay {
     /// so a capture thread pushing `freeze` + `show` in between always wins: [clear, freeze] then
     /// show the new shot, never a shown overlay with nothing to draw.
     fn dismiss(&mut self) {
+        self.closing = true;
         self.host.update(|host, _| {
             if let Some(overlay) = &host.overlay {
                 overlay.update(|s, _| s.clear());
@@ -64,8 +129,57 @@ impl Overlay {
     /// Drops the frozen capture (the export thread keeps its own reference while it runs).
     fn clear(&mut self) {
         self.frozen = None;
-        self.selection = None;
+        self.stage = Stage::Selecting(None);
+        self.closing = false;
         self.pixels.set(1, 1, vec![0; 4]);
+    }
+
+    /// Copies and saves the selection with its marks (off the UI thread), then closes.
+    fn confirm(&mut self) {
+        if self.closing {
+            return;
+        }
+        let Stage::Editing(edit) = &self.stage else { return };
+        if let Some(frozen) = self.frozen.clone() {
+            let (sel, all, host) = (edit.sel, edit.all_marks(), self.host.clone());
+            std::thread::spawn(move || export::export(frozen, sel, all, host));
+        }
+        self.dismiss();
+    }
+
+    fn set_tool(&mut self, tool: Tool) {
+        if let Stage::Editing(edit) = &mut self.stage {
+            edit.finish_typing();
+            edit.draft = None;
+            edit.tool = tool;
+        }
+    }
+
+    fn undo(&mut self) {
+        if let Stage::Editing(edit) = &mut self.stage {
+            edit.undo();
+        }
+    }
+
+    /// A pixelated preview of `rect` (points, relative to the selection), as the export makes it.
+    fn pixelated(&self, sel: [f32; 4], rect: [f32; 4]) -> Option<Pixels> {
+        let f = self.frozen.as_ref()?;
+        let px = |v: f32| (v * f.scale).round().max(0.0) as usize;
+        let (x0, y0) = (px(sel[0] + rect[0]).min(f.width as usize), px(sel[1] + rect[1]).min(f.height as usize));
+        let (x1, y1) = (px(sel[0] + rect[0] + rect[2]).min(f.width as usize), px(sel[1] + rect[1] + rect[3]).min(f.height as usize));
+        let (w, h) = (x1.checked_sub(x0)?, y1.checked_sub(y0)?);
+        if w == 0 || h == 0 {
+            return None;
+        }
+        let mut region = Vec::with_capacity(w * h * 4);
+        for y in y0..y1 {
+            let start = (y * f.width as usize + x0) * 4;
+            region.extend_from_slice(&f.rgba[start..start + w * 4]);
+        }
+        marks::pixelate(&mut region, w, h, [0, 0, w, h], px(marks::BLOCK).max(1));
+        let pixels = Pixels::new();
+        pixels.set(w as u32, h as u32, region);
+        Some(pixels)
     }
 }
 
@@ -73,123 +187,213 @@ pub fn view(s: &Overlay, _: &mut Cx<Overlay>) -> El {
     let Some(f) = &s.frozen else { return el() };
     // The overlay covers the display's frame, so its size in points is the capture over its scale.
     let (sw, sh) = (f.width as f32 / f.scale, f.height as f32 / f.scale);
-    let mut root = el().w_full().h_full().pixels(&s.pixels).cursor(Cursor::Crosshair).on_drag(on_drag);
-    // Before a drag the frozen screen shows as is, only the hint on top; the dim starts with the
-    // drag (its first event creates the selection).
-    let Some([x, y, w, h]) = s.selection else {
-        return root.child(
-            el().padding(10.0).radius(8.0).fill(HINT_BG).pin(Some(24.0), Some(24.0), None, None)
-                .child(text("Drag to capture · Esc to cancel").color(EDGE)),
-        );
-    };
-    // Dim everything outside the selection: above, below, left and right of it.
+    let root = el().w_full().h_full().pixels(&s.pixels).cursor(Cursor::Crosshair).on_drag(on_drag);
+    match &s.stage {
+        // Before a drag the frozen screen shows as is, only the hint on top; the dim starts with the
+        // drag (its first event creates the selection).
+        Stage::Selecting(None) => root.child(
+            el().padding(10.0).radius(8.0).fill(PANEL).pin(Some(24.0), Some(24.0), None, None)
+                .child(text("Drag to select · Esc to cancel").color(EDGE)),
+        ),
+        Stage::Selecting(Some(sel)) => {
+            let mut root = shades(root, *sel, sw, sh);
+            let [x, y, w, h] = *sel;
+            // The border and size only once there's an area: not a 0 × 0 box on press.
+            if w >= MIN_SIDE && h >= MIN_SIDE {
+                root = root
+                    .child(el().key("selection").size(w, h).border(1.0, EDGE).pin(Some(x), Some(y), None, None))
+                    .child(
+                        text(format!("{} × {}", (w * f.scale).round(), (h * f.scale).round()))
+                            .color(EDGE)
+                            .pin(Some(x), Some((y + h + 6.0).min(sh - 20.0)), None, None),
+                    );
+            }
+            root
+        }
+        Stage::Editing(edit) => {
+            let [x, y, w, h] = edit.sel;
+            shades(root, edit.sel, sw, sh)
+                .child(el().key("selection").size(w, h).border(1.0, EDGE).pin(Some(x), Some(y), None, None))
+                .child(marks_layer(edit).pin(Some(x), Some(y), None, None))
+                .child(toolbar(edit, sw, sh))
+        }
+    }
+}
+
+/// Dims everything outside `sel`: above, below, left and right of it.
+fn shades(root: El, [x, y, w, h]: [f32; 4], sw: f32, sh: f32) -> El {
     let shade = |px: f32, py: f32, pw: f32, ph: f32| el().size(pw.max(0.0), ph.max(0.0)).fill(DIM).pin(Some(px), Some(py), None, None);
-    root = root
-        .child(shade(0.0, 0.0, sw, y))
+    root.child(shade(0.0, 0.0, sw, y))
         .child(shade(0.0, y + h, sw, sh - y - h))
         .child(shade(0.0, y, x, h))
-        .child(shade(x + w, y, sw - x - w, h));
-    // The border and size only once there's an area: not a 0 × 0 box on press.
-    if w >= MIN_SIDE && h >= MIN_SIDE {
-        root = root
-            .child(el().key("selection").size(w, h).border(1.0, EDGE).pin(Some(x), Some(y), None, None))
-            .child(
-                text(format!("{} × {}", (w * f.scale).round(), (h * f.scale).round()))
-                    .color(EDGE)
-                    .pin(Some(x), Some((y + h + 6.0).min(sh - 20.0)), None, None),
-            );
+        .child(shade(x + w, y, sw - x - w, h))
+}
+
+/// The marks, in the selection's own points.
+fn marks_layer(edit: &Edit) -> El {
+    let [_, _, w, h] = edit.sel;
+    let mut layer = el().size(w, h);
+    let mut shape = Shape::new();
+    let draft = edit.draft.iter().map(|m| (m, None));
+    let all: Vec<(&Mark, Option<&Pixels>)> = edit.marks.iter().zip(edit.previews.iter().map(Option::as_ref)).chain(draft).collect();
+    // The export's order: pixelation first, then boxes and text as drawn, arrows on top.
+    let pixelate_first = all.iter().filter(|(m, _)| matches!(m, Mark::Pixelate(_))).chain(all.iter().filter(|(m, _)| !matches!(m, Mark::Pixelate(_))));
+    for (mark, preview) in pixelate_first {
+        match mark {
+            Mark::Pixelate([px, py, pw, ph]) => {
+                let area = el().size(*pw, *ph).pin(Some(*px), Some(*py), None, None);
+                layer = layer.child(match preview {
+                    Some(pixels) => area.pixels(pixels),
+                    None => area.border(1.0, EDGE), // still being dragged
+                });
+            }
+            Mark::Rect([rx, ry, rw, rh]) => {
+                layer = layer.child(el().size(*rw, *rh).border(marks::STROKE, INK_COLOR).pin(Some(*rx), Some(*ry), None, None));
+            }
+            Mark::Arrow { from, to } => {
+                let (base, head) = marks::arrow_geometry(*from, *to, marks::STROKE);
+                shape = shape.line(*from, base, marks::STROKE, LineCap::Round, INK_COLOR).fill(head.to_vec(), INK_COLOR);
+            }
+            Mark::Text { at, text: t } => layer = layer.child(text_mark(*at, t)),
+        }
     }
-    root
+    if let Some((at, t)) = &edit.typing {
+        layer = layer.child(text_mark(*at, &format!("{t}|")));
+    }
+    layer.child(canvas(shape).size(w, h).pin(Some(0.0), Some(0.0), None, None))
+}
+
+fn text_mark(at: [f32; 2], t: &str) -> El {
+    text(t.to_string()).font(TextStyle::new(marks::TEXT_SIZE, 700.0)).color(INK_COLOR).pin(Some(at[0]), Some(at[1]), None, None)
+}
+
+/// The tools and actions, under the selection (above it, or inside, when there's no room),
+/// right-aligned with it.
+fn toolbar(edit: &Edit, sw: f32, sh: f32) -> El {
+    let [x, y, w, h] = edit.sel;
+    let below = y + h + 8.0;
+    let top = if below + TOOLBAR_H <= sh { below } else if y - TOOLBAR_H - 8.0 >= 0.0 { y - TOOLBAR_H - 8.0 } else { y + 8.0 };
+    // Right-aligned with the selection, but never pushed off the left edge (the bar is ~560 pt).
+    let right = (sw - (x + w)).max(8.0).min((sw - 560.0).max(8.0));
+    let button = |label: String, active: bool| {
+        el().key(format!("tool-{label}")).px(10.0).py(6.0).radius(6.0).fill(if active { ACTIVE } else { Color { a: 0.0, ..PANEL } })
+            .child(text(label).color(EDGE))
+    };
+    let mut bar = row().key("toolbar").gap(2.0).padding(4.0).radius(10.0).fill(PANEL);
+    for tool in Tool::ALL {
+        let label = format!("{} {}", tool.label(), tool.key().to_uppercase());
+        bar = bar.child(button(label, edit.tool == tool).on_press(move |s: &mut Overlay| s.set_tool(tool)));
+    }
+    bar.child(button("Undo ⌘Z".into(), false).on_press(|s: &mut Overlay| s.undo()))
+        .child(button("Cancel Esc".into(), false).on_press(|s: &mut Overlay| s.dismiss()))
+        .child(button("Copy ↩".into(), true).on_press(|s: &mut Overlay| s.confirm()))
+        .pin(None, Some(top), Some(right), None)
 }
 
 fn on_drag(s: &mut Overlay, drag: &mut Drag, tx: &mut Tx) {
     tx.instant();
+    if s.closing {
+        return;
+    }
+    match &mut s.stage {
+        Stage::Selecting(_) => select_drag(s, drag),
+        Stage::Editing(_) => edit_drag(s, drag),
+    }
+}
+
+fn select_drag(s: &mut Overlay, drag: &Drag) {
     if drag.cancelled() {
-        s.selection = None;
+        s.stage = Stage::Selecting(None);
         return;
     }
-    let sel = [drag.x.min(drag.start_x), drag.y.min(drag.start_y), (drag.x - drag.start_x).abs(), (drag.y - drag.start_y).abs()];
-    s.selection = Some(sel);
-    if drag.phase != Phase::Up {
-        return;
-    }
-    if sel[2] < MIN_SIDE || sel[3] < MIN_SIDE {
-        s.selection = None;
-        return;
-    }
-    if let Some(frozen) = s.frozen.clone() {
-        let host = s.host.clone();
-        // Cropping and encoding a large area takes long enough to stall a frame: do it off the UI thread.
-        std::thread::spawn(move || export(&frozen, sel, &host));
-    }
-    s.dismiss();
-}
-
-/// Crops, encodes, copies to the clipboard (through a queued overlay update, which flushes the
-/// clipboard even while hidden) and saves to ~/Desktop.
-fn export(frozen: &Frozen, sel: [f32; 4], host: &AppHandle<Host>) {
-    let (png, width, height) = match crop_png(frozen, sel) {
-        Ok(out) => out,
-        Err(e) => return eprintln!("ailfred: crop failed: {e}"),
+    let sel = marks::rect([drag.start_x, drag.start_y], [drag.x, drag.y]);
+    s.stage = if drag.phase != Phase::Up {
+        Stage::Selecting(Some(sel))
+    } else if sel[2] < MIN_SIDE || sel[3] < MIN_SIDE {
+        Stage::Selecting(None)
+    } else {
+        Stage::Editing(Edit::new(sel))
     };
-    match ClipboardImage::from_png(png.clone()) {
-        Some(image) => {
-            let content = ClipboardContent::new("").with_image(image);
-            host.update(move |host, _| {
-                if let Some(overlay) = &host.overlay {
-                    overlay.update(move |_, tx| tx.copy_rich(content));
-                }
-            });
+}
+
+fn edit_drag(s: &mut Overlay, drag: &Drag) {
+    let Stage::Editing(edit) = &mut s.stage else { return };
+    let [sx, sy, sw, sh] = edit.sel;
+    let local = |x: f32, y: f32| marks::clamp([x - sx, y - sy], sw, sh);
+    // Only gestures that start inside the selection draw; a press outside just ends typing.
+    let inside = |x: f32, y: f32| x >= sx && x <= sx + sw && y >= sy && y <= sy + sh;
+    if !inside(drag.start_x, drag.start_y) {
+        if drag.phase == Phase::Down {
+            edit.finish_typing();
         }
-        None => eprintln!("ailfred: image too large for the clipboard; saved to disk only"),
+        edit.draft = None;
+        return;
     }
-    let dir = std::path::PathBuf::from(crate::app_env::screenshots_dir());
-    match crate::output::save(&dir, &png) {
-        Ok(path) => eprintln!("ailfred saved {} ({width}x{height})", path.display()),
-        Err(e) => eprintln!("ailfred: {e}"),
+    if edit.tool == Tool::Text {
+        if drag.phase == Phase::Down {
+            edit.finish_typing();
+            edit.typing = Some((local(drag.x, drag.y), String::new()));
+        }
+        return;
     }
-}
-
-/// Crops the selection (points) out of the frozen capture at native pixels and encodes a PNG.
-fn crop_png(f: &Frozen, [x, y, w, h]: [f32; 4]) -> Result<(Vec<u8>, u32, u32), String> {
-    let px = |v: f32, max: u32| ((v * f.scale).round().max(0.0) as u32).min(max);
-    let (x0, y0, x1, y1) = (px(x, f.width), px(y, f.height), px(x + w, f.width), px(y + h, f.height));
-    let (cw, ch) = (x1.saturating_sub(x0), y1.saturating_sub(y0));
-    if cw == 0 || ch == 0 {
-        return Err("empty selection".into());
+    if drag.cancelled() {
+        edit.draft = None;
+        return;
     }
-    let row = cw as usize * 4;
-    let mut out = Vec::with_capacity(row * ch as usize);
-    for r in y0..y1 {
-        let start = (r as usize * f.width as usize + x0 as usize) * 4;
-        out.extend_from_slice(&f.rgba[start..start + row]);
+    let mark = Mark::dragged(edit.tool, local(drag.start_x, drag.start_y), local(drag.x, drag.y));
+    if drag.phase != Phase::Up {
+        edit.draft = mark;
+        return;
     }
-    Ok((encode_png(cw, ch, f.scale, &out)?, cw, ch))
-}
-
-/// RGBA to PNG, tagged with 72 DPI per point so a Retina capture pastes at its point size.
-fn encode_png(width: u32, height: u32, scale: f32, rgba: &[u8]) -> Result<Vec<u8>, String> {
-    let mut buf = Vec::new();
-    let mut encoder = png::Encoder::new(&mut buf, width, height);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    encoder.set_compression(png::Compression::Fast);
-    let ppm = (72.0 * f64::from(scale) / 0.0254).round() as u32;
-    encoder.set_pixel_dims(Some(png::PixelDimensions { xppu: ppm, yppu: ppm, unit: png::Unit::Meter }));
-    let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
-    writer.write_image_data(rgba).map_err(|e| e.to_string())?;
-    writer.finish().map_err(|e| e.to_string())?;
-    Ok(buf)
+    edit.draft = None;
+    let Some(mark) = mark.filter(Mark::is_meaningful) else { return };
+    let (sel, preview_rect) = (edit.sel, if let Mark::Pixelate(r) = &mark { Some(*r) } else { None });
+    let preview = preview_rect.and_then(|r| s.pixelated(sel, r));
+    if let Stage::Editing(edit) = &mut s.stage {
+        edit.push(mark, preview);
+    }
 }
 
 pub fn on_key(s: &mut Overlay, event: &KeyEvent, _: &mut Tx) -> bool {
-    if event.key == Key::Escape {
-        s.dismiss();
+    if s.closing {
         return true;
     }
+    // A chord with ⌘ or ⌃ is never typed text or a tool key.
+    let chord = event.mods.cmd || event.mods.ctrl;
     if event.is_command('q') {
         s.host.quit();
         return true;
     }
-    false
+    let Stage::Editing(edit) = &mut s.stage else {
+        if event.key == Key::Escape {
+            s.dismiss();
+            return true;
+        }
+        return false;
+    };
+    // Typing a text mark takes the keys first.
+    if let Some((_, typed)) = &mut edit.typing {
+        match &event.key {
+            Key::Text(t) if !chord => typed.push_str(t),
+            Key::Backspace => {
+                typed.pop();
+            }
+            Key::Enter | Key::Escape => edit.finish_typing(),
+            _ if event.is_command('z') => edit.undo(),
+            _ => return false,
+        }
+        return true;
+    }
+    match &event.key {
+        Key::Escape => s.dismiss(),
+        Key::Enter => s.confirm(),
+        Key::Text(t) if !chord => match Tool::from_key(t) {
+            Some(tool) => s.set_tool(tool),
+            None => return false,
+        },
+        _ if event.is_command('c') => s.confirm(),
+        _ if event.is_command('z') => s.undo(),
+        _ => return false,
+    }
+    true
 }
