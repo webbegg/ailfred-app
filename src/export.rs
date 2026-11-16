@@ -180,7 +180,7 @@ fn draw_text(context: &CGContext, at: [f32; 2], text: &str, ink: &CGColor) -> Re
     Ok(())
 }
 
-/// RGBA to PNG, tagged with 72 DPI per point so a Retina capture pastes at its point size.
+/// RGBA to PNG, tagged sRGB and with 72 DPI per point so a Retina capture pastes at its point size.
 fn encode_png(width: u32, height: u32, scale: f32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
     let mut encoder = png::Encoder::new(&mut buf, width, height);
@@ -188,6 +188,8 @@ fn encode_png(width: u32, height: u32, scale: f32, rgba: &[u8]) -> Result<Vec<u8
     encoder.set_depth(png::BitDepth::Eight);
     encoder.set_compression(png::Compression::Fast);
     let ppm = (72.0 * f64::from(scale) / 0.0254).round() as u32;
+    // Captured in sRGB (capture.rs); say so, so viewers don't guess.
+    encoder.set_source_srgb(png::SrgbRenderingIntent::Perceptual);
     encoder.set_pixel_dims(Some(png::PixelDimensions { xppu: ppm, yppu: ppm, unit: png::Unit::Meter }));
     let mut writer = encoder.write_header().map_err(|e| e.to_string())?;
     writer.write_image_data(rgba).map_err(|e| e.to_string())?;
