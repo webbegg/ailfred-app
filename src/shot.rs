@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use rune::{AppHandle, Color, Cursor, Cx, Drag, El, Key, KeyEvent, LineCap, Phase, Pixels, Shape, TextStyle, Tx, canvas, el, row, text};
+use rune::{AppHandle, Color, Cursor, Cx, Drag, El, Key, KeyEvent, LineCap, Phase, Pixels, Shape, TextStyle, Tx, canvas, col, el, row, text};
 
 use crate::Host;
 use crate::capture::Shot;
@@ -24,6 +24,9 @@ fn color_of(ink: Ink) -> Color {
 /// A drag smaller than this (points) is a click, not a selection.
 const MIN_SIDE: f32 = 3.0;
 const TOOLBAR_H: f32 = 40.0;
+/// The colour palette's height and its gap to the toolbar.
+const PALETTE_H: f32 = 36.0;
+const PALETTE_GAP: f32 = 6.0;
 
 /// How a capture starts: drag an area, pick a window, or take the whole display.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,6 +58,8 @@ struct Edit {
     tool: Tool,
     /// Colour and size for the next marks (and text being typed).
     style: Style,
+    /// The colour palette is open.
+    picking: bool,
     marks: Vec<Mark>,
     /// The pixelated preview of each mark (Some for Pixelate marks), index-aligned with `marks`.
     previews: Vec<Option<Pixels>>,
@@ -66,7 +71,7 @@ struct Edit {
 
 impl Edit {
     fn new(sel: [f32; 4]) -> Edit {
-        Edit { sel, tool: Tool::Arrow, style: Style::default(), marks: Vec::new(), previews: Vec::new(), draft: None, typing: None }
+        Edit { sel, tool: Tool::Arrow, style: Style::default(), picking: false, marks: Vec::new(), previews: Vec::new(), draft: None, typing: None }
     }
 
     fn push(&mut self, mark: Mark, preview: Option<Pixels>) {
@@ -198,9 +203,17 @@ impl Overlay {
         }
     }
 
+    /// Picks a colour from the palette, which then closes.
     fn set_ink(&mut self, ink: Ink) {
         if let Stage::Editing(edit) = &mut self.stage {
             edit.style.ink = ink;
+            edit.picking = false;
+        }
+    }
+
+    fn toggle_palette(&mut self) {
+        if let Stage::Editing(edit) = &mut self.stage {
+            edit.picking = !edit.picking;
         }
     }
 
@@ -353,7 +366,7 @@ fn toolbar(edit: &Edit, sw: f32, sh: f32, laid_out: Option<f32>) -> El {
     let top = if below + TOOLBAR_H <= sh { below } else if y - TOOLBAR_H - 8.0 >= 0.0 { y - TOOLBAR_H - 8.0 } else { y + 8.0 };
     // Right-aligned with the selection, but never pushed off the left edge: the bar's real width
     // once laid out, a generous estimate before.
-    let bar_w = laid_out.unwrap_or(860.0);
+    let bar_w = laid_out.unwrap_or(720.0);
     let right = (sw - (x + w)).max(8.0).min((sw - bar_w - 8.0).max(8.0));
     let button = |label: String, active: bool| {
         el().key(format!("tool-{label}")).px(10.0).py(6.0).radius(6.0).fill(if active { ACTIVE } else { Color { a: 0.0, ..PANEL } })
@@ -364,19 +377,36 @@ fn toolbar(edit: &Edit, sw: f32, sh: f32, laid_out: Option<f32>) -> El {
         let label = format!("{} {}", tool.label(), tool.key().to_uppercase());
         bar = bar.child(button(label, edit.tool == tool).on_press(move |s: &mut Overlay| s.set_tool(tool)));
     }
-    // Colours, then the size (W cycles it).
-    for ink in Ink::ALL {
-        let active = edit.style.ink == ink;
-        // A grey ring shows white and black alike; the chosen one is highlighted like a tool.
-        let swatch = el().size(16.0, 16.0).radius(8.0).fill(color_of(ink)).border(1.5, Color { r: 0.5, g: 0.5, b: 0.5, a: 1.0 });
-        let cell = el().key(format!("ink-{ink:?}")).padding(6.0).radius(6.0).fill(if active { ACTIVE } else { Color { a: 0.0, ..PANEL } });
-        bar = bar.child(cell.child(swatch).on_press(move |s: &mut Overlay| s.set_ink(ink)));
-    }
+    // One circle in the current colour; clicking it opens the palette. Then the size (W cycles it).
+    let ring = Color { r: 0.5, g: 0.5, b: 0.5, a: 1.0 };
+    let swatch = |ink: Ink| el().size(16.0, 16.0).radius(8.0).fill(color_of(ink)).border(1.5, ring);
+    let current = el().key("ink").padding(6.0).radius(6.0).fill(if edit.picking { ACTIVE } else { Color { a: 0.0, ..PANEL } });
+    bar = bar.child(current.child(swatch(edit.style.ink)).on_press(|s: &mut Overlay| s.toggle_palette()));
     bar = bar.child(button(format!("Size {} W", edit.style.size.label()), false).on_press(|s: &mut Overlay| s.next_size()));
-    bar.child(button("Undo ⌘Z".into(), false).on_press(|s: &mut Overlay| s.undo()))
+    let bar = bar.child(button("Undo ⌘Z".into(), false).on_press(|s: &mut Overlay| s.undo()))
         .child(button("Cancel Esc".into(), false).on_press(|s: &mut Overlay| s.dismiss()))
-        .child(button("Copy ↩".into(), true).on_press(|s: &mut Overlay| s.confirm()))
-        .pin(None, Some(top), Some(right), None)
+        .child(button("Copy ↩".into(), true).on_press(|s: &mut Overlay| s.confirm()));
+    if !edit.picking {
+        return bar.pin(None, Some(top), Some(right), None);
+    }
+    // The palette sits on the side of the toolbar away from the selection; above it, the column
+    // starts higher so the toolbar itself doesn't move.
+    let mut palette = row().key("palette").gap(2.0).padding(4.0).radius(10.0).fill(PANEL);
+    for ink in Ink::ALL {
+        let cell = el().key(format!("ink-{ink:?}")).padding(6.0).radius(6.0).fill(if edit.style.ink == ink { ACTIVE } else { Color { a: 0.0, ..PANEL } });
+        palette = palette.child(cell.child(swatch(ink)).on_press(move |s: &mut Overlay| s.set_ink(ink)));
+    }
+    // Away from the selection when it fits there, else the other side; the toolbar never moves.
+    let extra = PALETTE_H + PALETTE_GAP;
+    let (fits_above, fits_below) = (top - extra >= 0.0, top + TOOLBAR_H + extra <= sh);
+    let palette_above = if top < y { fits_above || !fits_below } else { !fits_below && fits_above };
+    // items_end: the palette keeps its own width, right-aligned with the toolbar.
+    let column = col().gap(PALETTE_GAP).items_end();
+    if palette_above {
+        column.child(palette).child(bar).pin(None, Some(top - extra), Some(right), None)
+    } else {
+        column.child(bar).child(palette).pin(None, Some(top), Some(right), None)
+    }
 }
 
 fn on_drag(s: &mut Overlay, drag: &mut Drag, tx: &mut Tx) {
@@ -442,6 +472,11 @@ fn edit_drag(s: &mut Overlay, drag: &Drag) {
     let local = |x: f32, y: f32| marks::clamp([x - sx, y - sy], sw, sh);
     // Only gestures that start inside the selection draw; a press outside just ends typing.
     let inside = |x: f32, y: f32| x >= sx && x <= sx + sw && y >= sy && y <= sy + sh;
+    // Drawing (a press inside the selection) closes the palette; presses elsewhere, such as on
+    // the toolbar's own colour button, leave it to that button.
+    if drag.phase == Phase::Down && inside(drag.start_x, drag.start_y) {
+        edit.picking = false;
+    }
     if !inside(drag.start_x, drag.start_y) {
         if drag.phase == Phase::Down {
             edit.finish_typing();
@@ -521,6 +556,8 @@ pub fn on_key(s: &mut Overlay, event: &KeyEvent, _: &mut Tx) -> bool {
         return true;
     }
     match &event.key {
+        // Esc closes the palette first, then cancels.
+        Key::Escape if edit.picking => edit.picking = false,
         Key::Escape => s.dismiss(),
         Key::Enter => s.confirm(),
         Key::Text(t) if !chord && t.eq_ignore_ascii_case("w") => s.next_size(),
