@@ -59,6 +59,8 @@ mod tests {
         assert!(is_bundle_exe("/Users/x/Applications/Capibarapp.app/Contents/MacOS/capibarapp"));
         assert!(!is_bundle_exe("/Users/x/project/target/release/capibarapp"));
         assert!(!is_bundle_exe("/Users/x/Applications/Other.app/Contents/MacOS/capibarapp"));
+        assert!(!is_bundle_exe("/Users/x/Applications/XCapibarapp.app/Contents/MacOS/capibarapp"));
+        assert!(!is_bundle_exe("/Users/x/Applications/Capibarapp.app/Contents/Resources/capibarapp"));
     }
 
     #[test]
