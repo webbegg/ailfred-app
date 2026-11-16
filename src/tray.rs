@@ -68,7 +68,7 @@ impl Tray {
             None,
         );
         let settings = MenuItem::with_id(Action::Settings.id(), "Settings…", true, Some(Accelerator::new(Modifiers::META, Code::Comma)));
-        let quit = MenuItem::with_id(Action::Quit.id(), "Quit ailfred", true, Some(Accelerator::new(Modifiers::META, Code::KeyQ)));
+        let quit = MenuItem::with_id(Action::Quit.id(), "Quit Capibarapp", true, Some(Accelerator::new(Modifiers::META, Code::KeyQ)));
         let menu = Menu::new();
         menu.append_items(&[
             &capture,
@@ -86,7 +86,7 @@ impl Tray {
 
         let icon = TrayIconBuilder::new()
             .with_icon_templated(icon()?)
-            .with_tooltip("ailfred")
+            .with_tooltip("Capibarapp")
             .with_menu(Box::new(menu.clone()))
             .build()
             .map_err(|e| e.to_string())?;
@@ -106,7 +106,7 @@ impl Tray {
     pub fn show_capture_shortcut(&self, shortcut: Option<&rune::Shortcut>) {
         let accelerator = shortcut.and_then(|s| s.to_string().parse::<Accelerator>().ok());
         if let Err(e) = self.capture.set_accelerator(accelerator) {
-            eprintln!("ailfred: showing the shortcut in the menu failed: {e}");
+            eprintln!("Capibarapp: showing the shortcut in the menu failed: {e}");
         }
     }
 
@@ -132,7 +132,7 @@ impl Tray {
         let done = if allowed { self.menu.remove(&self.permission) } else { self.menu.insert(&self.permission, 0) };
         match done {
             Ok(()) => self.permission_shown = !allowed,
-            Err(e) => eprintln!("ailfred: updating the menu failed: {e}"),
+            Err(e) => eprintln!("Capibarapp: updating the menu failed: {e}"),
         }
     }
 }

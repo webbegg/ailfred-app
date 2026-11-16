@@ -99,25 +99,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ailfred-app"
-version = "0.1.0"
-dependencies = [
- "block2 0.6.2",
- "libc",
- "objc2 0.6.5",
- "objc2-core-foundation",
- "objc2-core-graphics",
- "objc2-core-text",
- "objc2-foundation 0.3.2",
- "objc2-screen-capture-kit",
- "objc2-service-management",
- "png 0.18.1",
- "rune",
- "rune-kit",
- "tray-icon",
-]
-
-[[package]]
 name = "allocator-api2"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -572,6 +553,25 @@ dependencies = [
  "rustix 0.38.44",
  "wayland-backend",
  "wayland-client",
+]
+
+[[package]]
+name = "capibarapp"
+version = "0.1.0"
+dependencies = [
+ "block2 0.6.2",
+ "libc",
+ "objc2 0.6.5",
+ "objc2-core-foundation",
+ "objc2-core-graphics",
+ "objc2-core-text",
+ "objc2-foundation 0.3.2",
+ "objc2-screen-capture-kit",
+ "objc2-service-management",
+ "png 0.18.1",
+ "rune",
+ "rune-kit",
+ "tray-icon",
 ]
 
 [[package]]

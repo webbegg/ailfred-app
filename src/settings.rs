@@ -1,5 +1,5 @@
 //! The user's settings (the capture shortcut and the save folder), stored with Rune's prefs in
-//! `~/Library/Application Support/dev.ailfred/prefs.json`, and the capture shortcut's registration.
+//! `~/Library/Application Support/com.capibarapp/prefs.json`, and the capture shortcut's registration.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
@@ -9,7 +9,7 @@ use rune::{AppHandle, Shortcut, ShortcutError, ShortcutId};
 
 use crate::Host;
 
-pub const APP_ID: &str = "dev.ailfred";
+pub const APP_ID: &str = "com.capibarapp";
 pub const DEFAULT_SHORTCUT: &str = "cmd+shift+space";
 const SHORTCUT: &str = "shortcut";
 const FOLDER: &str = "folder";
@@ -46,7 +46,7 @@ impl Settings {
     pub fn set_shortcut(&mut self, shortcut: Option<&Shortcut>) {
         let value: Option<String> = shortcut.map(|s| s.to_string());
         if let Err(e) = self.prefs.set(SHORTCUT, &value) {
-            eprintln!("ailfred: saving the shortcut failed: {e}");
+            eprintln!("Capibarapp: saving the shortcut failed: {e}");
         }
     }
 
@@ -57,7 +57,7 @@ impl Settings {
 
     pub fn set_folder(&mut self, folder: &Path) {
         if let Err(e) = self.prefs.set(FOLDER, &folder.to_string_lossy()) {
-            eprintln!("ailfred: saving the folder failed: {e}");
+            eprintln!("Capibarapp: saving the folder failed: {e}");
         }
         *FOLDER_NOW.write().unwrap_or_else(|e| e.into_inner()) = Some(folder.to_path_buf());
     }
@@ -89,7 +89,7 @@ impl CaptureShortcut {
         if let Some(old) = *current {
             if let Err(e) = host.unregister_shortcut(old) {
                 // Keep tracking the old one rather than lose its id; release the new one instead.
-                eprintln!("ailfred: releasing the old shortcut failed: {e}");
+                eprintln!("Capibarapp: releasing the old shortcut failed: {e}");
                 if let Some(new) = new {
                     let _ = host.unregister_shortcut(new);
                 }
@@ -120,7 +120,7 @@ mod tests {
     fn folder_falls_back_when_missing() {
         let mut s = Settings::with(Prefs::memory());
         assert_eq!(s.folder(), default_folder());
-        s.set_folder(Path::new("/no/such/folder/ailfred"));
+        s.set_folder(Path::new("/no/such/folder/capibarapp"));
         assert_eq!(s.folder(), default_folder(), "a folder that's gone falls back");
         let tmp = std::env::temp_dir();
         s.set_folder(&tmp);

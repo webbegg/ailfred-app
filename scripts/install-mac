@@ -1,26 +1,26 @@
 #!/usr/bin/env bash
-# Builds ailfred in release mode, assembles and signs ailfred.app, and installs it as
-# ~/Applications/ailfred.app with Rune's installer (atomic swap, launch, rollback).
+# Builds Capibarapp in release mode, assembles and signs Capibarapp.app, and installs it as
+# ~/Applications/Capibarapp.app with Rune's installer (atomic swap, launch, rollback).
 #
 # Signing: a stable identity keeps the Screen Recording grant across reinstalls (macOS ties it
 # to the bundle id and certificate; ad hoc ties it to each build's hash). The local self-signed
-# "ailfred Local Signing" certificate is used when present; MAC_APP_SIGN=<identity> overrides;
+# "Capibarapp Local Signing" certificate is used when present; MAC_APP_SIGN=<identity> overrides;
 # MAC_APP_SIGN=- signs ad hoc on purpose.
 #
-# --no-rune-ready: Rune writes its ready receipt from a window's on_ready, and ailfred has no
+# --no-rune-ready: Rune writes its ready receipt from a window's on_ready, and Capibarapp has no
 # window (only an overlay), so the installer checks that macOS reports the app as launched.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-NAME=ailfred
-ID=dev.ailfred
-EXE=ailfred-app
+NAME=Capibarapp
+ID=com.capibarapp
+EXE=capibarapp
 VERSION=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
 TARGET=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
 BUILD=$(git rev-list --count HEAD 2>/dev/null || echo 1)
 
-if [ -z "${MAC_APP_SIGN:-}" ] && security find-certificate -c "ailfred Local Signing" >/dev/null 2>&1; then
-  MAC_APP_SIGN="ailfred Local Signing"
+if [ -z "${MAC_APP_SIGN:-}" ] && security find-certificate -c "Capibarapp Local Signing" >/dev/null 2>&1; then
+  MAC_APP_SIGN="Capibarapp Local Signing"
 fi
 IDENTITY=${MAC_APP_SIGN:--}
 [ "$IDENTITY" = "-" ] && echo "install-mac: signing ad hoc; Screen Recording will be asked again after each reinstall" >&2

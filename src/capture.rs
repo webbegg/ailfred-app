@@ -216,7 +216,7 @@ pub fn display_under_pointer() -> Result<Shot, String> {
     let image = screenshot(&filter, &config)?;
     let (rgba, width, height) = rgba(&image)?;
     eprintln!(
-        "ailfred captured display {display_id} ({width}x{height} px, frame {}x{} pt, scale {scale}, {} windows)",
+        "Capibarapp captured display {display_id} ({width}x{height} px, frame {}x{} pt, scale {scale}, {} windows)",
         frame.size.width,
         frame.size.height,
         windows.len()
