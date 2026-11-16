@@ -162,25 +162,37 @@ impl Overlay {
     }
 
     /// A pixelated preview of `rect` (points, relative to the selection), as the export makes it.
+    /// Returned empty at once and filled from a background thread (`Pixels::set` works from any
+    /// thread), so a large area doesn't stall the UI.
     fn pixelated(&self, sel: [f32; 4], rect: [f32; 4]) -> Option<Pixels> {
-        let f = self.frozen.as_ref()?;
-        let px = |v: f32| (v * f.scale).round().max(0.0) as usize;
-        let (x0, y0) = (px(sel[0] + rect[0]).min(f.width as usize), px(sel[1] + rect[1]).min(f.height as usize));
-        let (x1, y1) = (px(sel[0] + rect[0] + rect[2]).min(f.width as usize), px(sel[1] + rect[1] + rect[3]).min(f.height as usize));
-        let (w, h) = (x1.checked_sub(x0)?, y1.checked_sub(y0)?);
-        if w == 0 || h == 0 {
-            return None;
-        }
-        let mut region = Vec::with_capacity(w * h * 4);
-        for y in y0..y1 {
-            let start = (y * f.width as usize + x0) * 4;
-            region.extend_from_slice(&f.rgba[start..start + w * 4]);
-        }
-        marks::pixelate(&mut region, w, h, [0, 0, w, h], px(marks::BLOCK).max(1));
+        let frozen = self.frozen.clone()?;
         let pixels = Pixels::new();
-        pixels.set(w as u32, h as u32, region);
+        let target = pixels.clone();
+        std::thread::spawn(move || {
+            if let Some((w, h, region)) = pixelate_region(&frozen, sel, rect) {
+                target.set(w, h, region);
+            }
+        });
         Some(pixels)
     }
+}
+
+/// The pixels under `rect` (points, relative to `sel`), pixelated with the export's block size.
+fn pixelate_region(f: &Frozen, sel: [f32; 4], rect: [f32; 4]) -> Option<(u32, u32, Vec<u8>)> {
+    let px = |v: f32| (v * f.scale).round().max(0.0) as usize;
+    let (x0, y0) = (px(sel[0] + rect[0]).min(f.width as usize), px(sel[1] + rect[1]).min(f.height as usize));
+    let (x1, y1) = (px(sel[0] + rect[0] + rect[2]).min(f.width as usize), px(sel[1] + rect[1] + rect[3]).min(f.height as usize));
+    let (w, h) = (x1.checked_sub(x0)?, y1.checked_sub(y0)?);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let mut region = Vec::with_capacity(w * h * 4);
+    for y in y0..y1 {
+        let start = (y * f.width as usize + x0) * 4;
+        region.extend_from_slice(&f.rgba[start..start + w * 4]);
+    }
+    marks::pixelate(&mut region, w, h, [0, 0, w, h], px(marks::BLOCK).max(1));
+    Some((w as u32, h as u32, region))
 }
 
 pub fn view(s: &Overlay, _: &mut Cx<Overlay>) -> El {
@@ -232,7 +244,8 @@ fn shades(root: El, [x, y, w, h]: [f32; 4], sw: f32, sh: f32) -> El {
 /// The marks, in the selection's own points.
 fn marks_layer(edit: &Edit) -> El {
     let [_, _, w, h] = edit.sel;
-    let mut layer = el().size(w, h);
+    // Clipped to the selection, as the export crops: nothing shows outside what gets saved.
+    let mut layer = el().size(w, h).clip_rounded(0.0);
     let mut shape = Shape::new();
     let draft = edit.draft.iter().map(|m| (m, None));
     let all: Vec<(&Mark, Option<&Pixels>)> = edit.marks.iter().zip(edit.previews.iter().map(Option::as_ref)).chain(draft).collect();
@@ -396,4 +409,26 @@ pub fn on_key(s: &mut Overlay, event: &KeyEvent, _: &mut Tx) -> bool {
         _ => return false,
     }
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pixelate_region_crops_at_scale_and_averages() {
+        // 8x4 px frozen display at scale 2 (4x2 pt); left half black, right half white.
+        let mut rgba = Vec::new();
+        for _y in 0..4 {
+            for x in 0..8 {
+                rgba.extend_from_slice(if x < 4 { &[0, 0, 0, 255] } else { &[255, 255, 255, 255] });
+            }
+        }
+        let f = Frozen { width: 8, height: 4, scale: 2.0, rgba };
+        // Selection at (1,0) pt, rect (0,0,2,2) pt -> px x 2..6, y 0..4; block 20 px covers it all.
+        let (w, h, out) = pixelate_region(&f, [1.0, 0.0, 3.0, 2.0], [0.0, 0.0, 2.0, 2.0]).unwrap();
+        assert_eq!((w, h), (4, 4));
+        assert!(out.chunks(4).all(|p| p == [127, 127, 127, 255]), "one averaged block: {:?}", &out[0..4]);
+        assert!(pixelate_region(&f, [3.5, 0.0, 1.0, 1.0], [0.5, 0.0, 0.0, 1.0]).is_none(), "empty area");
+    }
 }
