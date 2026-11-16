@@ -8,7 +8,7 @@ use objc2_core_graphics::{CGBitmapContextCreate, CGColor, CGColorSpace, CGContex
 use rune::{AppHandle, ClipboardContent, ClipboardImage};
 
 use crate::Host;
-use crate::marks::{self, Mark};
+use crate::marks::{self, Mark, Style};
 
 /// The display as captured, kept for cropping at native resolution.
 pub struct Frozen {
@@ -18,9 +18,6 @@ pub struct Frozen {
     pub scale: f32,
     pub rgba: Vec<u8>,
 }
-
-/// The annotation colour (sRGB red), straight alpha.
-pub const INK: [f64; 4] = [0.96, 0.18, 0.2, 1.0];
 
 /// Crops, applies the marks, encodes, copies to the clipboard (through a queued overlay update,
 /// which flushes the clipboard even while hidden) and saves.
@@ -84,7 +81,7 @@ fn apply(rgba: &mut [u8], width: u32, height: u32, scale: f32, all: &[Mark]) -> 
             marks::pixelate(rgba, w, h, [to_px(*x), to_px(*y), to_px(*rw), to_px(*rh)], to_px(marks::BLOCK).max(1));
         }
     }
-    if !all.iter().any(|m| matches!(m, Mark::Arrow { .. } | Mark::Rect(_) | Mark::Text { .. })) {
+    if !all.iter().any(|m| matches!(m, Mark::Arrow { .. } | Mark::Rect(..) | Mark::Text { .. })) {
         return Ok(());
     }
     // sRGB for the context and the ink, so strokes and text are the same red.
@@ -100,19 +97,25 @@ fn apply(rgba: &mut [u8], width: u32, height: u32, scale: f32, all: &[Mark]) -> 
     // Top-left origin, in points: the marks' own space.
     CGContext::translate_ctm(c, 0.0, f64::from(height));
     CGContext::scale_ctm(c, f64::from(scale), -f64::from(scale));
-    let [r, g, b, a] = INK;
-    let ink = CGColor::new_srgb(r, g, b, a);
-    CGContext::set_stroke_color_with_color(c, Some(&ink));
-    CGContext::set_fill_color_with_color(c, Some(&ink));
-    CGContext::set_line_width(c, f64::from(marks::STROKE));
+    // Each mark brings its own colour and width.
+    let ink = |style: &Style| {
+        let [r, g, b] = style.ink.rgb();
+        let color = CGColor::new_srgb(f64::from(r), f64::from(g), f64::from(b), 1.0);
+        CGContext::set_stroke_color_with_color(c, Some(&color));
+        CGContext::set_fill_color_with_color(c, Some(&color));
+        CGContext::set_line_width(c, f64::from(style.size.stroke()));
+        color
+    };
     let pt = |p: [f32; 2]| (f64::from(p[0]), f64::from(p[1]));
     // The view's order: boxes and text as drawn, then arrows on top.
     let ordered = all.iter().filter(|m| !matches!(m, Mark::Arrow { .. })).chain(all.iter().filter(|m| matches!(m, Mark::Arrow { .. })));
     for mark in ordered {
         match mark {
-            Mark::Rect([x, y, rw, rh]) => {
+            Mark::Rect([x, y, rw, rh], style) => {
+                ink(style);
                 // Inside the edge with square corners, as the overlay draws its border.
-                let half = f64::from(marks::STROKE) / 2.0;
+                // (Never more than half the box, so a tiny thick box doesn't spill past its edge.)
+                let half = (f64::from(style.size.stroke()) / 2.0).min(f64::from(rw.min(*rh)) / 2.0);
                 let rect = CGRect::new(
                     CGPoint::new(f64::from(*x) + half, f64::from(*y) + half),
                     CGSize::new((f64::from(*rw) - 2.0 * half).max(0.0), (f64::from(*rh) - 2.0 * half).max(0.0)),
@@ -120,8 +123,9 @@ fn apply(rgba: &mut [u8], width: u32, height: u32, scale: f32, all: &[Mark]) -> 
                 CGContext::set_line_join(c, CGLineJoin::Miter);
                 CGContext::stroke_rect(c, rect);
             }
-            Mark::Arrow { from, to } => {
-                let (base, head) = marks::arrow_geometry(*from, *to, marks::STROKE);
+            Mark::Arrow { from, to, style } => {
+                ink(style);
+                let (base, head) = marks::arrow_geometry(*from, *to, style.size.stroke());
                 CGContext::set_line_cap(c, CGLineCap::Round);
                 CGContext::set_line_join(c, CGLineJoin::Round);
                 CGContext::begin_path(c);
@@ -140,8 +144,9 @@ fn apply(rgba: &mut [u8], width: u32, height: u32, scale: f32, all: &[Mark]) -> 
                 CGContext::close_path(c);
                 CGContext::fill_path(c);
             }
-            Mark::Text { at, text } => {
-                if let Err(e) = draw_text(&context, *at, text, &ink) {
+            Mark::Text { at, text, style } => {
+                let color = ink(style);
+                if let Err(e) = draw_text(&context, *at, text, style.size.text(), &color) {
                     eprintln!("ailfred: a text mark couldn't be drawn: {e}");
                 }
             }
@@ -152,14 +157,14 @@ fn apply(rgba: &mut [u8], width: u32, height: u32, scale: f32, all: &[Mark]) -> 
 }
 
 /// Draws a text mark with CoreText: the system UI font (emphasized, as the overlay's bold) at
-/// `TEXT_SIZE`, `at` its top-left (as the overlay shows it). The context is flipped to a top-left
+/// `size` points, `at` its top-left (as the overlay shows it). The context is flipped to a top-left
 /// origin, so the text matrix flips glyphs back upright.
-fn draw_text(context: &CGContext, at: [f32; 2], text: &str, ink: &CGColor) -> Result<(), String> {
+fn draw_text(context: &CGContext, at: [f32; 2], text: &str, size: f32, ink: &CGColor) -> Result<(), String> {
     use objc2_core_foundation::{CFAttributedString, CFDictionary, CFString, CFType, CGAffineTransform};
     use objc2_core_text::{CTFont, CTFontUIFontType, CTLine, kCTFontAttributeName, kCTForegroundColorAttributeName};
 
     // SAFETY: a CoreText constructor with a valid type and size.
-    let font = unsafe { CTFont::new_ui_font_for_language(CTFontUIFontType::EmphasizedSystem, f64::from(marks::TEXT_SIZE), None) }
+    let font = unsafe { CTFont::new_ui_font_for_language(CTFontUIFontType::EmphasizedSystem, f64::from(size), None) }
         .ok_or("no system font")?;
     // SAFETY: the attribute names are CoreText's static keys.
     let keys: [&CFString; 2] = unsafe { [kCTFontAttributeName, kCTForegroundColorAttributeName] };
@@ -206,7 +211,7 @@ mod tests {
     fn rect_is_burned_in() {
         let (w, h) = (40u32, 20u32);
         let mut rgba = vec![255u8; (w * h * 4) as usize];
-        apply(&mut rgba, w, h, 1.0, &[Mark::Rect([5.0, 5.0, 30.0, 10.0])]).unwrap();
+        apply(&mut rgba, w, h, 1.0, &[Mark::Rect([5.0, 5.0, 30.0, 10.0], Style::default())]).unwrap();
         let at = |x: u32, y: u32| &rgba[((y * w + x) * 4) as usize..((y * w + x) * 4 + 4) as usize];
         assert!(at(5, 10)[0] > 200 && at(5, 10)[1] < 120, "left edge is red: {:?}", at(5, 10));
         assert_eq!(at(20, 10), &[255, 255, 255, 255], "inside untouched");
@@ -217,7 +222,7 @@ mod tests {
     fn text_is_burned_in_upright_near_its_top_left() {
         let (w, h) = (120u32, 40u32);
         let mut rgba = vec![255u8; (w * h * 4) as usize];
-        apply(&mut rgba, w, h, 1.0, &[Mark::Text { at: [4.0, 4.0], text: "Hi".into() }]).unwrap();
+        apply(&mut rgba, w, h, 1.0, &[Mark::Text { at: [4.0, 4.0], text: "Hi".into(), style: Style::default() }]).unwrap();
         let red_rows: Vec<u32> = (0..h).filter(|y| (0..w).any(|x| rgba[((y * w + x) * 4 + 1) as usize] < 150)).collect();
         assert!(!red_rows.is_empty(), "some text drawn");
         assert!(*red_rows.first().unwrap() >= 4 && *red_rows.last().unwrap() <= 4 + 30, "within the line below `at`: {red_rows:?}");
@@ -235,14 +240,30 @@ mod tests {
                 rgba.extend_from_slice(&[(x * 255 / w) as u8, (y * 255 / h) as u8, 160, 255]);
             }
         }
+        use crate::marks::{Ink, Size};
         let all = [
             Mark::Pixelate([150.0, 10.0, 80.0, 50.0]),
-            Mark::Rect([10.0, 10.0, 100.0, 60.0]),
-            Mark::Arrow { from: [20.0, 110.0], to: [130.0, 80.0] },
-            Mark::Text { at: [140.0, 80.0], text: "Look here".into() },
+            Mark::Rect([10.0, 10.0, 100.0, 60.0], Style::default()),
+            Mark::Rect([120.0, 70.0, 60.0, 30.0], Style { ink: Ink::Yellow, size: Size::L }),
+            Mark::Arrow { from: [20.0, 110.0], to: [130.0, 80.0], style: Style { ink: Ink::Blue, size: Size::S } },
+            Mark::Text { at: [140.0, 80.0], text: "Look here".into(), style: Style::default() },
+            Mark::Text { at: [10.0, 75.0], text: "small white".into(), style: Style { ink: Ink::White, size: Size::S } },
         ];
         apply(&mut rgba, w, h, scale, &all).unwrap();
         std::fs::write("/tmp/ailfred-marks.png", encode_png(w, h, scale, &rgba).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn each_mark_uses_its_own_colour() {
+        use crate::marks::{Ink, Size};
+        let (w, h) = (60u32, 20u32);
+        let mut rgba = vec![255u8; (w * h * 4) as usize];
+        let blue = Style { ink: Ink::Blue, size: Size::L };
+        apply(&mut rgba, w, h, 1.0, &[Mark::Rect([0.0, 0.0, 20.0, 20.0], Style::default()), Mark::Rect([30.0, 0.0, 20.0, 20.0], blue)]).unwrap();
+        let at = |x: u32, y: u32| &rgba[((y * w + x) * 4) as usize..((y * w + x) * 4 + 3) as usize];
+        assert!(at(1, 10)[0] > 200 && at(1, 10)[2] < 120, "red box: {:?}", at(1, 10));
+        assert!(at(31, 10)[2] > 200 && at(31, 10)[0] < 80, "blue box: {:?}", at(31, 10));
+        assert!(at(36, 10)[0] < 80, "L stroke (7 pt) reaches 6 px in: {:?}", at(36, 10));
     }
 
     #[test]
@@ -250,7 +271,7 @@ mod tests {
         // An arrow along the top row: drawn near y=2, not flipped to the bottom.
         let (w, h) = (40u32, 20u32);
         let mut rgba = vec![255u8; (w * h * 4) as usize];
-        apply(&mut rgba, w, h, 1.0, &[Mark::Arrow { from: [2.0, 2.0], to: [38.0, 2.0] }]).unwrap();
+        apply(&mut rgba, w, h, 1.0, &[Mark::Arrow { from: [2.0, 2.0], to: [38.0, 2.0], style: Style::default() }]).unwrap();
         let red = |x: u32, y: u32| rgba[((y * w + x) * 4 + 1) as usize] < 150;
         assert!(red(10, 2), "near the top");
         assert!(!red(10, 17), "not at the bottom");

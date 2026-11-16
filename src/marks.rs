@@ -1,14 +1,91 @@
 //! Annotations on a selection: the model, its geometry, and pixelation. Coordinates are points
 //! relative to the selection's top-left; the export multiplies them by the display's scale.
 
-/// Stroke width of rectangles and arrows, in points.
-pub const STROKE: f32 = 4.0;
-/// Text size of text marks, in points.
-pub const TEXT_SIZE: f32 = 22.0;
 /// Pixelation block, in points.
 pub const BLOCK: f32 = 10.0;
 /// A mark smaller than this (points, both sides for boxes, length for arrows) is a slip.
 pub const MIN_MARK: f32 = 4.0;
+
+/// A mark's colour.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ink {
+    Red,
+    Yellow,
+    Green,
+    Blue,
+    White,
+    Black,
+}
+
+impl Ink {
+    pub const ALL: [Ink; 6] = [Ink::Red, Ink::Yellow, Ink::Green, Ink::Blue, Ink::White, Ink::Black];
+    /// sRGB, 0..1.
+    pub fn rgb(self) -> [f32; 3] {
+        match self {
+            Ink::Red => [0.96, 0.18, 0.2],
+            Ink::Yellow => [1.0, 0.8, 0.0],
+            Ink::Green => [0.2, 0.78, 0.35],
+            Ink::Blue => [0.0, 0.48, 1.0],
+            Ink::White => [1.0, 1.0, 1.0],
+            Ink::Black => [0.0, 0.0, 0.0],
+        }
+    }
+}
+
+/// A mark's size: stroke width and text size together.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Size {
+    S,
+    M,
+    L,
+}
+
+impl Size {
+    /// Stroke width of boxes and arrows, in points.
+    pub fn stroke(self) -> f32 {
+        match self {
+            Size::S => 2.0,
+            Size::M => 4.0,
+            Size::L => 7.0,
+        }
+    }
+    /// Text size, in points.
+    pub fn text(self) -> f32 {
+        match self {
+            Size::S => 16.0,
+            Size::M => 22.0,
+            Size::L => 30.0,
+        }
+    }
+    pub fn next(self) -> Size {
+        match self {
+            Size::S => Size::M,
+            Size::M => Size::L,
+            Size::L => Size::S,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Size::S => "S",
+            Size::M => "M",
+            Size::L => "L",
+        }
+    }
+}
+
+/// How a mark is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Style {
+    pub ink: Ink,
+    pub size: Size,
+}
+
+impl Default for Style {
+    /// Red, medium: the look before styles existed.
+    fn default() -> Style {
+        Style { ink: Ink::Red, size: Size::M }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
@@ -44,20 +121,20 @@ impl Tool {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Mark {
-    Arrow { from: [f32; 2], to: [f32; 2] },
+    Arrow { from: [f32; 2], to: [f32; 2], style: Style },
     /// x, y, width, height.
-    Rect([f32; 4]),
+    Rect([f32; 4], Style),
     Pixelate([f32; 4]),
     /// Top-left of the text line.
-    Text { at: [f32; 2], text: String },
+    Text { at: [f32; 2], text: String, style: Style },
 }
 
 impl Mark {
     /// A mark dragged from `a` to `b` with a drawing tool (not Text).
-    pub fn dragged(tool: Tool, a: [f32; 2], b: [f32; 2]) -> Option<Mark> {
+    pub fn dragged(tool: Tool, a: [f32; 2], b: [f32; 2], style: Style) -> Option<Mark> {
         match tool {
-            Tool::Arrow => Some(Mark::Arrow { from: a, to: b }),
-            Tool::Rect => Some(Mark::Rect(rect(a, b))),
+            Tool::Arrow => Some(Mark::Arrow { from: a, to: b, style }),
+            Tool::Rect => Some(Mark::Rect(rect(a, b), style)),
             Tool::Pixelate => Some(Mark::Pixelate(rect(a, b))),
             Tool::Text => None,
         }
@@ -66,8 +143,8 @@ impl Mark {
     /// Big enough to keep (a click or a twitch isn't a mark).
     pub fn is_meaningful(&self) -> bool {
         match self {
-            Mark::Arrow { from, to } => (to[0] - from[0]).hypot(to[1] - from[1]) >= MIN_MARK,
-            Mark::Rect(r) | Mark::Pixelate(r) => r[2] >= MIN_MARK && r[3] >= MIN_MARK,
+            Mark::Arrow { from, to, .. } => (to[0] - from[0]).hypot(to[1] - from[1]) >= MIN_MARK,
+            Mark::Rect(r, _) | Mark::Pixelate(r) => r[2] >= MIN_MARK && r[3] >= MIN_MARK,
             Mark::Text { text, .. } => !text.trim().is_empty(),
         }
     }
@@ -143,10 +220,10 @@ mod tests {
 
     #[test]
     fn slips_are_not_marks() {
-        assert!(!Mark::dragged(Tool::Rect, [0.0, 0.0], [2.0, 50.0]).unwrap().is_meaningful());
-        assert!(Mark::dragged(Tool::Arrow, [0.0, 0.0], [30.0, 0.0]).unwrap().is_meaningful());
-        assert!(Mark::dragged(Tool::Text, [0.0, 0.0], [30.0, 0.0]).is_none());
-        assert!(!Mark::Text { at: [0.0, 0.0], text: "  ".into() }.is_meaningful());
+        assert!(!Mark::dragged(Tool::Rect, [0.0, 0.0], [2.0, 50.0], Style::default()).unwrap().is_meaningful());
+        assert!(Mark::dragged(Tool::Arrow, [0.0, 0.0], [30.0, 0.0], Style::default()).unwrap().is_meaningful());
+        assert!(Mark::dragged(Tool::Text, [0.0, 0.0], [30.0, 0.0], Style::default()).is_none());
+        assert!(!Mark::Text { at: [0.0, 0.0], text: "  ".into(), style: Style::default() }.is_meaningful());
     }
 
     #[test]
@@ -173,6 +250,13 @@ mod tests {
         assert_eq!(&px[0..4], &[127, 127, 127, 255]);
         assert_eq!(&px[(1 * 4 + 1) * 4..(1 * 4 + 1) * 4 + 4], &[127, 127, 127, 255]);
         assert_eq!(&px[2 * 4..2 * 4 + 4], &[255, 0, 0, 255], "outside the rect untouched");
+    }
+
+    #[test]
+    fn sizes_cycle_and_default_is_the_old_look() {
+        assert_eq!(Size::S.next().next().next(), Size::S);
+        let d = Style::default();
+        assert_eq!((d.ink, d.size.stroke(), d.size.text()), (Ink::Red, 4.0, 22.0));
     }
 
     #[test]

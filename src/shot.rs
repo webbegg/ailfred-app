@@ -7,15 +7,20 @@ use rune::{AppHandle, Color, Cursor, Cx, Drag, El, Key, KeyEvent, LineCap, Phase
 
 use crate::Host;
 use crate::capture::Shot;
-use crate::export::{self, Frozen, INK};
-use crate::marks::{self, Mark, Tool};
+use crate::export::{self, Frozen};
+use crate::marks::{self, Ink, Mark, Style, Tool};
 
 const DIM: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.35 };
 /// The hint's and toolbar's own background: they sit on the screen, so they must read on white.
 const PANEL: Color = Color { r: 0.08, g: 0.08, b: 0.09, a: 0.92 };
 const EDGE: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.9 };
 const ACTIVE: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.18 };
-const INK_COLOR: Color = Color { r: INK[0] as f32, g: INK[1] as f32, b: INK[2] as f32, a: INK[3] as f32 };
+/// The rune colour of an ink.
+fn color_of(ink: Ink) -> Color {
+    let [r, g, b] = ink.rgb();
+    Color { r, g, b, a: 1.0 }
+}
+
 /// A drag smaller than this (points) is a click, not a selection.
 const MIN_SIDE: f32 = 3.0;
 const TOOLBAR_H: f32 = 40.0;
@@ -48,6 +53,8 @@ enum Stage {
 struct Edit {
     sel: [f32; 4],
     tool: Tool,
+    /// Colour and size for the next marks (and text being typed).
+    style: Style,
     marks: Vec<Mark>,
     /// The pixelated preview of each mark (Some for Pixelate marks), index-aligned with `marks`.
     previews: Vec<Option<Pixels>>,
@@ -59,7 +66,7 @@ struct Edit {
 
 impl Edit {
     fn new(sel: [f32; 4]) -> Edit {
-        Edit { sel, tool: Tool::Arrow, marks: Vec::new(), previews: Vec::new(), draft: None, typing: None }
+        Edit { sel, tool: Tool::Arrow, style: Style::default(), marks: Vec::new(), previews: Vec::new(), draft: None, typing: None }
     }
 
     fn push(&mut self, mark: Mark, preview: Option<Pixels>) {
@@ -70,7 +77,7 @@ impl Edit {
     /// Ends typing, keeping the text if there is any.
     fn finish_typing(&mut self) {
         if let Some((at, text)) = self.typing.take() {
-            let mark = Mark::Text { at, text };
+            let mark = Mark::Text { at, text, style: self.style };
             if mark.is_meaningful() {
                 self.push(mark, None);
             }
@@ -92,7 +99,7 @@ impl Edit {
     fn all_marks(&self) -> Vec<Mark> {
         let mut all = self.marks.clone();
         if let Some((at, text)) = &self.typing {
-            let mark = Mark::Text { at: *at, text: text.clone() };
+            let mark = Mark::Text { at: *at, text: text.clone(), style: self.style };
             if mark.is_meaningful() {
                 all.push(mark);
             }
@@ -191,6 +198,18 @@ impl Overlay {
         }
     }
 
+    fn set_ink(&mut self, ink: Ink) {
+        if let Stage::Editing(edit) = &mut self.stage {
+            edit.style.ink = ink;
+        }
+    }
+
+    fn next_size(&mut self) {
+        if let Stage::Editing(edit) = &mut self.stage {
+            edit.style.size = edit.style.size.next();
+        }
+    }
+
     fn undo(&mut self) {
         if let Stage::Editing(edit) = &mut self.stage {
             edit.undo();
@@ -231,7 +250,7 @@ fn pixelate_region(f: &Frozen, sel: [f32; 4], rect: [f32; 4]) -> Option<(u32, u3
     Some((w as u32, h as u32, region))
 }
 
-pub fn view(s: &Overlay, _: &mut Cx<Overlay>) -> El {
+pub fn view(s: &Overlay, cx: &mut Cx<Overlay>) -> El {
     let Some(f) = &s.frozen else { return el() };
     // The overlay covers the display's frame, so its size in points is the capture over its scale.
     let (sw, sh) = (f.width as f32 / f.scale, f.height as f32 / f.scale);
@@ -270,7 +289,7 @@ pub fn view(s: &Overlay, _: &mut Cx<Overlay>) -> El {
             shades(root, edit.sel, sw, sh)
                 .child(el().key("selection").size(w, h).border(1.0, EDGE).pin(Some(x), Some(y), None, None))
                 .child(marks_layer(edit).pin(Some(x), Some(y), None, None))
-                .child(toolbar(edit, sw, sh))
+                .child(toolbar(edit, sw, sh, cx.layout_size("toolbar").map(|[w, _]| w)))
         }
     }
 }
@@ -303,34 +322,39 @@ fn marks_layer(edit: &Edit) -> El {
                     None => area.border(1.0, EDGE), // still being dragged
                 });
             }
-            Mark::Rect([rx, ry, rw, rh]) => {
-                layer = layer.child(el().size(*rw, *rh).border(marks::STROKE, INK_COLOR).pin(Some(*rx), Some(*ry), None, None));
+            Mark::Rect([rx, ry, rw, rh], style) => {
+                let border = el().size(*rw, *rh).border(style.size.stroke(), color_of(style.ink));
+                layer = layer.child(border.pin(Some(*rx), Some(*ry), None, None));
             }
-            Mark::Arrow { from, to } => {
-                let (base, head) = marks::arrow_geometry(*from, *to, marks::STROKE);
-                shape = shape.line(*from, base, marks::STROKE, LineCap::Round, INK_COLOR).fill(head.to_vec(), INK_COLOR);
+            Mark::Arrow { from, to, style } => {
+                let (stroke, ink) = (style.size.stroke(), color_of(style.ink));
+                let (base, head) = marks::arrow_geometry(*from, *to, stroke);
+                shape = shape.line(*from, base, stroke, LineCap::Round, ink).fill(head.to_vec(), ink);
             }
-            Mark::Text { at, text: t } => layer = layer.child(text_mark(*at, t)),
+            Mark::Text { at, text: t, style } => layer = layer.child(text_mark(*at, t, *style)),
         }
     }
     if let Some((at, t)) = &edit.typing {
-        layer = layer.child(text_mark(*at, &format!("{t}|")));
+        layer = layer.child(text_mark(*at, &format!("{t}|"), edit.style));
     }
     layer.child(canvas(shape).size(w, h).pin(Some(0.0), Some(0.0), None, None))
 }
 
-fn text_mark(at: [f32; 2], t: &str) -> El {
-    text(t.to_string()).font(TextStyle::new(marks::TEXT_SIZE, 700.0)).color(INK_COLOR).pin(Some(at[0]), Some(at[1]), None, None)
+fn text_mark(at: [f32; 2], t: &str, style: Style) -> El {
+    text(t.to_string()).font(TextStyle::new(style.size.text(), 700.0)).color(color_of(style.ink)).pin(Some(at[0]), Some(at[1]), None, None)
 }
 
 /// The tools and actions, under the selection (above it, or inside, when there's no room),
 /// right-aligned with it.
-fn toolbar(edit: &Edit, sw: f32, sh: f32) -> El {
+/// `laid_out`: the bar's width from the last layout (None on its first frame).
+fn toolbar(edit: &Edit, sw: f32, sh: f32, laid_out: Option<f32>) -> El {
     let [x, y, w, h] = edit.sel;
     let below = y + h + 8.0;
     let top = if below + TOOLBAR_H <= sh { below } else if y - TOOLBAR_H - 8.0 >= 0.0 { y - TOOLBAR_H - 8.0 } else { y + 8.0 };
-    // Right-aligned with the selection, but never pushed off the left edge (the bar is ~560 pt).
-    let right = (sw - (x + w)).max(8.0).min((sw - 560.0).max(8.0));
+    // Right-aligned with the selection, but never pushed off the left edge: the bar's real width
+    // once laid out, a generous estimate before.
+    let bar_w = laid_out.unwrap_or(860.0);
+    let right = (sw - (x + w)).max(8.0).min((sw - bar_w - 8.0).max(8.0));
     let button = |label: String, active: bool| {
         el().key(format!("tool-{label}")).px(10.0).py(6.0).radius(6.0).fill(if active { ACTIVE } else { Color { a: 0.0, ..PANEL } })
             .child(text(label).color(EDGE))
@@ -340,6 +364,15 @@ fn toolbar(edit: &Edit, sw: f32, sh: f32) -> El {
         let label = format!("{} {}", tool.label(), tool.key().to_uppercase());
         bar = bar.child(button(label, edit.tool == tool).on_press(move |s: &mut Overlay| s.set_tool(tool)));
     }
+    // Colours, then the size (W cycles it).
+    for ink in Ink::ALL {
+        let active = edit.style.ink == ink;
+        // A grey ring shows white and black alike; the chosen one is highlighted like a tool.
+        let swatch = el().size(16.0, 16.0).radius(8.0).fill(color_of(ink)).border(1.5, Color { r: 0.5, g: 0.5, b: 0.5, a: 1.0 });
+        let cell = el().key(format!("ink-{ink:?}")).padding(6.0).radius(6.0).fill(if active { ACTIVE } else { Color { a: 0.0, ..PANEL } });
+        bar = bar.child(cell.child(swatch).on_press(move |s: &mut Overlay| s.set_ink(ink)));
+    }
+    bar = bar.child(button(format!("Size {} W", edit.style.size.label()), false).on_press(|s: &mut Overlay| s.next_size()));
     bar.child(button("Undo ⌘Z".into(), false).on_press(|s: &mut Overlay| s.undo()))
         .child(button("Cancel Esc".into(), false).on_press(|s: &mut Overlay| s.dismiss()))
         .child(button("Copy ↩".into(), true).on_press(|s: &mut Overlay| s.confirm()))
@@ -427,7 +460,7 @@ fn edit_drag(s: &mut Overlay, drag: &Drag) {
         edit.draft = None;
         return;
     }
-    let mark = Mark::dragged(edit.tool, local(drag.start_x, drag.start_y), local(drag.x, drag.y));
+    let mark = Mark::dragged(edit.tool, local(drag.start_x, drag.start_y), local(drag.x, drag.y), edit.style);
     if drag.phase != Phase::Up {
         edit.draft = mark;
         return;
@@ -490,6 +523,7 @@ pub fn on_key(s: &mut Overlay, event: &KeyEvent, _: &mut Tx) -> bool {
     match &event.key {
         Key::Escape => s.dismiss(),
         Key::Enter => s.confirm(),
+        Key::Text(t) if !chord && t.eq_ignore_ascii_case("w") => s.next_size(),
         Key::Text(t) if !chord => match Tool::from_key(t) {
             Some(tool) => s.set_tool(tool),
             None => return false,
