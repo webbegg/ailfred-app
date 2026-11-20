@@ -1,7 +1,7 @@
 //! The quick input: a floating text field that slides up from the bottom of the display under
 //! the pointer, above every other window. Ctrl+Option+Space or the menu opens it; Esc, a click
-//! elsewhere or Enter closes it, sliding back down. Enter sends: the chat panel (chat.rs) slides
-//! in from the right with the message.
+//! elsewhere closes it, sliding back down. Enter sends: the panel itself turns into the chat
+//! panel (chat.rs), which this window also holds, springing to the right edge as it reshapes.
 //!
 //! While it's open, captures land in it as "Image" chips in the field row (hover one for its X),
 //! dragging out a capture area tucks it away, and once an area is picked it arrives beside that
@@ -11,12 +11,13 @@ use std::time::Duration;
 
 use rune::tok;
 use rune::{
-    Anim, AppHandle, Color, Cursor, Cx, El, Key, KeyEvent, Shadow, Spring, SystemMaterial, TextEdit, TextStyle, Transition, Tx, col, el, icon,
+    Anim, AppHandle, Color, Cursor, Cx, El, Key, KeyEvent, Shadow, Spring, SystemMaterial, TextEdit, TextStyle, Transition, Tx, el, icon,
     row, text, text_input,
 };
 use rune_kit::glyphs;
 
 use crate::Host;
+use crate::chat::{self, Chat};
 use crate::icons;
 
 /// The fixed global chord that toggles the panel (Option+Space alone is Claude's quick entry).
@@ -38,14 +39,6 @@ pub const TUCK: f32 = PANEL_H + MARGIN + PAD;
 /// Beside a capture area it arrives instead: from this little below, faded and slightly small.
 pub const ARRIVE: f32 = 12.0;
 const ARRIVE_SCALE: f32 = 0.98;
-/// The overlay's own size at the bottom: the panel, its shadow room, the gap below.
-pub const WINDOW: (f32, f32) = (PANEL_W + 2.0 * PAD, PAD + PANEL_H + MARGIN);
-
-/// The overlay's size at the bottom over a Dock `dock` points tall: it still reaches the screen's
-/// bottom edge, so the panel rises from outside the screen, through the Dock, to rest above it.
-pub fn window_at_bottom(dock: f32) -> (f32, f32) {
-    (WINDOW.0, WINDOW.1 + dock.max(0.0))
-}
 /// The panel's gap to a capture area it sits beside, and to the screen's edges.
 const BESIDE_GAP: f32 = 16.0;
 const EDGE_GAP: f32 = 8.0;
@@ -91,6 +84,17 @@ pub struct QuickInput {
     area: Option<u64>,
     /// Where closing goes, so the host hides the window after the slide (None in tests).
     host: Option<AppHandle<Host>>,
+    /// The panel's rect at rest, in points on the display the window covers.
+    rect: [f32; 4],
+    /// The chat side panel, in the same window: the input's panel turns into it on send.
+    pub chat: Chat,
+    /// Which of two keys the input's panel has (the chat's has the other): sending hands the
+    /// input's key, and so its element, to the chat, which then reshapes from it.
+    slot: bool,
+    /// Just sent: the chat panel still carries the input's row, fading out, until `land`.
+    morphing: bool,
+    /// The next sent message's id (its captures join it once decoded).
+    next_message: u64,
 }
 
 /// What Esc in the field does.
@@ -127,8 +131,68 @@ impl QuickInput {
             editing: false,
             shots: Vec::new(),
             area: None,
+            chat: Chat::new(host.clone()),
             host,
+            rect: [0.0, 0.0, PANEL_W, PANEL_H],
+            slot: false,
+            morphing: false,
+            next_message: 0,
         }
+    }
+
+    /// The panel's rect at rest (points on the window's display): at the bottom or beside an
+    /// area. Applied without motion, with the panel out of view.
+    pub fn set_rect(&mut self, rect: [f32; 4]) {
+        self.rect = rect;
+    }
+
+    fn input_key(&self) -> &'static str {
+        if self.slot { "panel-b" } else { "panel-a" }
+    }
+
+    fn chat_key(&self) -> &'static str {
+        if self.slot { "panel-a" } else { "panel-b" }
+    }
+
+    /// Enter: what's typed and attached goes to the chat, and the input goes. With the chat
+    /// closed, the input's panel becomes the chat's (it keeps its row, fading, until `land`);
+    /// with it open, the message joins it and the input slides down. The message's id, text and
+    /// capture PNGs (to decode); None if there's nothing to send.
+    pub fn send(&mut self) -> Option<(u64, String, Vec<Vec<u8>>)> {
+        let text = self.query.text.trim().to_owned();
+        if text.is_empty() && self.shots.is_empty() {
+            return None;
+        }
+        let id = self.next_message;
+        self.next_message += 1;
+        // The chips stay (by id) for the fading row; their images go to be decoded.
+        let pngs: Vec<Vec<u8>> = self.shots.iter_mut().map(|a| std::mem::take(&mut a.png)).collect();
+        let message = chat::Message { id, text: text.clone(), images: Vec::new() };
+        self.query.focused = false;
+        if self.chat.is_open() {
+            self.close();
+            self.query.clear();
+            self.chat.push(message);
+        } else {
+            self.open = false;
+            self.tucked = false;
+            self.editing = false;
+            self.area = None;
+            self.slot = !self.slot;
+            self.morphing = true;
+            self.chat.morph(message);
+        }
+        Some((id, text, pngs))
+    }
+
+    /// The panel is the chat's now: the input's row goes (the next input starts empty) and the
+    /// chat's content fades in.
+    pub fn land(&mut self) {
+        if std::mem::replace(&mut self.morphing, false) {
+            self.query.clear();
+            self.shots.clear();
+        }
+        self.chat.land();
     }
 
     pub fn is_open(&self) -> bool {
@@ -140,6 +204,13 @@ impl QuickInput {
         self.open = true;
         self.tucked = false;
         self.query.focused = true;
+        self.chat.blur();
+    }
+
+    /// The chat slides in, its field taking the keys.
+    pub fn open_chat(&mut self) {
+        self.query.focused = false;
+        self.chat.open();
     }
 
     /// Goes away, discarding its captures; the text stays for next time. True if it was open.
@@ -149,12 +220,6 @@ impl QuickInput {
         self.shots.clear();
         self.area = None;
         std::mem::replace(&mut self.open, false)
-    }
-
-    /// Back to the bottom, out of view: where the next opening slides in from. For a hidden
-    /// input (applied without motion).
-    pub fn rest(&mut self) {
-        self.beside = false;
     }
 
     /// Before opening: below the screen at the bottom (over a Dock `dock` points tall), whatever
@@ -258,6 +323,7 @@ impl QuickInput {
 
     /// The typed text, trimmed, and the captures that go with it; the field and the attachments
     /// clear. Nothing typed and nothing attached submits nothing.
+    #[cfg(test)]
     pub fn take_submission(&mut self) -> Option<(String, Vec<Attached>)> {
         let text = self.query.text.trim().to_owned();
         if text.is_empty() && self.shots.is_empty() {
@@ -274,14 +340,13 @@ impl QuickInput {
         }
     }
 
-    /// Sends what's typed and attached: the input slides down and the chat panel slides in with
-    /// it (the host does both).
+    /// Sends what's typed and attached (`send`); the host keeps up and decodes the captures.
     fn submit(&mut self) {
-        if let Some((text, shots)) = self.take_submission() {
-            let bytes: usize = shots.iter().map(|a| a.png.len()).sum();
-            eprintln!("Capibarapp: quick input: {text:?} with {} capture(s), {bytes} bytes of PNG", shots.len());
+        if let Some((id, text, pngs)) = self.send() {
+            let bytes: usize = pngs.iter().map(Vec::len).sum();
+            eprintln!("Capibarapp: quick input: {text:?} with {} capture(s), {bytes} bytes of PNG", pngs.len());
             if let Some(host) = &self.host {
-                host.update(move |host, _| host.send_from_quick_input(text, shots));
+                host.update(move |host, _| host.sent_from_quick_input(id, pngs));
             }
         }
     }
@@ -372,13 +437,6 @@ pub fn bottom_panel(screen: [f32; 2], dock: f32) -> [f32; 4] {
     [(screen[0] - PANEL_W) / 2.0, screen[1] - dock.max(0.0) - MARGIN - PANEL_H, PANEL_W, PANEL_H]
 }
 
-/// The overlay window's rect for a panel at `panel`: the shadow room around it, the bottom gap
-/// below (out of which a tucked panel drops).
-pub fn window_for(panel: [f32; 4]) -> [f32; 4] {
-    let [x, y, w, h] = panel;
-    [x - PAD, y - PAD, w + 2.0 * PAD, PAD + h + MARGIN]
-}
-
 /// The field's hint: what it's for, given `shots` attached, or that the capture's tools have
 /// the keys.
 pub fn placeholder(shots: usize, editing: bool) -> &'static str {
@@ -459,11 +517,64 @@ fn send_button(ready: bool, t: &tok::Theme) -> El {
     }
 }
 
+/// The input's and the chat's panel: the system material under the frost, its border, shadows
+/// and corners, holding `layers` pinned to its top left (each at its own size, so a panel that
+/// reshapes reveals them rather than reflowing them). Keyed `key`; takes clicks if `hit`.
+pub fn surface(key: &str, hit: bool, layers: Vec<El>) -> El {
+    let mut frost = el()
+        .key("frost")
+        .w_full()
+        .h_full()
+        .radius(RADIUS)
+        .continuous_corners()
+        .clip_rounded(RADIUS)
+        .fill(FROST)
+        .border_gradient(1.0, Color::WHITE.alpha(0.14), Color::WHITE.alpha(0.05));
+    for layer in layers {
+        frost = frost.child(layer);
+    }
+    let panel = el()
+        .key(key)
+        .radius(RADIUS)
+        .continuous_corners()
+        .box_shadow(Shadow::core_animation(0.0, 0.5, 1.5, Color::BLACK.alpha(0.3)))
+        .box_shadow(Shadow::core_animation(0.0, 10.0, 22.0, Color::BLACK.alpha(0.4)))
+        .system_material(SystemMaterial::Popover)
+        .child(frost);
+    if hit { panel.hit() } else { panel }
+}
+
+/// The window covers the display: the input's panel at its rect, and the chat's at the right
+/// edge (the input's panel becomes it on send).
 pub fn view(s: &QuickInput, cx: &mut Cx<QuickInput>) -> El {
     crate::settings::apply_motion(cx);
     let t = tok::theme(true);
     let Pose { dy, alpha, scale } = s.current_pose();
     let motion = Anim::from(if s.beside { SETTLE } else { GLIDE });
+    let [x, y, w, h] = s.rect;
+    // Just sent: the row is in the chat's panel, fading; the input's new panel waits empty, out
+    // of view, landing at once (its element was the chat's, maybe mid-slide).
+    let layers = if s.morphing { Vec::new() } else { vec![input_row(s, &t)] };
+    let mut input = surface(s.input_key(), s.open, layers)
+        .size(w, h)
+        .pin(Some(x), Some(y), None, None)
+        .offset(0.0, dy)
+        .offset_motion(motion.clone())
+        .opacity(alpha)
+        .opacity_motion(motion.clone())
+        .scale(scale)
+        .scale_motion(motion)
+        .motion(if s.beside { SETTLE } else { GLIDE });
+    if s.morphing {
+        input = input.instant_changes();
+    }
+    let chat = chat::panel(&s.chat, s.chat_key(), |s: &mut QuickInput| &mut s.chat, s.morphing.then(|| input_row(s, &t)));
+    el().w_full().h_full().child(chat).child(input)
+}
+
+/// The field row (the sparkle, the chips, the field, the send button) at the panel's size,
+/// pinned to its top left.
+fn input_row(s: &QuickInput, t: &tok::Theme) -> El {
     let field = text_input(&s.query, TextStyle::new(15.0, 400.0).lh(22.0))
         .key("query")
         .single_line()
@@ -494,40 +605,12 @@ pub fn view(s: &QuickInput, cx: &mut Cx<QuickInput>) -> El {
     if !s.shots.is_empty() {
         field_row = field_row.child(chips);
     }
-    let field_row = field_row.child(field).child(send_button(s.send_ready(), &t).ml(2.0));
-    let frost = el()
-        .key("frost")
-        .w_full()
-        .h_full()
-        .radius(RADIUS)
-        .continuous_corners()
-        .clip_rounded(RADIUS)
-        .fill(FROST)
-        .border_gradient(1.0, Color::WHITE.alpha(0.14), Color::WHITE.alpha(0.05))
-        .child(field_row);
-    let panel = el()
-        .key("panel")
-        .hit()
-        .w_full()
-        .h(PANEL_H)
-        .radius(RADIUS)
-        .continuous_corners()
-        .box_shadow(Shadow::core_animation(0.0, 0.5, 1.5, Color::BLACK.alpha(0.3)))
-        .box_shadow(Shadow::core_animation(0.0, 10.0, 22.0, Color::BLACK.alpha(0.4)))
-        .system_material(SystemMaterial::Popover)
-        .offset(0.0, dy)
-        .offset_motion(motion)
-        .opacity(alpha)
-        .opacity_motion(motion)
-        .scale(scale)
-        .scale_motion(motion)
-        .motion(if s.beside { SETTLE } else { GLIDE })
-        .child(frost);
-    col().w_full().h_full().px(PAD).pt(PAD).child(panel)
+    let field_row = field_row.child(field).child(send_button(s.send_ready(), t).ml(2.0));
+    el().key("input-layer").size(s.rect[2], PANEL_H).pin(Some(0.0), Some(0.0), None, None).child(field_row)
 }
 
 pub fn on_key(s: &mut QuickInput, event: &KeyEvent, _: &mut Tx) -> bool {
-    s.field_key(event)
+    if s.open { s.field_key(event) } else { chat::on_key(&mut s.chat, event) }
 }
 
 /// Clicking elsewhere closes it, unless a capture took the keys (the host decides).
@@ -595,7 +678,7 @@ mod tests {
         assert!(s.tucked, "a drag started since: it stays out of view");
         assert_eq!(s.escape(), Escape::Area(8));
         s.close();
-        s.rest();
+        s.at_bottom(0.0);
         assert_eq!(pose(s.open, s.tucked, s.beside).dy, TUCK, "the next opening slides in from the bottom again");
     }
 
@@ -808,13 +891,6 @@ mod tests {
     }
 
     #[test]
-    fn the_window_wraps_the_panel_with_its_shadow_room() {
-        let [x, y, w, h] = window_for([100.0, 200.0, 500.0, PANEL_H]);
-        assert_eq!([x, y, w, h], [100.0 - PAD, 200.0 - PAD, 500.0 + 2.0 * PAD, PAD + PANEL_H + MARGIN]);
-        assert_eq!((WINDOW.0, WINDOW.1), (PANEL_W + 2.0 * PAD, PAD + PANEL_H + MARGIN));
-    }
-
-    #[test]
     fn opening_rises_from_below_the_screen_even_right_after_closing_beside_an_area() {
         let mut s = QuickInput::new(None);
         s.open();
@@ -833,8 +909,6 @@ mod tests {
         let mut s = QuickInput::new(None);
         s.at_bottom(70.0);
         assert_eq!(s.current_pose().dy, TUCK + 70.0, "below the screen, past the Dock");
-        assert_eq!(window_at_bottom(70.0), (WINDOW.0, WINDOW.1 + 70.0), "the window reaches the bottom edge");
-        assert_eq!(window_at_bottom(0.0), WINDOW);
         s.open();
         assert_eq!(s.current_pose().dy, 0.0, "rests above the Dock");
         s.set_tucked(true);
@@ -857,6 +931,64 @@ mod tests {
         assert_eq!(dock_inset(frame, [64.0, 0.0, 1448.0, 949.0]), 0.0, "Dock on the left");
         // A second display above the first: AppKit y is global.
         assert_eq!(dock_inset([0.0, 982.0, 1920.0, 1080.0], [0.0, 1052.0, 1920.0, 985.0]), 70.0);
+    }
+
+    fn sent(text: &str, shot: Option<u64>) -> QuickInput {
+        let mut s = QuickInput::new(None);
+        s.set_rect(bottom_panel([1512.0, 982.0], 0.0));
+        s.open();
+        s.query = TextEdit::new(text);
+        if let Some(id) = shot {
+            s.attach(id, vec![1, 2, 3]);
+        }
+        s
+    }
+
+    #[test]
+    fn the_panel_rests_at_its_rect() {
+        let mut s = QuickInput::new(None);
+        let r = [10.0, 20.0, 500.0, PANEL_H];
+        s.set_rect(r);
+        assert_eq!(s.rect, r);
+    }
+
+    #[test]
+    fn sending_hands_the_inputs_panel_to_the_chat_which_keeps_its_row_until_it_lands() {
+        let mut s = sent("what is this?", Some(4));
+        let panel = s.input_key();
+        let (id, text, pngs) = s.send().expect("something to send");
+        assert_eq!((text.as_str(), pngs), ("what is this?", vec![vec![1, 2, 3]]));
+        assert!(!s.is_open() && s.chat.is_open());
+        assert_eq!(s.chat_key(), panel, "the same element: it reshapes into the chat");
+        assert_ne!(s.input_key(), panel, "the next input gets the other");
+        assert!(s.morphing && !s.chat.landed());
+        assert_eq!((s.query.text.as_str(), s.ids()), ("what is this?", vec![4]), "the row shows what was sent while it fades");
+        assert!(!s.query.focused && s.chat.draft_focused(), "the chat's field has the keys");
+        s.land();
+        assert!(!s.morphing && s.chat.landed());
+        assert_eq!((s.query.text.as_str(), s.ids().len()), ("", 0), "the next input starts empty");
+        s.chat.close();
+        s.open();
+        s.query = TextEdit::new("again");
+        assert_eq!(s.send().map(|m| m.0), Some(id + 1));
+    }
+
+    #[test]
+    fn sending_with_the_chat_open_adds_to_it_and_the_input_slides_down() {
+        let mut s = sent("more", None);
+        s.chat.open();
+        let chat = s.chat_key();
+        assert!(s.send().is_some());
+        assert!(!s.is_open() && s.chat.is_open());
+        assert_eq!(s.chat_key(), chat);
+        assert!(!s.morphing && s.query.text.is_empty());
+    }
+
+    #[test]
+    fn nothing_typed_or_attached_sends_nothing() {
+        let mut s = sent("  ", None);
+        assert!(s.send().is_none());
+        assert!(s.is_open() && !s.chat.is_open());
     }
 
     #[test]

@@ -1,13 +1,14 @@
-//! The chat side panel: sending from the quick input slides it in from the right edge of the
-//! display, with what was sent as the first message and its own field focused. It stays open
+//! The chat side panel: sending from the quick input turns the input's own panel into it (same
+//! window, same element: it springs to the right edge, reshaping), with what was sent as the
+//! first message and its own field focused. It stays open
 //! when another app is clicked; Esc or its close button slide it back out, and the input's
 //! shortcut brings it back. Cmd+N slides it out for good and opens a new input. No AI: it shows
 //! the conversation typed into it.
 
 use rune::tok;
 use rune::{
-    Anim, AppHandle, Color, Curve, Cursor, Cx, El, GrowthSpec, Key, KeyEvent, Pixels, ScrollSpec, Shadow, Spring, SystemMaterial, TextEdit,
-    TextStyle, Transition, Tx, auto_grow, col, el, icon, row, text, text_input,
+    Anim, AppHandle, Color, Curve, Cursor, El, GrowthSpec, Key, KeyEvent, Pixels, ScrollSpec, Spring, TextEdit, TextStyle, Transition, Tx,
+    auto_grow, col, el, icon, row, text, text_input,
 };
 use rune_kit::glyphs;
 
@@ -15,25 +16,23 @@ use crate::Host;
 use crate::icons;
 use crate::quick_input::{self, ACCENT};
 
-/// The panel's width, its gap to the screen's edges, and its corner radius, in points.
+/// The panel's width and its gap to the screen's edges, in points. Its corners are the input's
+/// (`quick_input::RADIUS`): it's the same panel.
 pub const CHAT_W: f32 = 400.0;
 const GAP: f32 = 12.0;
-const RADIUS: f32 = 16.0;
 /// Room past the panel for its shadow.
 const PAD: f32 = 32.0;
 const HEADER_H: f32 = 44.0;
 /// A message's widest, and its images' largest.
 const BUBBLE_MAX_W: f32 = CHAT_W * 0.82;
 const THUMB_MAX: (f32, f32) = (240.0, 160.0);
-/// The slide in from the edge and back, and the flight from the input.
+/// The slide in from the edge and back, and the input's panel reshaping into this one.
 const GLIDE: Spring = tok::motion::GLIDE;
-/// The shell and the panel share this, so the one flies into the other (`El::matched`).
-const SHELL: &str = "chat-shell";
-/// How long after the flight starts the content fades in, and over how long.
-pub const LANDING: std::time::Duration = std::time::Duration::from_millis(280);
-const CONTENT_FADE: f32 = 0.18;
-/// The panel's frost over the system material, #1E1E1E (as the quick input's).
-const FROST: Color = Color { r: 0.013, g: 0.013, b: 0.013, a: 0.82 };
+/// How long after the input starts reshaping the content fades in, and over how long; and how
+/// fast the input's row fades as it goes.
+pub const LANDING: std::time::Duration = std::time::Duration::from_millis(260);
+const CONTENT_FADE: f32 = 0.2;
+pub const ROW_FADE: f32 = 0.12;
 
 /// What the menu bar and the Dock take at the display's edges (points).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -140,10 +139,8 @@ pub struct Chat {
     insets: Insets,
     /// The display's size in points: the overlay covers it.
     screen: [f32; 2],
-    /// Sent from the quick input: the panel waits as a shell over the input's panel at this rect,
-    /// then `open` flies it into place, reshaping.
-    morph: Option<[f32; 4]>,
-    /// Its content shows: false while it flies from the input, faded in once there (`land`).
+    /// Its content shows: false while the input's panel reshapes into it, faded in once there
+    /// (`land`).
     landed: bool,
     /// Cmd+N: the conversation is over; it still shows while sliding out, and the next message
     /// starts a new one.
@@ -154,12 +151,22 @@ pub struct Chat {
 
 impl Chat {
     pub fn new(host: Option<AppHandle<Host>>) -> Self {
-        Chat { messages: Vec::new(), draft: TextEdit::new(""), open: false, insets: Insets::default(), screen: [1440.0, 900.0], morph: None, landed: true, over: false, host }
+        Chat { messages: Vec::new(), draft: TextEdit::new(""), open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host }
+    }
+
+    pub fn is_open(&self) -> bool {
+        self.open
     }
 
     #[cfg(test)]
-    fn is_open(&self) -> bool {
-        self.open
+    pub fn landed(&self) -> bool {
+        self.landed
+    }
+
+    /// Its draft has the keys.
+    #[cfg(test)]
+    pub fn draft_focused(&self) -> bool {
+        self.draft.focused
     }
 
     /// Before showing, on a display with these `insets`: out of view past its right edge, so
@@ -168,27 +175,26 @@ impl Chat {
         self.insets = insets;
         self.screen = screen;
         self.open = false;
-        self.morph = None;
         self.landed = true;
     }
 
-    /// After `place`: waits as a shell over the input's panel at `rect` instead, so `open`
-    /// turns the input into the panel. Applied without motion.
-    pub fn morph_from(&mut self, rect: [f32; 4]) {
-        self.morph = Some(rect);
-        self.landed = false;
+    /// Its field gives up the keys (the input's has them).
+    pub fn blur(&mut self) {
+        self.draft.focused = false;
     }
 
-    /// The input-shaped shell it waits as before flying, if it does.
-    pub fn shell(&self) -> Option<[f32; 4]> {
-        self.morph
-    }
-
-    /// Slides in (or flies from the input), its field focused.
+    /// Slides in, its field focused.
     pub fn open(&mut self) {
         self.open = true;
-        self.morph = None;
         self.draft.focused = true;
+    }
+
+    /// The input's panel becomes this one (after `place`): open at once with `message`, its
+    /// content hidden until `land`.
+    pub fn morph(&mut self, message: Message) {
+        self.open = true;
+        self.landed = false;
+        self.push(message);
     }
 
     /// In place after the flight: its content fades in.
@@ -258,7 +264,7 @@ impl Chat {
     }
 }
 
-fn close_button(t: &tok::Theme) -> El {
+fn close_button<S: 'static>(t: &tok::Theme, lens: fn(&mut S) -> &mut Chat) -> El {
     el().key("close")
         .size(26.0, 26.0)
         .radius(7.0)
@@ -270,10 +276,10 @@ fn close_button(t: &tok::Theme) -> El {
         .label("Close")
         .shortcut_hint("Esc")
         .child(icon(&glyphs::CLOSE, 12.0).color(t.text_secondary))
-        .on_press(|s: &mut Chat| s.dismiss())
+        .on_press(move |s: &mut S| lens(s).dismiss())
 }
 
-fn send_button(ready: bool, t: &tok::Theme) -> El {
+fn send_button<S: 'static>(ready: bool, t: &tok::Theme, lens: fn(&mut S) -> &mut Chat) -> El {
     let button = el().key("send").size(28.0, 28.0).radius(8.0).continuous_corners().center().label("Send").shortcut_hint("↵");
     if ready {
         button
@@ -283,7 +289,7 @@ fn send_button(ready: bool, t: &tok::Theme) -> El {
             .press_scale(0.94)
             .cursor(Cursor::Pointer)
             .child(icon(&icons::ARROW_UP, 16.0).color(Color::WHITE))
-            .on_press_tx(|s: &mut Chat, tx: &mut Tx| send(s, tx))
+            .on_press_tx(move |s: &mut S, tx: &mut Tx| send(lens(s), tx))
     } else {
         button.fill(Color::WHITE.alpha(0.08)).disabled(true).child(icon(&icons::ARROW_UP, 16.0).color(t.text_secondary))
     }
@@ -327,8 +333,9 @@ fn message(i: usize, m: &Message, t: &tok::Theme) -> El {
     out
 }
 
-pub fn view(s: &Chat, cx: &mut Cx<Chat>) -> El {
-    crate::settings::apply_motion(cx);
+/// The panel, keyed `key`, in a window whose state `S` holds the chat at `lens`. The input's row
+/// (`input_row`), while the input's panel is turning into this one, fades out over it.
+pub fn panel<S: 'static>(s: &Chat, key: &str, lens: fn(&mut S) -> &mut Chat, input_row: Option<El>) -> El {
     let t = tok::theme(true);
     let header = row()
         .key("header")
@@ -340,7 +347,7 @@ pub fn view(s: &Chat, cx: &mut Cx<Chat>) -> El {
         .center_y()
         .child(icon(&glyphs::SPARKLE, 16.0).color(ACCENT))
         .child(text("Chat").font(TextStyle::new(13.5, 600.0)).color(t.text).grow(1.0))
-        .child(close_button(&t));
+        .child(close_button(&t, lens));
     let divider = || el().w_full().h(1.0).fill(Color::WHITE.alpha(0.06));
     let mut thread = col().key("thread").w_full().gap(14.0).px(14.0).py(14.0).growth(GrowthSpec::default());
     for (i, m) in s.messages.iter().enumerate() {
@@ -361,9 +368,9 @@ pub fn view(s: &Chat, cx: &mut Cx<Chat>) -> El {
         .color(t.text)
         .caret(t.text, ACCENT.alpha(0.35))
         .placeholder("Message…", t.text_secondary.alpha(0.8))
-        .on_edit(|s: &mut Chat| &mut s.draft)
-        .on_input_key(|s: &mut Chat, ev: &KeyEvent, _: &mut Tx| s.field_key(ev))
-        .on_submit(send);
+        .on_edit(move |s: &mut S| &mut lens(s).draft)
+        .on_input_key(move |s: &mut S, ev: &KeyEvent, _: &mut Tx| lens(s).field_key(ev))
+        .on_submit(move |s: &mut S, tx: &mut Tx| send(lens(s), tx));
     let composer = row()
         .key("composer")
         .w_full()
@@ -377,51 +384,35 @@ pub fn view(s: &Chat, cx: &mut Cx<Chat>) -> El {
         .fill(Color::WHITE.alpha(0.05))
         .border(1.0, Color::WHITE.alpha(0.08))
         .child(col().grow(1.0).min_w(0.0).py(4.0).child(auto_grow(field, 1, 6)))
-        .child(send_button(!s.draft.text.trim().is_empty(), &t));
-    // Hidden while it flies from the input (only the frosted shape reshapes), then fades in.
+        .child(send_button(!s.draft.text.trim().is_empty(), &t, lens));
+    let [x, y, w, h] = side_rect(s.screen, s.insets);
+    // At its landed size from the start, pinned to the panel's top left: the panel reveals it as
+    // it grows. Hidden while the input's panel reshapes, then faded in.
     let content = col()
-        .key("content")
-        .w_full()
-        .h_full()
-        .min_h(0.0)
-        .clip_rounded(RADIUS)
+        .key("chat-layer")
+        .size(w, h)
+        .pin(Some(0.0), Some(0.0), None, None)
         .opacity(if s.landed { 1.0 } else { 0.0 })
         .opacity_motion(Anim::new(Curve::ease_in_out(CONTENT_FADE)))
         .child(header)
         .child(divider())
         .child(messages)
         .child(el().w_full().padding(10.0).child(composer));
-    let root = el().w_full().h_full();
-    // Sent from the input: the same frosted shape as its panel, right over it, about to fly.
-    if let Some([x, y, w, h]) = s.shell() {
-        return root.child(frosted(el().key("shell"), quick_input::RADIUS).size(w, h).pin(Some(x), Some(y), None, None));
-    }
-    let [x, y, w, h] = side_rect(s.screen, s.insets);
-    let panel = frosted(el().key("panel").hit(), RADIUS)
+    let layers = match input_row {
+        Some(row) => vec![content, row.opacity(0.0).opacity_motion(Anim::new(Curve::ease_in_out(ROW_FADE)))],
+        None => vec![content],
+    };
+    quick_input::surface(key, s.open, layers)
         .size(w, h)
         .pin(Some(x), Some(y), None, None)
         .offset(offset(s.open, s.insets), 0.0)
         .offset_motion(Anim::from(GLIDE))
-        .child(content);
-    root.child(panel)
-}
-
-/// The input's look, shared by the shell and the panel so one flies into the other: the system
-/// material under the frost, its border and shadows, corners of `radius`.
-fn frosted(e: El, radius: f32) -> El {
-    e.matched(SHELL)
         .motion(GLIDE)
-        .radius(radius)
-        .continuous_corners()
-        .fill(FROST)
-        .border_gradient(1.0, Color::WHITE.alpha(0.14), Color::WHITE.alpha(0.05))
-        .box_shadow(Shadow::core_animation(0.0, 0.5, 1.5, Color::BLACK.alpha(0.3)))
-        .box_shadow(Shadow::core_animation(0.0, 10.0, 22.0, Color::BLACK.alpha(0.4)))
-        .system_material(SystemMaterial::Popover)
 }
 
-pub fn on_key(s: &mut Chat, event: &KeyEvent, _: &mut Tx) -> bool {
-    s.field_key(event)
+/// Keys in the window with the chat's field focused and nothing else taking them.
+pub fn on_key(s: &mut Chat, event: &KeyEvent) -> bool {
+    s.open && s.field_key(event)
 }
 
 #[cfg(test)]
@@ -458,21 +449,19 @@ mod tests {
     }
 
     #[test]
-    fn sent_from_the_input_it_waits_as_the_inputs_shape_then_flies_and_lands() {
+    fn the_inputs_panel_becomes_it_open_with_the_message_its_content_shown_once_landed() {
         let mut c = Chat::new(None);
-        let input = [446.0, 900.0, 620.0, 52.0];
         c.place(Insets::default(), [1512.0, 982.0]);
-        c.morph_from(input);
-        assert_eq!(c.shell(), Some(input), "right over the input");
-        assert!(!c.landed, "its content waits");
-        c.open();
-        assert_eq!(c.shell(), None, "flying to the side");
-        assert!(!c.landed, "the content stays hidden while it flies");
+        c.morph(msg(0, "hi"));
+        assert!(c.is_open(), "open at once: the input's panel springs to the side");
+        assert!(!c.landed(), "its content waits while it reshapes");
+        assert_eq!(c.messages.len(), 1);
+        assert!(c.draft.focused, "type at once");
         c.land();
-        assert!(c.landed);
+        assert!(c.landed());
         c.close();
         c.place(Insets::default(), [1512.0, 982.0]);
-        assert!(c.shell().is_none() && c.landed, "brought back later, it slides in whole");
+        assert!(c.landed(), "brought back later, it slides in whole");
     }
 
     #[test]

@@ -22,6 +22,9 @@ pub struct Screen {
 }
 
 impl Screen {
+    /// When AppKit can't say: a common laptop display, without a menu bar or Dock.
+    pub const FALLBACK: Screen = Screen { frame: [0.0, 0.0, 1440.0, 900.0], visible: [0.0, 0.0, 1440.0, 900.0], id: 0 };
+
     /// Its size in points.
     pub fn size(&self) -> [f32; 2] {
         [self.frame[2], self.frame[3]]
@@ -30,30 +33,42 @@ impl Screen {
 
 /// The display under the pointer. Main thread.
 pub fn under_pointer() -> Option<Screen> {
+    // SAFETY: a plain AppKit class message with its documented signature, on the main thread.
+    let mouse: CGPoint = unsafe { msg_send![class!(NSEvent), mouseLocation] };
+    let (mx, my) = (mouse.x as f32, mouse.y as f32);
+    all().into_iter().find(|s| {
+        let [x, y, w, h] = s.frame;
+        mx >= x && mx < x + w && my >= y && my < y + h
+    })
+}
+
+/// The display with `CGDirectDisplayID` `id`. Main thread.
+pub fn by_id(id: u32) -> Option<Screen> {
+    all().into_iter().find(|s| s.id == id)
+}
+
+/// Every display. Main thread.
+fn all() -> Vec<Screen> {
+    let mut out = Vec::new();
     // SAFETY: plain AppKit class and instance messages with their documented signatures, on the
     // main thread (the host's loop); `screens` is an autoreleased NSArray kept alive by the pool.
     unsafe {
-        let mouse: CGPoint = msg_send![class!(NSEvent), mouseLocation];
         let screens: *mut AnyObject = msg_send![class!(NSScreen), screens];
         if screens.is_null() {
-            return None;
+            return out;
         }
+        let key = NSString::from_str("NSScreenNumber");
         let count: usize = msg_send![screens, count];
         for i in 0..count {
             let screen: *mut AnyObject = msg_send![screens, objectAtIndex: i];
             let frame: CGRect = msg_send![screen, frame];
-            let [x, y, w, h] = rect(frame);
-            let (mx, my) = (mouse.x as f32, mouse.y as f32);
-            if mx >= x && mx < x + w && my >= y && my < y + h {
-                let visible: CGRect = msg_send![screen, visibleFrame];
-                let description: *mut AnyObject = msg_send![screen, deviceDescription];
-                let key = NSString::from_str("NSScreenNumber");
-                let number: *mut AnyObject =
-                    if description.is_null() { std::ptr::null_mut() } else { msg_send![description, objectForKey: &*key] };
-                let id: u32 = if number.is_null() { 0 } else { msg_send![number, unsignedIntValue] };
-                return Some(Screen { frame: rect(frame), visible: rect(visible), id });
-            }
+            let visible: CGRect = msg_send![screen, visibleFrame];
+            let description: *mut AnyObject = msg_send![screen, deviceDescription];
+            let number: *mut AnyObject =
+                if description.is_null() { std::ptr::null_mut() } else { msg_send![description, objectForKey: &*key] };
+            let id: u32 = if number.is_null() { 0 } else { msg_send![number, unsignedIntValue] };
+            out.push(Screen { frame: rect(frame), visible: rect(visible), id });
         }
     }
-    None
+    out
 }
