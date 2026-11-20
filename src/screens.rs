@@ -42,11 +42,6 @@ pub fn under_pointer() -> Option<Screen> {
     })
 }
 
-/// The display with `CGDirectDisplayID` `id`. Main thread.
-pub fn by_id(id: u32) -> Option<Screen> {
-    all().into_iter().find(|s| s.id == id)
-}
-
 /// Every display. Main thread.
 fn all() -> Vec<Screen> {
     let mut out = Vec::new();

@@ -62,7 +62,10 @@ pub fn attach(frozen: Arc<Frozen>, sel: [f32; 4], marks: Vec<Mark>, id: u64, hos
         eprintln!("Capibarapp: drawing the marks failed: {e}");
     }
     match encode_png(width, height, frozen.scale, &rgba) {
-        Ok(png) => host.update(move |host, _| host.attach_to_quick_input(id, png)),
+        Ok(png) => {
+            let preview = crate::chat::Image::from_rgba(width, height, rgba);
+            host.update(move |host, _| host.attach_to_quick_input(id, png, preview));
+        }
         Err(e) => eprintln!("Capibarapp: encoding failed: {e}"),
     }
 }

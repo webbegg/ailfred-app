@@ -7,7 +7,7 @@
 
 use rune::tok;
 use rune::{
-    Anim, AppHandle, Color, Curve, Cursor, El, GrowthSpec, Key, KeyEvent, Pixels, ScrollSpec, Spring, TextEdit, TextStyle, Transition, Tx,
+    Anim, AppHandle, Color, Curve, Cursor, El, GrowthSpec, Key, KeyEvent, Pixels, ScrollSpec, Shadow, Spring, TextEdit, TextStyle, Transition, Tx,
     auto_grow, col, el, icon, row, text, text_input,
 };
 use rune_kit::glyphs;
@@ -26,6 +26,8 @@ const HEADER_H: f32 = 44.0;
 /// A message's widest, and its images' largest.
 const BUBBLE_MAX_W: f32 = CHAT_W * 0.82;
 const THUMB_MAX: (f32, f32) = (240.0, 160.0);
+/// An enlarged chip's image takes at most this share of the screen's width and height.
+const LIGHTBOX: f32 = 0.8;
 /// The slide in from the edge and back, and the input's panel reshaping into this one.
 const GLIDE: Spring = tok::motion::GLIDE;
 /// How long after the input starts reshaping the content fades in, and over how long; and how
@@ -126,7 +128,8 @@ pub fn toggle(quick_open: bool, started: bool, chat_open: bool) -> Toggle {
     }
 }
 
-/// A sent capture, ready to draw.
+/// A capture, ready to draw (a handle: clones share the pixels).
+#[derive(Clone)]
 pub struct Image {
     pixels: Pixels,
     width: u32,
@@ -136,10 +139,45 @@ pub struct Image {
 impl Image {
     pub fn from_png(png: &[u8]) -> Option<Image> {
         let (width, height, rgba) = decode_png(png)?;
+        Some(Image::from_rgba(width, height, rgba))
+    }
+
+    pub fn from_rgba(width: u32, height: u32, rgba: Vec<u8>) -> Image {
         let pixels = Pixels::new();
         pixels.set(width, height, rgba);
-        Some(Image { pixels, width, height })
+        Image { pixels, width, height }
     }
+
+    /// The image as large as fits in `max` (`(w, h)` in points), keeping its shape, its corners
+    /// rounded `radius`.
+    pub fn fitted(&self, max: (f32, f32), radius: f32) -> El {
+        let (w, h) = thumb_size(self.width, self.height, max);
+        el().size(w, h).radius(radius).continuous_corners().clip_rounded(radius).pixels(&self.pixels)
+    }
+}
+
+/// A chip's image enlarged in the middle of a `screen` of that size, over a dim that closes it
+/// (`close`) when clicked.
+pub fn lightbox<S: 'static>(image: &Image, screen: [f32; 2], close: impl Fn(&mut S) + 'static) -> El {
+    let max = (screen[0] * LIGHTBOX, screen[1] * LIGHTBOX);
+    el().key("preview")
+        .w_full()
+        .h_full()
+        .center()
+        .fill(Color::BLACK.alpha(0.55))
+        .hit()
+        .label("Close preview")
+        .shortcut_hint("Esc")
+        .transition(Transition::opacity())
+        .on_press(close)
+        .child(
+            image
+                .fitted(max, 12.0)
+                .key("preview-image")
+                .border(1.0, Color::WHITE.alpha(0.14))
+                .box_shadow(Shadow::core_animation(0.0, 16.0, 40.0, Color::BLACK.alpha(0.5)))
+                .transition(Transition::scale(0.94)),
+        )
 }
 
 /// One sent message: its text (maybe empty) and its captures.
@@ -153,10 +191,10 @@ pub struct Message {
 pub struct Chat {
     messages: Vec<Message>,
     draft: TextEdit,
-    /// Captures dragged on the screenshot behind the panel, to go with the next message.
+    /// Captures pasted into the field, to go with the next message.
     shots: Vec<Attached>,
-    /// The capture area on the screenshot behind, while there is one.
-    area: Option<u64>,
+    /// The capture whose chip was clicked, shown enlarged.
+    preview: Option<u64>,
     open: bool,
     insets: Insets,
     /// The display's size in points: the overlay covers it.
@@ -173,7 +211,7 @@ pub struct Chat {
 
 impl Chat {
     pub fn new(host: Option<AppHandle<Host>>) -> Self {
-        Chat { messages: Vec::new(), draft: TextEdit::new(""), shots: Vec::new(), area: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host }
+        Chat { messages: Vec::new(), draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host }
     }
 
     pub fn is_open(&self) -> bool {
@@ -233,33 +271,41 @@ impl Chat {
 
     /// Slides out; the conversation and the draft stay. True if it was open.
     pub fn close(&mut self) -> bool {
-        self.area = None;
+        self.preview = None;
         std::mem::replace(&mut self.open, false)
     }
 
-    /// Area `id` was picked on the screenshot behind (None: no area any more).
-    pub fn set_area(&mut self, id: Option<u64>) {
-        self.area = id;
+    /// The display's size in points.
+    pub fn screen(&self) -> [f32; 2] {
+        self.screen
     }
 
-    /// Esc in the field, one step at a time: the capture area on screen goes first (its image
-    /// too), then the chat closes.
+    /// Esc in the field: an enlarged capture closes first, then the chat.
     pub fn escape(&mut self) -> Escape {
-        match self.area.take() {
-            Some(id) => {
-                self.remove(id);
-                Escape::Area(id)
-            }
-            None => Escape::Close,
+        if self.preview.take().is_some() { Escape::Preview } else { Escape::Close }
+    }
+
+    /// Shows capture `id` enlarged (its chip's image was clicked).
+    pub fn open_preview(&mut self, id: u64) {
+        if self.shots.iter().any(|a| a.id == id) {
+            self.preview = Some(id);
         }
+    }
+
+    /// The capture shown enlarged, if any.
+    pub fn preview_image(&self) -> Option<&Image> {
+        let id = self.preview?;
+        self.shots.iter().find(|a| a.id == id).map(|a| &a.preview)
+    }
+
+    pub fn close_preview(&mut self) {
+        self.preview = None;
     }
 
     /// Backspace in an empty field removes the last capture; its id, if one went.
     pub fn backspace_empty(&mut self) -> Option<u64> {
-        let id = self.shots.pop()?.id;
-        if self.area == Some(id) {
-            self.area = None;
-        }
+        let id = self.shots.last()?.id;
+        self.remove(id);
         Some(id)
     }
 
@@ -267,7 +313,7 @@ impl Chat {
     pub fn start_over(&mut self) {
         self.open = false;
         self.over = true;
-        self.area = None;
+        self.preview = None;
     }
 
     /// Adds a message at the end of the conversation, the field focused for the next.
@@ -282,15 +328,18 @@ impl Chat {
     }
 
     /// Adds a capture to the draft, or replaces the one from the same capture area.
-    pub fn attach(&mut self, id: u64, png: Vec<u8>) {
+    pub fn attach(&mut self, id: u64, png: Vec<u8>, preview: Image) {
         match self.shots.iter_mut().find(|a| a.id == id) {
-            Some(shot) => shot.png = png,
-            None => self.shots.push(Attached { id, png }),
+            Some(shot) => (shot.png, shot.preview) = (png, preview),
+            None => self.shots.push(Attached { id, png, preview }),
         }
     }
 
     /// Drops a capture (its chip's X). True if it was attached.
     pub fn remove(&mut self, id: u64) -> bool {
+        if self.preview == Some(id) {
+            self.preview = None;
+        }
         let before = self.shots.len();
         self.shots.retain(|a| a.id != id);
         self.shots.len() != before
@@ -314,27 +363,11 @@ impl Chat {
         }
         let text = self.draft.text.trim().to_owned();
         self.draft.clear();
-        self.area = None;
+        self.preview = None;
         let pngs = std::mem::take(&mut self.shots).into_iter().map(|a| a.png).collect();
         let id = self.messages.last().map_or(0, |m| m.id + 1).max(LOCAL_IDS);
         self.push(Message { id, text, images: Vec::new() });
         Some((id, pngs))
-    }
-
-    /// A chip's X: the capture goes, and its area too if it's still on screen.
-    fn unattach(&mut self, id: u64) {
-        if self.area == Some(id) {
-            self.area = None;
-        }
-        if self.remove(id) {
-            self.forget_area(id);
-        }
-    }
-
-    fn forget_area(&self, id: u64) {
-        if let Some(host) = &self.host {
-            host.update(move |host, _| host.forget_capture_area(id));
-        }
     }
 
     fn dismiss(&self) {
@@ -343,24 +376,17 @@ impl Chat {
         }
     }
 
-    /// Esc steps back (`escape`), then slides the panel out; Backspace in an empty field drops
-    /// the last capture; Cmd+N starts a new chat (`Host::new_chat`).
+    /// Esc closes an enlarged capture, then slides the panel out (`escape`); Backspace in an
+    /// empty field drops the last capture; Cmd+N starts a new chat (`Host::new_chat`).
     fn field_key(&mut self, ev: &KeyEvent) -> bool {
         if ev.key == Key::Escape {
-            match self.escape() {
-                Escape::Area(id) => self.forget_area(id),
-                Escape::Close => self.dismiss(),
+            if self.escape() == Escape::Close {
+                self.dismiss();
             }
             return true;
         }
         if ev.key == Key::Backspace && self.draft.text.is_empty() {
-            return match self.backspace_empty() {
-                Some(id) => {
-                    self.forget_area(id);
-                    true
-                }
-                None => false,
-            };
+            return self.backspace_empty().is_some();
         }
         if ev.is_command('n') {
             if let Some(host) = &self.host {
@@ -406,12 +432,7 @@ fn send_button<S: 'static>(ready: bool, t: &tok::Theme, lens: fn(&mut S) -> &mut
 /// Enter or the send button: the draft and its captures join the conversation; the captures
 /// are decoded off the main thread and show when ready.
 fn send(s: &mut Chat, tx: &mut Tx) {
-    let area = s.area;
     let Some((id, pngs)) = s.send() else { return };
-    // The area sent leaves the screenshot, clear for the next.
-    if let Some(area) = area {
-        s.forget_area(area);
-    }
     tx.scroll_to_bottom("messages");
     if !pngs.is_empty()
         && let Some(host) = &s.host
@@ -508,13 +529,14 @@ pub fn panel<S: 'static>(s: &Chat, key: &str, lens: fn(&mut S) -> &mut Chat, inp
         .continuous_corners()
         .fill(Color::WHITE.alpha(0.05))
         .border(1.0, Color::WHITE.alpha(0.08));
-    // Captures dragged on the screenshot behind, as the input's chips.
+    // Captures pasted in, as the input's chips.
     if !s.shots.is_empty() {
         let compact = quick_input::compact(s.shots.len());
         let mut chips = row().key("chips").gap(6.0).pt(2.0).center_y();
         for shot in &s.shots {
             let id = shot.id;
-            chips = chips.child(quick_input::chip(id, compact, &t, move |s: &mut S| lens(s).unattach(id)));
+            let (remove, open) = (move |s: &mut S| _ = lens(s).remove(id), move |s: &mut S| lens(s).open_preview(id));
+            chips = chips.child(quick_input::chip(shot, compact, &t, remove, open));
         }
         composer = composer.child(chips);
     }
@@ -639,9 +661,9 @@ mod tests {
     #[test]
     fn captures_attach_to_the_draft_replace_in_place_and_go_with_the_next_message() {
         let mut c = Chat::new(None);
-        c.attach(1, vec![1]);
-        c.attach(2, vec![2]);
-        c.attach(1, vec![9]);
+        c.attach(1, vec![1], tiny());
+        c.attach(2, vec![2], tiny());
+        c.attach(1, vec![9], tiny());
         assert_eq!(c.shot_ids(), vec![1, 2], "the same area again replaces its image in place");
         assert!(c.remove(2));
         assert!(!c.remove(2));
@@ -651,36 +673,47 @@ mod tests {
         assert_eq!(c.messages.last().map(|m| (m.id, m.text.as_str())), Some((id, "")));
     }
 
-    #[test]
-    fn esc_discards_the_area_on_screen_first_then_closes() {
-        let mut c = Chat::new(None);
-        c.attach(1, vec![1]);
-        c.attach(2, vec![2]);
-        c.set_area(Some(2));
-        assert_eq!(c.escape(), Escape::Area(2), "the area on screen goes");
-        assert_eq!(c.shot_ids(), vec![1], "its image too");
-        assert_eq!(c.escape(), Escape::Close, "then the chat closes");
+    pub(crate) fn tiny() -> Image {
+        Image::from_rgba(1, 1, vec![0; 4])
     }
 
     #[test]
-    fn backspace_in_an_empty_field_removes_the_last_capture_and_its_area() {
+    fn a_chips_image_opens_enlarged_and_esc_closes_it_before_the_chat() {
         let mut c = Chat::new(None);
-        c.attach(1, vec![1]);
-        c.attach(2, vec![2]);
-        c.set_area(Some(2));
+        c.attach(1, vec![1], tiny());
+        c.attach(2, vec![2], tiny());
+        c.open_preview(2);
+        assert!(c.preview_image().is_some());
+        assert_eq!(c.escape(), Escape::Preview, "the enlarged image closes first");
+        assert!(c.preview_image().is_none());
+        assert_eq!(c.shot_ids(), vec![1, 2], "its capture stays attached");
+        assert_eq!(c.escape(), Escape::Close, "then the chat closes");
+        c.open_preview(9);
+        assert!(c.preview_image().is_none(), "no such capture");
+    }
+
+    #[test]
+    fn removing_or_sending_a_capture_closes_its_enlarged_image() {
+        let mut c = Chat::new(None);
+        c.attach(1, vec![1], tiny());
+        c.open_preview(1);
+        assert!(c.remove(1));
+        assert!(c.preview_image().is_none());
+        assert_eq!(c.escape(), Escape::Close, "nothing enlarged left to close first");
+        c.attach(2, vec![2], tiny());
+        c.open_preview(2);
+        c.send().expect("sent");
+        assert_eq!(c.escape(), Escape::Close);
+    }
+
+    #[test]
+    fn backspace_in_an_empty_field_removes_the_last_capture() {
+        let mut c = Chat::new(None);
+        c.attach(1, vec![1], tiny());
+        c.attach(2, vec![2], tiny());
         assert_eq!(c.backspace_empty(), Some(2));
-        assert_eq!(c.escape(), Escape::Close, "its area went with it");
         assert_eq!(c.backspace_empty(), Some(1));
         assert_eq!(c.backspace_empty(), None);
-    }
-
-    #[test]
-    fn sending_ends_the_area_on_screen() {
-        let mut c = Chat::new(None);
-        c.attach(1, vec![1]);
-        c.set_area(Some(1));
-        c.send().expect("sent");
-        assert_eq!(c.escape(), Escape::Close, "its image went with the message");
     }
 
     #[test]

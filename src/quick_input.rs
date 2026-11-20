@@ -3,16 +3,16 @@
 //! elsewhere closes it, sliding back down. Enter sends: the panel itself turns into the chat
 //! panel (chat.rs), which this window also holds, springing to the right edge as it reshapes.
 //!
-//! While it's open, captures land in it as "Image" chips in the field row (hover one for its X),
-//! dragging out a capture area tucks it away, and once an area is picked it arrives beside that
-//! area, so the prompt reads as being about it.
+//! While it's open (or the chat is), the capture shortcut or menu takes a screenshot for it:
+//! dragging out an area tucks the input away, and the picked area, marked up or not, is pasted
+//! with Enter as a chip with a small preview (click it to see it enlarged; hover for its X).
 
 use std::time::Duration;
 
 use rune::tok;
 use rune::{
     Anim, AppHandle, Color, Cursor, Cx, El, Key, KeyEvent, Shadow, Spring, SystemMaterial, TextEdit, TextStyle, Transition, Tx, el, icon,
-    row, text, text_input,
+    row, text_input,
 };
 use rune_kit::glyphs;
 
@@ -24,7 +24,6 @@ use crate::icons;
 pub const SHORTCUT: &str = "ctrl+alt+space";
 /// The panel's widest and narrowest, its height, and its row's side padding, in points.
 pub const PANEL_W: f32 = 620.0;
-const PANEL_MIN_W: f32 = 480.0;
 pub const PANEL_H: f32 = 52.0;
 const ROW_PAD: f32 = 12.0;
 pub const RADIUS: f32 = 14.0;
@@ -36,20 +35,13 @@ pub const MARGIN: f32 = 40.0;
 /// How far a closed or tucked panel drops at the bottom: out of the window, shadow included. It
 /// opens by rising this far, from outside the screen.
 pub const TUCK: f32 = PANEL_H + MARGIN + PAD;
-/// Beside a capture area it arrives instead: from this little below, faded and slightly small.
-pub const ARRIVE: f32 = 12.0;
-const ARRIVE_SCALE: f32 = 0.98;
-/// The panel's gap to a capture area it sits beside, and to the screen's edges.
-const BESIDE_GAP: f32 = 16.0;
-const EDGE_GAP: f32 = 8.0;
 /// How long the window takes to fade out once closed: long enough for the slide down to play.
 pub const EXIT: Duration = Duration::from_millis(240);
-/// How long the panel waits out of view beside an area before rising: a frame or two, so the
-/// rise starts from there and not from where it was.
+/// How long a panel waits out of view, the window just shown, before sliding in: a frame or
+/// two, so the slide plays on screen.
 pub const ARRIVAL_DELAY: Duration = Duration::from_millis(40);
-/// The slide from the screen edge, and the arrival beside an area.
+/// The slide from the screen edge.
 const GLIDE: Spring = tok::motion::GLIDE;
-const SETTLE: Spring = tok::motion::SETTLE;
 
 /// The accent, #D97757 (Rune colours are linear).
 pub const ACCENT: Color = Color { r: 0.694, g: 0.184, b: 0.095, a: 1.0 };
@@ -62,6 +54,8 @@ pub struct Attached {
     pub id: u64,
     /// The image, ready to send.
     pub png: Vec<u8>,
+    /// The same, to show in its chip (and enlarged).
+    pub preview: chat::Image,
 }
 
 pub struct QuickInput {
@@ -69,19 +63,12 @@ pub struct QuickInput {
     open: bool,
     /// Out of view while a capture area is dragged.
     tucked: bool,
-    /// Placed beside a capture area (it arrives and leaves in place) rather than at the bottom
-    /// (it slides in and out of the screen).
-    beside: bool,
-    /// Waiting out of view beside this area, about to rise there.
-    arriving: Option<u64>,
     /// At the bottom, the Dock's height under the panel's gap: a closed or tucked panel drops
     /// past it too, out of the screen.
     dock: f32,
-    /// The capture's tools have the keys: the field shows it's waiting.
-    editing: bool,
     shots: Vec<Attached>,
-    /// The capture area on screen that the input sits beside, while there is one.
-    area: Option<u64>,
+    /// The capture whose chip was clicked, shown enlarged.
+    preview: Option<u64>,
     /// Where closing goes, so the host hides the window after the slide (None in tests).
     host: Option<AppHandle<Host>>,
     /// The panel's rect at rest, in points on the display the window covers.
@@ -97,12 +84,12 @@ pub struct QuickInput {
     next_message: u64,
 }
 
-/// What Esc in the field does.
+/// What Esc in a field (the input's or the chat's) does.
 #[derive(Debug, PartialEq)]
 pub enum Escape {
-    /// Discards the capture area on screen and its image; the input stays.
-    Area(u64),
-    /// Closes the input.
+    /// Closes the enlarged capture; the panel stays.
+    Preview,
+    /// Closes the panel.
     Close,
 }
 
@@ -125,12 +112,9 @@ impl QuickInput {
             query: TextEdit::new(""),
             open: false,
             tucked: false,
-            beside: false,
-            arriving: None,
             dock: 0.0,
-            editing: false,
             shots: Vec::new(),
-            area: None,
+            preview: None,
             chat: Chat::new(host.clone()),
             host,
             rect: [0.0, 0.0, PANEL_W, PANEL_H],
@@ -140,8 +124,8 @@ impl QuickInput {
         }
     }
 
-    /// The panel's rect at rest (points on the window's display): at the bottom or beside an
-    /// area. Applied without motion, with the panel out of view.
+    /// The panel's rect at rest (points on the window's display). Applied without motion, with
+    /// the panel out of view.
     pub fn set_rect(&mut self, rect: [f32; 4]) {
         self.rect = rect;
     }
@@ -176,8 +160,7 @@ impl QuickInput {
         } else {
             self.open = false;
             self.tucked = false;
-            self.editing = false;
-            self.area = None;
+            self.preview = None;
             self.slot = !self.slot;
             self.morphing = true;
             self.chat.morph(message);
@@ -216,9 +199,8 @@ impl QuickInput {
     /// Goes away, discarding its captures; the text stays for next time. True if it was open.
     pub fn close(&mut self) -> bool {
         self.tucked = false;
-        self.editing = false;
         self.shots.clear();
-        self.area = None;
+        self.preview = None;
         std::mem::replace(&mut self.open, false)
     }
 
@@ -226,86 +208,67 @@ impl QuickInput {
     /// it was doing before, so `open` rises from the screen's edge. Applied without motion.
     pub fn at_bottom(&mut self, dock: f32) {
         self.dock = dock.max(0.0);
-        self.beside = false;
         self.tucked = false;
-        self.arriving = None;
         self.query.focused = true;
     }
 
     /// Where the panel is now.
     pub fn current_pose(&self) -> Pose {
-        let p = pose(self.open, self.tucked, self.beside);
+        let p = pose(self.open, self.tucked);
         if p.dy == TUCK { Pose { dy: TUCK + self.dock, ..p } } else { p }
     }
 
     /// Slides out of view (true) or back into place (false).
     pub fn set_tucked(&mut self, tucked: bool) {
         self.tucked = tucked;
-        self.arriving = None;
         if !tucked {
             self.query.focused = true;
         }
     }
 
-    /// About to arrive beside capture area `id`: waits there, out of view, until `arrived`.
-    pub fn arrive(&mut self, id: u64) {
-        self.beside = true;
-        self.tucked = true;
-        self.arriving = Some(id);
-        self.area = Some(id);
-    }
-
-    /// Rises beside area `id`, unless something else happened since `arrive` (a new drag).
-    pub fn arrived(&mut self, id: u64) {
-        if self.arriving == Some(id) && self.open {
-            self.tucked = false;
-            self.arriving = None;
-            self.query.focused = true;
-        }
-    }
-
-    /// Area `id` is on screen and the input beside it (None: no area any more).
-    #[cfg(test)]
-    fn set_area(&mut self, id: Option<u64>) {
-        self.area = id;
-    }
-
-    /// The capture's tools have the keys (true) or gave them back.
-    pub fn set_editing(&mut self, editing: bool) {
-        self.editing = editing;
-    }
-
-    /// Esc in the field, one step at a time: the capture area on screen goes first (its image
-    /// too), then the input closes.
+    /// Esc in the field: an enlarged capture closes first, then the input.
     pub fn escape(&mut self) -> Escape {
-        match self.area.take() {
-            Some(id) => {
-                self.remove(id);
-                Escape::Area(id)
-            }
-            None => Escape::Close,
+        if self.preview.take().is_some() { Escape::Preview } else { Escape::Close }
+    }
+
+    /// Shows capture `id` enlarged (its chip's image was clicked).
+    pub fn open_preview(&mut self, id: u64) {
+        if self.shots.iter().any(|a| a.id == id) {
+            self.preview = Some(id);
         }
+    }
+
+    /// The capture shown enlarged: the input's, else the chat's.
+    pub fn preview_image(&self) -> Option<&chat::Image> {
+        let own = self.preview.and_then(|id| self.shots.iter().find(|a| a.id == id));
+        own.map(|a| &a.preview).or_else(|| self.chat.preview_image())
+    }
+
+    fn close_preview(&mut self) {
+        self.preview = None;
+        self.chat.close_preview();
     }
 
     /// Backspace in an empty field removes the last capture; its id, if one went.
     pub fn backspace_empty(&mut self) -> Option<u64> {
-        let id = self.shots.pop()?.id;
-        if self.area == Some(id) {
-            self.area = None;
-        }
+        let id = self.shots.last()?.id;
+        self.remove(id);
         Some(id)
     }
 
     /// Adds a capture, or replaces the one from the same capture area.
-    pub fn attach(&mut self, id: u64, png: Vec<u8>) {
+    pub fn attach(&mut self, id: u64, png: Vec<u8>, preview: chat::Image) {
         match self.shots.iter_mut().find(|a| a.id == id) {
-            Some(shot) => shot.png = png,
-            None => self.shots.push(Attached { id, png }),
+            Some(shot) => (shot.png, shot.preview) = (png, preview),
+            None => self.shots.push(Attached { id, png, preview }),
         }
     }
 
     /// Drops a capture (its chip's X). True if it was attached.
     pub fn remove(&mut self, id: u64) -> bool {
+        if self.preview == Some(id) {
+            self.preview = None;
+        }
         let before = self.shots.len();
         self.shots.retain(|a| a.id != id);
         self.shots.len() != before
@@ -351,83 +314,29 @@ impl QuickInput {
         }
     }
 
-    /// A chip's X: the capture goes, and so does its area if it's still on screen.
-    fn unattach(&mut self, id: u64) {
-        if self.area == Some(id) {
-            self.area = None;
-        }
-        if self.remove(id) {
-            self.forget_area(id);
-        }
-    }
-
-    fn forget_area(&self, id: u64) {
-        if let Some(host) = &self.host {
-            host.update(move |host, _| host.forget_capture_area(id));
-        }
-    }
-
-    /// Esc in the field: see `escape`.
-    fn on_escape(&mut self) {
-        match self.escape() {
-            Escape::Area(id) => self.forget_area(id),
-            Escape::Close => self.dismiss(),
-        }
-    }
-
-    /// The field's own keys: Esc steps back, Backspace in an empty field drops the last capture,
-    /// ⌘E opens or closes the capture's tools.
+    /// The field's own keys: Esc closes an enlarged capture, then the input (`escape`);
+    /// Backspace in an empty field drops the last capture.
     fn field_key(&mut self, ev: &KeyEvent) -> bool {
         match ev.key {
-            Key::Escape => self.on_escape(),
-            Key::Backspace if self.query.text.is_empty() => match self.backspace_empty() {
-                Some(id) => self.forget_area(id),
-                None => return false,
-            },
-            _ if ev.is_command('e') => {
-                if let Some(host) = &self.host {
-                    host.update(|host, _| host.toggle_capture_tools());
+            Key::Escape => {
+                if self.escape() == Escape::Close {
+                    self.dismiss();
                 }
             }
+            Key::Backspace if self.query.text.is_empty() => return self.backspace_empty().is_some(),
             _ => return false,
         }
         true
     }
 }
 
-/// Where the panel is for `open`, `tucked` and `beside`: at the bottom a closed or tucked panel
-/// is below the screen (tucked also fades, so arriving elsewhere reads as arriving); beside an
-/// area it arrives and leaves in place, from a little below, faded and slightly small.
-pub fn pose(open: bool, tucked: bool, beside: bool) -> Pose {
-    match (open, tucked, beside) {
-        (true, false, _) => Pose { dy: 0.0, alpha: 1.0, scale: 1.0 },
-        (false, _, true) | (true, true, true) => Pose { dy: ARRIVE, alpha: 0.0, scale: ARRIVE_SCALE },
-        (false, _, false) => Pose { dy: TUCK, alpha: 1.0, scale: 1.0 },
-        (true, true, false) => Pose { dy: TUCK, alpha: 0.0, scale: 1.0 },
-    }
-}
-
-/// The panel's rect (points on a `screen` of that size) beside capture area `sel`
-/// (`[x, y, w, h]`): right of it, else left, else below, else above, else over its bottom.
-/// Beside it's vertically centred on it; above or below it takes the area's width (within the
-/// panel's widest and narrowest) and lines up with its left edge. Always on screen.
-pub fn beside(sel: [f32; 4], screen: [f32; 2]) -> [f32; 4] {
-    let ([x, y, w, h], [sw, sh], ph) = (sel, screen, PANEL_H);
-    let clamp_x = |v: f32, pw: f32| v.min(sw - pw - EDGE_GAP).max(EDGE_GAP);
-    let clamp_y = |v: f32| v.min(sh - ph - EDGE_GAP).max(EDGE_GAP);
-    let middle = clamp_y(y + h / 2.0 - ph / 2.0);
-    // Above or below: as wide as the area, within the panel's narrowest and widest.
-    let along = w.clamp(PANEL_MIN_W, PANEL_W);
-    if x + w + BESIDE_GAP + PANEL_W <= sw - EDGE_GAP {
-        [x + w + BESIDE_GAP, middle, PANEL_W, ph]
-    } else if x - BESIDE_GAP - PANEL_W >= EDGE_GAP {
-        [x - BESIDE_GAP - PANEL_W, middle, PANEL_W, ph]
-    } else if y + h + BESIDE_GAP + ph <= sh - EDGE_GAP {
-        [clamp_x(x, along), y + h + BESIDE_GAP, along, ph]
-    } else if y - BESIDE_GAP - ph >= EDGE_GAP {
-        [clamp_x(x, along), y - BESIDE_GAP - ph, along, ph]
-    } else {
-        [clamp_x(x + w / 2.0 - PANEL_W / 2.0, PANEL_W), clamp_y(y + h - ph - BESIDE_GAP), PANEL_W, ph]
+/// Where the panel is for `open` and `tucked`: a closed or tucked panel is below the screen
+/// (tucked also fades).
+pub fn pose(open: bool, tucked: bool) -> Pose {
+    match (open, tucked) {
+        (true, false) => Pose { dy: 0.0, alpha: 1.0, scale: 1.0 },
+        (false, _) => Pose { dy: TUCK, alpha: 1.0, scale: 1.0 },
+        (true, true) => Pose { dy: TUCK, alpha: 0.0, scale: 1.0 },
     }
 }
 
@@ -437,14 +346,12 @@ pub fn bottom_panel(screen: [f32; 2], dock: f32) -> [f32; 4] {
     [(screen[0] - PANEL_W) / 2.0, screen[1] - dock.max(0.0) - MARGIN - PANEL_H, PANEL_W, PANEL_H]
 }
 
-/// The field's hint: what it's for, given `shots` attached, or that the capture's tools have
-/// the keys.
-pub fn placeholder(shots: usize, editing: bool) -> &'static str {
-    match (editing, shots) {
-        (true, _) => "Editing the screenshot · ↵ Done · Esc",
-        (false, 0) => "Ask anything, or drag to capture…",
-        (false, 1) => "Ask about this screenshot…",
-        (false, _) => "Ask about these screenshots…",
+/// The field's hint: what it's for, given `shots` attached.
+pub fn placeholder(shots: usize) -> &'static str {
+    match shots {
+        0 => "Ask anything…",
+        1 => "Ask about this screenshot…",
+        _ => "Ask about these screenshots…",
     }
 }
 
@@ -453,9 +360,18 @@ pub fn compact(n: usize) -> bool {
     n > LABELLED_CHIPS
 }
 
-/// A capture's chip: "Image" with an X on hover, or (`compact`, many of them) just the icon,
-/// which the X replaces on hover.
-pub fn chip<S: 'static>(id: u64, compact: bool, t: &tok::Theme, remove: impl Fn(&mut S) + 'static) -> El {
+/// A capture's chip: a small preview of it (clicked, `open` shows it enlarged) and its X
+/// (`remove`) on hover; `compact` (many of them), a smaller preview with the X over its corner.
+pub fn chip<S: 'static>(shot: &Attached, compact: bool, t: &tok::Theme, remove: impl Fn(&mut S) + 'static, open: impl Fn(&mut S) + 'static) -> El {
+    let id = shot.id;
+    let preview = shot
+        .preview
+        .fitted(if compact { (22.0, 18.0) } else { (40.0, 18.0) }, 3.0)
+        .key(format!("shot-preview-{id}"))
+        .border(1.0, Color::WHITE.alpha(0.12))
+        .cursor(Cursor::Pointer)
+        .label("Show larger")
+        .on_press(open);
     let close = el()
         .key(format!("shot-x-{id}"))
         .size(20.0, 20.0)
@@ -479,18 +395,12 @@ pub fn chip<S: 'static>(id: u64, compact: bool, t: &tok::Theme, remove: impl Fn(
     };
     if compact {
         return base(el())
-            .w(24.0)
-            .child(el().size(24.0, 24.0).center().group_opacity(1.0, 0.0).child(icon(&icons::IMAGE, 14.0).color(t.text)).pin(Some(0.0), Some(0.0), None, None))
-            .child(el().size(24.0, 24.0).center().child(close).pin(Some(0.0), Some(0.0), None, None));
+            .w(30.0)
+            .center()
+            .child(preview)
+            .child(close.size(14.0, 14.0).radius(7.0).fill(Color::BLACK.alpha(0.6)).pin(None, Some(-4.0), Some(-4.0), None));
     }
-    base(row())
-        .pl(7.0)
-        .pr(2.0)
-        .gap(5.0)
-        .center_y()
-        .child(icon(&icons::IMAGE, 14.0).color(t.text.alpha(0.85)))
-        .child(text("Image").font(TextStyle::new(11.5, 450.0)).color(t.text.alpha(0.85)))
-        .child(close)
+    base(row()).pl(3.0).pr(2.0).gap(3.0).center_y().child(preview).child(close)
 }
 
 fn send_button(ready: bool, t: &tok::Theme) -> El {
@@ -549,7 +459,7 @@ pub fn view(s: &QuickInput, cx: &mut Cx<QuickInput>) -> El {
     crate::settings::apply_motion(cx);
     let t = tok::theme(true);
     let Pose { dy, alpha, scale } = s.current_pose();
-    let motion = Anim::from(if s.beside { SETTLE } else { GLIDE });
+    let motion = Anim::from(GLIDE);
     let [x, y, w, h] = s.rect;
     // Just sent: the row is in the chat's panel, fading; the input's new panel waits empty, out
     // of view, landing at once (its element was the chat's, maybe mid-slide).
@@ -563,12 +473,16 @@ pub fn view(s: &QuickInput, cx: &mut Cx<QuickInput>) -> El {
         .opacity_motion(motion.clone())
         .scale(scale)
         .scale_motion(motion)
-        .motion(if s.beside { SETTLE } else { GLIDE });
+        .motion(GLIDE);
     if s.morphing {
         input = input.instant_changes();
     }
     let chat = chat::panel(&s.chat, s.chat_key(), |s: &mut QuickInput| &mut s.chat, s.morphing.then(|| input_row(s, &t)));
-    el().w_full().h_full().child(chat).child(input)
+    let root = el().w_full().h_full().child(chat).child(input);
+    match s.preview_image() {
+        Some(image) => root.child(chat::lightbox(image, s.chat.screen(), |s: &mut QuickInput| s.close_preview())),
+        None => root,
+    }
 }
 
 /// The field row (the sparkle, the chips, the field, the send button) at the panel's size,
@@ -581,8 +495,7 @@ fn input_row(s: &QuickInput, t: &tok::Theme) -> El {
         .min_w(FIELD_MIN_W)
         .color(t.text)
         .caret(t.text, ACCENT.alpha(0.35))
-        .placeholder(placeholder(s.shots.len(), s.editing), t.text_secondary.alpha(0.8))
-        .opacity(if s.editing { 0.6 } else { 1.0 })
+        .placeholder(placeholder(s.shots.len()), t.text_secondary.alpha(0.8))
         .animate_layout()
         .on_edit(|s: &mut QuickInput| &mut s.query)
         .on_input_key(|s: &mut QuickInput, ev: &KeyEvent, _: &mut Tx| s.field_key(ev))
@@ -591,7 +504,8 @@ fn input_row(s: &QuickInput, t: &tok::Theme) -> El {
     let mut chips = row().key("chips").gap(6.0).center_y();
     for shot in &s.shots {
         let id = shot.id;
-        chips = chips.child(chip(id, compact, t, move |s: &mut QuickInput| s.unattach(id)));
+        let (remove, open) = (move |s: &mut QuickInput| _ = s.remove(id), move |s: &mut QuickInput| s.open_preview(id));
+        chips = chips.child(chip(shot, compact, t, remove, open));
     }
     let mut field_row = row()
         .key("field-row")
@@ -644,7 +558,7 @@ mod tests {
     fn starts_closed_below_the_screen_so_it_slides_in_from_outside() {
         let s = QuickInput::new(None);
         assert!(!s.is_open());
-        assert_eq!(pose(false, false, false), Pose { dy: TUCK, alpha: 1.0, scale: 1.0 });
+        assert_eq!(pose(false, false), Pose { dy: TUCK, alpha: 1.0, scale: 1.0 });
         assert!(TUCK >= PANEL_H + MARGIN + PAD, "fully below the bottom edge, shadow included");
     }
 
@@ -654,32 +568,11 @@ mod tests {
         s.open();
         assert!(s.is_open());
         assert!(s.query.focused, "the field takes the keys");
-        assert_eq!(pose(true, false, false), Pose { dy: 0.0, alpha: 1.0, scale: 1.0 });
-        assert_eq!(pose(true, false, true), Pose { dy: 0.0, alpha: 1.0, scale: 1.0 });
+        assert_eq!(pose(true, false), Pose { dy: 0.0, alpha: 1.0, scale: 1.0 });
     }
 
-    #[test]
-    fn beside_an_area_it_arrives_and_leaves_in_place() {
-        let arriving = Pose { dy: ARRIVE, alpha: 0.0, scale: ARRIVE_SCALE };
-        assert_eq!(pose(true, true, true), arriving, "tucked for a drag, or about to arrive");
-        assert_eq!(pose(false, false, true), arriving, "closing");
-        assert!(ARRIVE < PAD, "inside the window: no hard edge mid-screen");
-        let mut s = QuickInput::new(None);
-        s.open();
-        s.arrive(7);
-        assert!(s.tucked && s.beside);
-        s.query.focused = false;
-        s.arrived(7);
-        assert_eq!(pose(s.open, s.tucked, s.beside).dy, 0.0, "risen");
-        assert!(s.query.focused, "ready to type at once");
-        s.arrive(8);
-        s.set_tucked(true);
-        s.arrived(8);
-        assert!(s.tucked, "a drag started since: it stays out of view");
-        assert_eq!(s.escape(), Escape::Area(8));
-        s.close();
-        s.at_bottom(0.0);
-        assert_eq!(pose(s.open, s.tucked, s.beside).dy, TUCK, "the next opening slides in from the bottom again");
+    fn tiny() -> chat::Image {
+        chat::Image::from_rgba(1, 1, vec![0; 4])
     }
 
     #[test]
@@ -720,7 +613,7 @@ mod tests {
         s.query = TextEdit::new("hi");
         assert!(s.send_ready());
         s.query = TextEdit::new("");
-        s.attach(1, vec![1]);
+        s.attach(1, vec![1], tiny());
         assert!(s.send_ready());
     }
 
@@ -728,8 +621,8 @@ mod tests {
     fn captures_attach_and_go_with_the_submission() {
         let mut s = QuickInput::new(None);
         s.open();
-        s.attach(1, vec![1]);
-        s.attach(2, vec![2]);
+        s.attach(1, vec![1], tiny());
+        s.attach(2, vec![2], tiny());
         assert_eq!(s.ids(), vec![1, 2]);
         s.query = TextEdit::new("what is this?");
         let (text, shots) = s.take_submission().unwrap();
@@ -741,9 +634,9 @@ mod tests {
     #[test]
     fn the_same_area_again_replaces_its_capture_in_place() {
         let mut s = QuickInput::new(None);
-        s.attach(1, vec![1]);
-        s.attach(2, vec![2]);
-        s.attach(1, vec![9]);
+        s.attach(1, vec![1], tiny());
+        s.attach(2, vec![2], tiny());
+        s.attach(1, vec![9], tiny());
         assert_eq!(s.ids(), vec![1, 2], "no second chip, same place");
         assert_eq!(s.shots[0].png, vec![9], "with the marked-up image");
     }
@@ -751,8 +644,8 @@ mod tests {
     #[test]
     fn a_chips_x_removes_only_that_capture() {
         let mut s = QuickInput::new(None);
-        s.attach(1, vec![1]);
-        s.attach(2, vec![2]);
+        s.attach(1, vec![1], tiny());
+        s.attach(2, vec![2], tiny());
         assert!(s.remove(1));
         assert_eq!(s.ids(), vec![2]);
         assert!(!s.remove(1), "already gone");
@@ -762,51 +655,68 @@ mod tests {
     fn backspace_in_an_empty_field_removes_the_last_capture() {
         let mut s = QuickInput::new(None);
         assert_eq!(s.backspace_empty(), None, "nothing to remove");
-        s.attach(1, vec![1]);
-        s.attach(2, vec![2]);
-        s.set_area(Some(2));
+        s.attach(1, vec![1], tiny());
+        s.attach(2, vec![2], tiny());
         assert_eq!(s.backspace_empty(), Some(2));
         assert_eq!(s.ids(), vec![1]);
-        assert_eq!(s.escape(), Escape::Close, "its area went with it");
         assert_eq!(s.backspace_empty(), Some(1));
         assert!(s.ids().is_empty());
     }
 
     #[test]
-    fn esc_discards_the_area_on_screen_first_then_closes() {
+    fn a_chips_image_opens_enlarged_and_esc_closes_it_before_the_input() {
         let mut s = QuickInput::new(None);
         s.open();
-        s.attach(1, vec![1]);
-        s.attach(2, vec![2]);
-        s.set_area(Some(2));
-        assert_eq!(s.escape(), Escape::Area(2), "the area on screen goes");
-        assert_eq!(s.ids(), vec![1], "with its image only");
+        s.attach(1, vec![1], tiny());
+        s.attach(2, vec![2], tiny());
+        assert!(s.preview_image().is_none());
+        s.open_preview(2);
+        assert!(s.preview_image().is_some());
+        assert_eq!(s.escape(), Escape::Preview, "the enlarged image closes first");
+        assert!(s.preview_image().is_none());
+        assert_eq!(s.ids(), vec![1, 2], "its capture stays attached");
         assert!(s.is_open(), "the input stays");
         assert_eq!(s.escape(), Escape::Close, "then the input closes");
+    }
+
+    #[test]
+    fn removing_its_capture_or_closing_closes_the_enlarged_image() {
+        let mut s = QuickInput::new(None);
+        s.open();
+        s.attach(1, vec![1], tiny());
+        s.attach(2, vec![2], tiny());
+        s.open_preview(2);
+        assert!(s.remove(1), "another one");
+        assert!(s.preview_image().is_some());
+        assert_eq!(s.backspace_empty(), Some(2));
+        assert!(s.preview_image().is_none(), "its own");
+        assert_eq!(s.escape(), Escape::Close, "nothing enlarged left to close first");
+        s.open();
+        s.attach(3, vec![3], tiny());
+        s.open_preview(3);
+        s.close();
+        assert!(s.preview_image().is_none());
+    }
+
+    #[test]
+    fn the_chats_enlarged_image_shows_in_the_shared_window() {
+        let mut s = QuickInput::new(None);
+        s.chat.attach(5, vec![5], tiny());
+        s.chat.open_preview(5);
+        assert!(s.preview_image().is_some());
+        s.close_preview();
+        assert!(s.preview_image().is_none());
     }
 
     #[test]
     fn closing_discards_the_captures_and_keeps_the_text() {
         let mut s = QuickInput::new(None);
         s.open();
-        s.attach(1, vec![1]);
-        s.set_area(Some(1));
-        s.set_editing(true);
+        s.attach(1, vec![1], tiny());
         s.query = TextEdit::new("draft");
         s.close();
         assert!(s.ids().is_empty());
-        assert!(!s.editing);
-        assert_eq!(s.escape(), Escape::Close, "no area left either");
         assert_eq!(s.query.text, "draft");
-    }
-
-    #[test]
-    fn a_chips_x_on_the_area_on_screen_forgets_it() {
-        let mut s = QuickInput::new(None);
-        s.attach(1, vec![1]);
-        s.set_area(Some(1));
-        s.unattach(1);
-        assert_eq!(s.escape(), Escape::Close);
     }
 
     #[test]
@@ -817,16 +727,15 @@ mod tests {
 
     #[test]
     fn the_hint_says_what_the_field_is_for() {
-        assert_eq!(placeholder(0, false), "Ask anything, or drag to capture…");
-        assert_eq!(placeholder(1, false), "Ask about this screenshot…");
-        assert_eq!(placeholder(3, false), "Ask about these screenshots…");
-        assert_eq!(placeholder(1, true), "Editing the screenshot · ↵ Done · Esc");
+        assert_eq!(placeholder(0), "Ask anything…");
+        assert_eq!(placeholder(1), "Ask about this screenshot…");
+        assert_eq!(placeholder(3), "Ask about these screenshots…");
     }
 
     #[test]
     fn a_capture_alone_can_be_submitted() {
         let mut s = QuickInput::new(None);
-        s.attach(1, vec![0]);
+        s.attach(1, vec![0], tiny());
         let (text, shots) = s.take_submission().unwrap();
         assert_eq!((text.as_str(), shots.len()), ("", 1));
     }
@@ -836,72 +745,18 @@ mod tests {
         let mut s = QuickInput::new(None);
         s.open();
         s.set_tucked(true);
-        assert_eq!(pose(s.open, s.tucked, s.beside), Pose { dy: TUCK, alpha: 0.0, scale: 1.0 }, "below the screen");
+        assert_eq!(pose(s.open, s.tucked), Pose { dy: TUCK, alpha: 0.0, scale: 1.0 }, "below the screen");
         s.set_tucked(false);
-        assert_eq!(pose(s.open, s.tucked, s.beside).dy, 0.0);
+        assert_eq!(pose(s.open, s.tucked).dy, 0.0);
     }
 
     #[test]
     fn a_closed_input_stays_closed_when_tucked_and_reopens_untucked() {
         let mut s = QuickInput::new(None);
         s.set_tucked(true);
-        assert_eq!(pose(s.open, s.tucked, s.beside).dy, TUCK);
+        assert_eq!(pose(s.open, s.tucked).dy, TUCK);
         s.open();
         assert!(!s.tucked);
-    }
-
-    const SCREEN: [f32; 2] = [1920.0, 1080.0];
-
-    #[test]
-    fn the_input_sits_right_of_the_area_centred_on_it() {
-        let [x, y, w, h] = beside([100.0, 200.0, 600.0, 500.0], SCREEN);
-        assert_eq!((x, w), (100.0 + 600.0 + BESIDE_GAP, PANEL_W));
-        assert_eq!(y + h / 2.0, 200.0 + 250.0);
-    }
-
-    #[test]
-    fn without_room_on_the_right_it_goes_left_then_below_then_above() {
-        let [x, _, w, _] = beside([1300.0, 200.0, 600.0, 500.0], SCREEN);
-        assert_eq!(x + w, 1300.0 - BESIDE_GAP, "left of it");
-        let [x, y, w, _] = beside([500.0, 100.0, 1000.0, 500.0], SCREEN);
-        assert_eq!((x, y, w), (500.0, 600.0 + BESIDE_GAP, PANEL_W), "below, left-aligned, at most the widest");
-        let [_, y, _, h] = beside([500.0, 400.0, 1000.0, 640.0], SCREEN);
-        assert_eq!(y + h, 400.0 - BESIDE_GAP, "above");
-    }
-
-    #[test]
-    fn above_or_below_it_takes_the_areas_width() {
-        let [x, _, w, _] = beside([400.0, 100.0, 520.0, 500.0], [1200.0, 1000.0]);
-        assert_eq!((x, w), (400.0, 520.0), "both edges line up");
-        let [_, _, w, _] = beside([500.0, 100.0, 300.0, 500.0], [1200.0, 1000.0]);
-        assert_eq!(w, PANEL_MIN_W, "never narrower than this");
-    }
-
-    #[test]
-    fn the_input_stays_on_screen() {
-        // Right of an area at the very top: centred would poke above the screen.
-        let [_, y, _, _] = beside([100.0, 0.0, 200.0, 20.0], SCREEN);
-        assert_eq!(y, EDGE_GAP);
-        // Below a narrow area at the right edge: left-aligned would run off it.
-        let [x, _, w, _] = beside([1500.0, 100.0, 410.0, 500.0], [1920.0, 1080.0]);
-        assert!(x + w <= 1920.0 - EDGE_GAP, "{x} + {w}");
-        // The whole screen: over its bottom.
-        let [_, y, _, h] = beside([0.0, 0.0, 1920.0, 1080.0], SCREEN);
-        assert!(y + h <= 1080.0 - EDGE_GAP);
-    }
-
-    #[test]
-    fn opening_rises_from_below_the_screen_even_right_after_closing_beside_an_area() {
-        let mut s = QuickInput::new(None);
-        s.open();
-        s.arrive(1);
-        s.arrived(1);
-        s.close();
-        // Reopened before the closed input went back to the bottom.
-        s.at_bottom(0.0);
-        assert_eq!(s.current_pose(), Pose { dy: TUCK, alpha: 1.0, scale: 1.0 }, "waits below the screen, opaque");
-        s.open();
-        assert_eq!(s.current_pose(), Pose { dy: 0.0, alpha: 1.0, scale: 1.0 });
     }
 
     #[test]
@@ -939,7 +794,7 @@ mod tests {
         s.open();
         s.query = TextEdit::new(text);
         if let Some(id) = shot {
-            s.attach(id, vec![1, 2, 3]);
+            s.attach(id, vec![1, 2, 3], tiny());
         }
         s
     }
