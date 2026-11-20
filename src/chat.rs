@@ -276,9 +276,13 @@ impl Chat {
         self.push(message);
     }
 
-    /// In place after the flight: its content fades in.
+    /// In place after the flight: its content fades in, its field taking the keys (they passed
+    /// it by while it was transparent).
     pub fn land(&mut self) {
         self.landed = true;
+        if self.open {
+            self.draft.focused = true;
+        }
     }
 
     /// Message `id`'s captures, decoded.
@@ -597,6 +601,9 @@ pub fn panel<S: 'static>(s: &Chat, key: &str, lens: fn(&mut S) -> &mut Chat, inp
         .pin(Some(x), Some(y), None, None)
         .offset(offset(s.open, s.insets), 0.0)
         .offset_motion(Anim::from(GLIDE))
+        // The input's panel arrives pressed in (sending) and springs back to full size.
+        .scale(1.0)
+        .scale_motion(Anim::from(GLIDE))
         .motion(GLIDE)
 }
 
@@ -636,6 +643,17 @@ pub(crate) mod tests {
 
     fn msg(id: u64, text: &str) -> Message {
         Message { id, text: text.into(), images: Vec::new() }
+    }
+
+    #[test]
+    fn landing_gives_its_field_the_keys_though_it_lost_them_while_hidden() {
+        let mut c = Chat::new(None);
+        c.morph(Message { id: 0, text: "hi".into(), images: Vec::new() });
+        // Its content is transparent while the panel reshapes, so the window's focus passes it
+        // by and the field's model is told it's not focused.
+        c.draft.focused = false;
+        c.land();
+        assert!(c.draft_focused(), "type the next message at once");
     }
 
     #[test]

@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use rune::tok;
 use rune::{
-    Anim, AppHandle, Color, Cursor, Cx, El, Key, KeyEvent, Shadow, Spring, SystemMaterial, TextEdit, TextStyle, Transition, Tx, col, el, icon,
+    Anim, AppHandle, Color, Curve, Cursor, Cx, El, Key, KeyEvent, Shadow, Spring, SystemMaterial, TextEdit, TextStyle, Transition, Tx, col, el, icon,
     row, text_input,
 };
 use rune_kit::glyphs;
@@ -42,6 +42,9 @@ pub const EXIT: Duration = Duration::from_millis(240);
 pub const ARRIVAL_DELAY: Duration = Duration::from_millis(40);
 /// The slide from the screen edge.
 const GLIDE: Spring = tok::motion::GLIDE;
+/// Sending presses the whole panel in to this scale, this fast, before it goes.
+pub const PRESSED_SCALE: f32 = 0.96;
+pub const PRESS: Duration = Duration::from_millis(110);
 
 /// The accent, #D97757 (Rune colours are linear).
 pub const ACCENT: Color = Color { r: 0.694, g: 0.184, b: 0.095, a: 1.0 };
@@ -84,6 +87,8 @@ pub struct QuickInput {
     next_message: u64,
     /// The next pasted image's id.
     next_shot: u64,
+    /// Enter or the send button: the panel is pressed in, sending once it's down (`release`).
+    pressed: bool,
 }
 
 /// What Esc in a field (the input's or the chat's) does.
@@ -131,6 +136,7 @@ impl QuickInput {
             morphing: false,
             next_message: 0,
             next_shot: 0,
+            pressed: false,
         }
     }
 
@@ -186,6 +192,10 @@ impl QuickInput {
             self.shots.clear();
         }
         self.chat.land();
+        // Cmd+N meanwhile: the new input keeps the keys.
+        if self.open {
+            self.chat.blur();
+        }
     }
 
     pub fn is_open(&self) -> bool {
@@ -209,6 +219,7 @@ impl QuickInput {
     /// Goes away, discarding its captures; the text stays for next time. True if it was open.
     pub fn close(&mut self) -> bool {
         self.tucked = false;
+        self.pressed = false;
         self.shots.clear();
         self.preview = None;
         std::mem::replace(&mut self.open, false)
@@ -224,7 +235,10 @@ impl QuickInput {
 
     /// Where the panel is now.
     pub fn current_pose(&self) -> Pose {
-        let p = pose(self.open, self.tucked);
+        let mut p = pose(self.open, self.tucked);
+        if self.pressed {
+            p.scale = PRESSED_SCALE;
+        }
         if p.dy == TUCK { Pose { dy: TUCK + self.dock + strip_h(self.shots.len()), ..p } } else { p }
     }
 
@@ -334,8 +348,35 @@ impl QuickInput {
         }
     }
 
-    /// Sends what's typed and attached (`send`); the host keeps up and decodes the captures.
+    /// Enter or the send button, with something to send: the panel presses in (true), and the
+    /// host sends it once it's down (`release`). Again meanwhile, or nothing to send: false.
+    pub fn press(&mut self) -> bool {
+        if !self.open || self.pressed || !self.send_ready() {
+            return false;
+        }
+        self.pressed = true;
+        true
+    }
+
+    /// The press is down: what's typed and attached goes (`send`), unless the input closed
+    /// meanwhile.
+    pub fn release(&mut self) {
+        if std::mem::replace(&mut self.pressed, false) && self.open {
+            self.send_now();
+        }
+    }
+
+    /// Presses the panel in, the host sending once it's down.
     fn submit(&mut self) {
+        if self.press()
+            && let Some(host) = &self.host
+        {
+            host.update(|host, _| host.send_after_press());
+        }
+    }
+
+    /// Sends what's typed and attached (`send`); the host keeps up and decodes the captures.
+    fn send_now(&mut self) {
         if let Some((id, text, pngs)) = self.send() {
             let bytes: usize = pngs.iter().map(Vec::len).sum();
             eprintln!("Capibarapp: quick input: {text:?} with {} capture(s), {bytes} bytes of PNG", pngs.len());
@@ -503,7 +544,7 @@ pub fn view(s: &QuickInput, cx: &mut Cx<QuickInput>) -> El {
         .opacity(alpha)
         .opacity_motion(motion.clone())
         .scale(scale)
-        .scale_motion(motion)
+        .scale_motion(if s.pressed { Anim::new(Curve::ease_in_out(PRESS.as_secs_f32())) } else { motion })
         .motion(GLIDE);
     if s.morphing {
         input = input.instant_changes();
@@ -861,6 +902,35 @@ mod tests {
             s.attach(id, vec![1, 2, 3], tiny());
         }
         s
+    }
+
+    #[test]
+    fn sending_presses_the_whole_panel_in_then_goes_once_its_down() {
+        let mut s = sent("what is this?", None);
+        assert!(s.press());
+        assert_eq!(s.current_pose().scale, PRESSED_SCALE, "pressed in");
+        assert!(!s.morphing && s.is_open(), "not sent yet");
+        assert!(!s.press(), "Enter again meanwhile sends nothing more");
+        s.release();
+        assert!(s.morphing && s.chat.is_open(), "sent: it becomes the chat");
+        assert_eq!(s.current_pose().scale, 1.0);
+        assert!(!s.press(), "nothing left to send");
+        // Closed while pressed: nothing goes.
+        let mut s = sent("draft", None);
+        assert!(s.press());
+        s.close();
+        s.release();
+        assert!(!s.morphing && !s.chat.is_open());
+        assert!(!QuickInput::new(None).press(), "empty: no press");
+    }
+
+    #[test]
+    fn a_new_input_opened_before_the_chat_lands_keeps_the_keys() {
+        let mut s = sent("hi", None);
+        s.send();
+        s.open();
+        s.land();
+        assert!(s.query.focused && !s.chat.draft_focused());
     }
 
     #[test]

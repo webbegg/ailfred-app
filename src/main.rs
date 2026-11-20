@@ -240,6 +240,18 @@ impl Host {
         }
     }
 
+    /// Enter or the send button pressed the input's panel in: once it's down, what's in it goes.
+    pub fn send_after_press(&self) {
+        let Some(quick) = self.quick.clone() else { return };
+        std::thread::spawn(move || {
+            std::thread::sleep(quick_input::PRESS);
+            quick.update(|s, tx| {
+                s.release();
+                tx.animated();
+            });
+        });
+    }
+
     /// Enter in the quick input sent message `id` (`QuickInput::send`): the input's panel is
     /// the chat's now, springing to the side; its content fades in after `chat::LANDING`. The
     /// message's captures (`pngs`) are decoded off the main thread and join it when ready.
