@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use rune::tok;
 use rune::{
-    Anim, AppHandle, Color, Cursor, Cx, El, Key, KeyEvent, Shadow, Spring, SystemMaterial, TextEdit, TextStyle, Transition, Tx, el, icon,
+    Anim, AppHandle, Color, Cursor, Cx, El, Key, KeyEvent, Shadow, Spring, SystemMaterial, TextEdit, TextStyle, Transition, Tx, col, el, icon,
     row, text_input,
 };
 use rune_kit::glyphs;
@@ -95,8 +95,15 @@ pub enum Escape {
     Close,
 }
 
-/// More chips than this show as icons only, so the field keeps its room.
-const LABELLED_CHIPS: usize = 3;
+/// In the chat's composer, more chips than this show smaller, so they keep to one line.
+pub const CHAT_FULL_CHIPS: usize = 3;
+/// In the input's strip above the field, the same, with its wider room.
+const INPUT_FULL_CHIPS: usize = 6;
+/// A chip is its image, as large as fits in this (points), or this compact.
+const THUMB: (f32, f32) = (80.0, 44.0);
+const THUMB_COMPACT: (f32, f32) = (48.0, 28.0);
+/// The room above the chips in the input's strip.
+const STRIP_TOP: f32 = 10.0;
 /// The field never gets narrower than this, however many chips there are.
 const FIELD_MIN_W: f32 = 180.0;
 
@@ -218,7 +225,14 @@ impl QuickInput {
     /// Where the panel is now.
     pub fn current_pose(&self) -> Pose {
         let p = pose(self.open, self.tucked);
-        if p.dy == TUCK { Pose { dy: TUCK + self.dock, ..p } } else { p }
+        if p.dy == TUCK { Pose { dy: TUCK + self.dock + strip_h(self.shots.len()), ..p } } else { p }
+    }
+
+    /// The panel's rect now: its rest, grown upward by the chip strip (the field row stays put).
+    pub fn panel_rect(&self) -> [f32; 4] {
+        let [x, y, w, h] = self.rect;
+        let grow = strip_h(self.shots.len());
+        [x, y - grow, w, h + grow]
     }
 
     /// Slides out of view (true) or back into place (false).
@@ -372,52 +386,52 @@ pub fn placeholder(shots: usize) -> &'static str {
     }
 }
 
-/// Whether `n` chips show as icons only.
-pub fn compact(n: usize) -> bool {
-    n > LABELLED_CHIPS
+/// Whether `n` chips show smaller, when only `full` fit at their size.
+pub fn compact(n: usize, full: usize) -> bool {
+    n > full
 }
 
-/// A capture's chip: a small preview of it (clicked, `open` shows it enlarged) and its X
-/// (`remove`) on hover; `compact` (many of them), a smaller preview with the X over its corner.
-pub fn chip<S: 'static>(shot: &Attached, compact: bool, t: &tok::Theme, remove: impl Fn(&mut S) + 'static, open: impl Fn(&mut S) + 'static) -> El {
+/// The height the input's strip of `n` chips adds above its field row: none without chips.
+pub fn strip_h(n: usize) -> f32 {
+    match n {
+        0 => 0.0,
+        n if compact(n, INPUT_FULL_CHIPS) => STRIP_TOP + THUMB_COMPACT.1,
+        _ => STRIP_TOP + THUMB.1,
+    }
+}
+
+/// A capture's chip: just its image at its own shape (clicked, `open` shows it enlarged), with
+/// an X over its top-right corner on hover (`remove`) that takes no room; `compact` (many of
+/// them), smaller.
+pub fn chip<S: 'static>(shot: &Attached, compact: bool, remove: impl Fn(&mut S) + 'static, open: impl Fn(&mut S) + 'static) -> El {
     let id = shot.id;
     let preview = shot
         .preview
-        .fitted(if compact { (22.0, 18.0) } else { (40.0, 18.0) }, 3.0)
+        .fitted(if compact { THUMB_COMPACT } else { THUMB }, 6.0)
         .key(format!("shot-preview-{id}"))
-        .border(1.0, Color::WHITE.alpha(0.12))
+        .border(1.0, Color::WHITE.alpha(0.16))
         .cursor(Cursor::Pointer)
         .label("Show larger")
         .on_press(open);
     let close = el()
         .key(format!("shot-x-{id}"))
-        .size(20.0, 20.0)
-        .radius(10.0)
+        .size(18.0, 18.0)
+        .radius(9.0)
         .center()
-        .hover(Color::WHITE.alpha(0.14))
+        .fill(Color::BLACK.alpha(0.7))
+        .border(1.0, Color::WHITE.alpha(0.2))
+        .hover(Color::BLACK.alpha(0.9))
         .cursor(Cursor::Pointer)
         .group_opacity(0.0, 1.0)
         .label("Remove image")
-        .child(icon(&glyphs::CLOSE, 11.0).color(t.text))
-        .on_press(remove);
-    let base = |e: El| {
-        e.key(format!("shot-{id}"))
-            .hover_group()
-            .h(24.0)
-            .radius(6.0)
-            .continuous_corners()
-            .fill(Color::WHITE.alpha(0.09))
-            .hover(Color::WHITE.alpha(0.05))
-            .transition(Transition::scale(0.9).combined(Transition::opacity()))
-    };
-    if compact {
-        return base(el())
-            .w(30.0)
-            .center()
-            .child(preview)
-            .child(close.size(14.0, 14.0).radius(7.0).fill(Color::BLACK.alpha(0.6)).pin(None, Some(-4.0), Some(-4.0), None));
-    }
-    base(row()).pl(3.0).pr(2.0).gap(3.0).center_y().child(preview).child(close)
+        .child(icon(&glyphs::CLOSE, 9.0).color(Color::WHITE))
+        .on_press(remove)
+        .pin(None, Some(3.0), Some(3.0), None);
+    el().key(format!("shot-{id}"))
+        .hover_group()
+        .transition(Transition::scale(0.9).combined(Transition::opacity()))
+        .child(preview)
+        .child(close)
 }
 
 fn send_button(ready: bool, t: &tok::Theme) -> El {
@@ -477,7 +491,7 @@ pub fn view(s: &QuickInput, cx: &mut Cx<QuickInput>) -> El {
     let t = tok::theme(true);
     let Pose { dy, alpha, scale } = s.current_pose();
     let motion = Anim::from(GLIDE);
-    let [x, y, w, h] = s.rect;
+    let [x, y, w, h] = s.panel_rect();
     // Just sent: the row is in the chat's panel, fading; the input's new panel waits empty, out
     // of view, landing at once (its element was the chat's, maybe mid-slide).
     let layers = if s.morphing { Vec::new() } else { vec![input_row(s, &t)] };
@@ -502,8 +516,8 @@ pub fn view(s: &QuickInput, cx: &mut Cx<QuickInput>) -> El {
     }
 }
 
-/// The field row (the sparkle, the chips, the field, the send button) at the panel's size,
-/// pinned to its top left.
+/// The chips in a strip above the field row, then the row (the sparkle, the field, the send
+/// button), at the panel's size, pinned to its top left.
 fn input_row(s: &QuickInput, t: &tok::Theme) -> El {
     let field = text_input(&s.query, TextStyle::new(15.0, 400.0).lh(22.0))
         .key("query")
@@ -518,27 +532,30 @@ fn input_row(s: &QuickInput, t: &tok::Theme) -> El {
         .on_input_key(|s: &mut QuickInput, ev: &KeyEvent, _: &mut Tx| s.field_key(ev))
         .on_input_paste(|s: &mut QuickInput, content: &rune::ClipboardContent, _: &mut Tx| s.paste(content))
         .on_submit(|s: &mut QuickInput, _: &mut Tx| s.submit());
-    let compact = compact(s.shots.len());
-    let mut chips = row().key("chips").gap(6.0).center_y();
+    let compact = compact(s.shots.len(), INPUT_FULL_CHIPS);
+    let mut chips = row().key("chips").w_full().h(strip_h(s.shots.len())).px(ROW_PAD).pt(STRIP_TOP).gap(8.0).items_end();
     for shot in &s.shots {
         let id = shot.id;
         let (remove, open) = (move |s: &mut QuickInput| _ = s.remove(id), move |s: &mut QuickInput| s.open_preview(id));
-        chips = chips.child(chip(shot, compact, t, remove, open));
+        chips = chips.child(chip(shot, compact, remove, open));
     }
-    let mut field_row = row()
+    let field_row = row()
         .key("field-row")
         .role("textbox")
         .w_full()
-        .h_full()
+        .h(PANEL_H)
         .px(ROW_PAD)
         .gap(8.0)
         .center_y()
-        .child(icon(&glyphs::SPARKLE, 18.0).color(ACCENT).mr(2.0));
+        .child(icon(&glyphs::SPARKLE, 18.0).color(ACCENT).mr(2.0))
+        .child(field)
+        .child(send_button(s.send_ready(), t).ml(2.0));
+    let [_, _, w, h] = s.panel_rect();
+    let mut layer = col().key("input-layer").size(w, h).pin(Some(0.0), Some(0.0), None, None);
     if !s.shots.is_empty() {
-        field_row = field_row.child(chips);
+        layer = layer.child(chips);
     }
-    let field_row = field_row.child(field).child(send_button(s.send_ready(), t).ml(2.0));
-    el().key("input-layer").size(s.rect[2], PANEL_H).pin(Some(0.0), Some(0.0), None, None).child(field_row)
+    layer.child(field_row)
 }
 
 pub fn on_key(s: &mut QuickInput, event: &KeyEvent, _: &mut Tx) -> bool {
@@ -748,8 +765,28 @@ mod tests {
 
     #[test]
     fn many_chips_go_compact() {
-        assert!(!compact(LABELLED_CHIPS));
-        assert!(compact(LABELLED_CHIPS + 1));
+        assert!(!compact(INPUT_FULL_CHIPS, INPUT_FULL_CHIPS));
+        assert!(compact(INPUT_FULL_CHIPS + 1, INPUT_FULL_CHIPS));
+        let room = PANEL_W - 2.0 * ROW_PAD;
+        assert!(INPUT_FULL_CHIPS as f32 * (THUMB.0 + 8.0) <= room, "the full ones fit on one line");
+    }
+
+    #[test]
+    fn chips_sit_in_a_strip_above_the_field_which_stays_put() {
+        assert_eq!(strip_h(0), 0.0, "no chips, no strip");
+        assert_eq!(strip_h(1), STRIP_TOP + THUMB.1);
+        assert_eq!(strip_h(INPUT_FULL_CHIPS), STRIP_TOP + THUMB.1);
+        assert_eq!(strip_h(INPUT_FULL_CHIPS + 1), STRIP_TOP + THUMB_COMPACT.1, "smaller when many");
+        let mut s = QuickInput::new(None);
+        let r = [10.0, 500.0, PANEL_W, PANEL_H];
+        s.set_rect(r);
+        assert_eq!(s.panel_rect(), r);
+        s.attach(1, vec![1], tiny());
+        let grow = strip_h(1);
+        assert_eq!(s.panel_rect(), [10.0, 500.0 - grow, PANEL_W, PANEL_H + grow], "grows upward");
+        s.open();
+        s.set_tucked(true);
+        assert_eq!(s.current_pose().dy, TUCK + grow, "tucked, the strip too goes out of the screen");
     }
 
     #[test]

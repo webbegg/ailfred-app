@@ -565,12 +565,12 @@ pub fn panel<S: 'static>(s: &Chat, key: &str, lens: fn(&mut S) -> &mut Chat, inp
         .border(1.0, Color::WHITE.alpha(0.08));
     // Captures pasted in, as the input's chips.
     if !s.shots.is_empty() {
-        let compact = quick_input::compact(s.shots.len());
+        let compact = quick_input::compact(s.shots.len(), quick_input::CHAT_FULL_CHIPS);
         let mut chips = row().key("chips").gap(6.0).pt(2.0).center_y();
         for shot in &s.shots {
             let id = shot.id;
             let (remove, open) = (move |s: &mut S| _ = lens(s).remove(id), move |s: &mut S| lens(s).open_preview(id));
-            chips = chips.child(quick_input::chip(shot, compact, &t, remove, open));
+            chips = chips.child(quick_input::chip(shot, compact, remove, open));
         }
         composer = composer.child(chips);
     }
