@@ -76,11 +76,43 @@ impl Host {
             s.open();
             tx.animated();
         });
+        // Back at the bottom, wherever a capture area took it last time.
+        quick.set_placement(Some(quick_bottom()));
         quick.set_display(DisplayTarget::UnderPointer);
         quick.show();
         quick.request_keys();
         if !self.capture_shown.load(Ordering::Acquire) {
-            start_capture(self, Duration::ZERO, Mode::Area, true);
+            start_capture(self, Duration::ZERO, Mode::Area);
+        }
+    }
+
+    /// Gives the quick input the keys back (the capture's tools are done).
+    pub fn input_keys(&self) {
+        if let (Some(quick), true) = (&self.quick, self.quick_open) {
+            quick.request_keys();
+        }
+    }
+
+    /// Moves the open input beside capture area `sel` (points on a `screen` of that size) and
+    /// lets it rise there.
+    pub fn place_quick_input_beside(&self, sel: [f32; 4], screen: [f32; 2]) {
+        let Some(quick) = &self.quick else { return };
+        if !self.quick_open {
+            return;
+        }
+        let [x, y] = quick_input::beside(sel, screen);
+        let (width, height) = quick_input::WINDOW;
+        quick.set_placement(Some(OverlayPlacement::Rect { x, y, width, height }));
+        quick.update(|s, tx| {
+            s.set_tucked(false);
+            tx.animated();
+        });
+    }
+
+    /// A capture area's chip was removed: the area goes too if it's still on screen.
+    pub fn forget_capture_area(&self, id: u64) {
+        if let Some(overlay) = &self.overlay {
+            overlay.update(move |s, _| s.forget(id));
         }
     }
 
@@ -136,12 +168,12 @@ impl Host {
         }
     }
 
-    /// A finished capture's thumbnail (RGBA): attached if the input is open, else dropped.
-    pub fn attach_to_quick_input(&self, width: u32, height: u32, rgba: Vec<u8>) {
+    /// A capture area's image (PNG): attached if the input is open, else dropped.
+    pub fn attach_to_quick_input(&self, id: u64, png: Vec<u8>) {
         let Some(quick) = &self.quick else { return };
         if self.quick_open {
             quick.update(move |s, tx| {
-                s.attach(width, height, rgba);
+                s.attach(id, png);
                 tx.animated();
             });
         }
@@ -214,9 +246,9 @@ impl Host {
         match action {
             // Our windows (the menu, the highlight) are excluded from the capture; the pause lets
             // the menu bar settle and the app under the menu redraw.
-            Action::Capture => start_capture(self, Duration::from_millis(200), Mode::Area, false),
-            Action::CaptureWindow => start_capture(self, Duration::from_millis(200), Mode::Window, false),
-            Action::CaptureFullScreen => start_capture(self, Duration::from_millis(200), Mode::FullScreen, false),
+            Action::Capture => start_capture(self, Duration::from_millis(200), Mode::Area),
+            Action::CaptureWindow => start_capture(self, Duration::from_millis(200), Mode::Window),
+            Action::CaptureFullScreen => start_capture(self, Duration::from_millis(200), Mode::FullScreen),
             Action::QuickInput => self.show_quick_input(),
             Action::OpenFolder => open(&app_env::screenshots_dir()),
             Action::OpenPermissionSettings => open("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"),
@@ -275,13 +307,21 @@ fn host_view(_: &Host, _: &mut Cx<Host>) -> El {
 }
 
 pub(crate) fn on_shortcut(host: &mut Host, _: &mut Tx) {
-    start_capture(host, Duration::ZERO, Mode::Area, false);
+    start_capture(host, Duration::ZERO, Mode::Area);
+}
+
+/// The quick input's resting place: flush with the bottom edge (the view keeps the gap, so a
+/// tucked panel slides out of the screen), centred.
+fn quick_bottom() -> OverlayPlacement {
+    OverlayPlacement::Edge { edge: ScreenEdge::Bottom, margin: 0.0, align: Align::Center, inset: 0.0 }
 }
 
 /// Captures off the UI thread after `delay`, then shows the frozen display (starting in `mode`) on the display it came
-/// from. A missing Screen Recording permission shows in the menu. `from_input`: the quick input
-/// started it, keeps the keys, and a label follows the pointer.
-fn start_capture(host: &mut Host, delay: Duration, mode: Mode, from_input: bool) {
+/// from. A missing Screen Recording permission shows in the menu. With the quick input open, the
+/// capture is for it: the input keeps the keys, a label follows the pointer, and picked areas
+/// attach to the input.
+fn start_capture(host: &mut Host, delay: Duration, mode: Mode) {
+    let from_input = host.quick_open;
     let Some(overlay) = host.overlay.clone() else { return };
     if host.capturing.swap(true, Ordering::AcqRel) {
         return;
@@ -354,9 +394,7 @@ fn main() {
             OverlaySpec::new("Capibarapp quick input", quick_input::WINDOW, quick_input::view)
                 .options(OverlayOptions {
                     display: DisplayTarget::UnderPointer,
-                    // Flush with the bottom edge: the view keeps the gap, so a tucked panel
-                    // slides out of the screen.
-                    placement: Some(OverlayPlacement::Edge { edge: ScreenEdge::Bottom, margin: 0.0, align: Align::Center, inset: 0.0 }),
+                    placement: Some(quick_bottom()),
                     // Above the capture overlay, so it stays in view over a frozen screen.
                     level: OverlayLevel::AboveOverlays,
                     // Only the panel takes clicks; its shadow room passes them through.

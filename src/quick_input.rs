@@ -2,39 +2,38 @@
 //! the pointer, above every other window. Ctrl+Option+Space or the menu opens it; Esc, a click
 //! elsewhere or Enter closes it, sliding back down. Submitting has no action yet: it logs.
 //!
-//! While it's open, captures land in it as thumbnails above the field, and dragging out a
-//! capture area tucks it off the bottom of the screen until the drag ends.
+//! While it's open, captures land in it as "Image" chips in the field row (hover one for its X),
+//! dragging out a capture area tucks it off the screen, and once an area is picked it rises again
+//! beside that area, so the prompt reads as being about it.
 
 use std::time::Duration;
 
 use rune::tok::{self, type_};
-use rune::{Anim, AppHandle, Color, Cx, El, Key, KeyEvent, Pixels, Spring, SurfaceFit, TextEdit, Tx, col, el, row, spacer, text, text_input};
+use rune::{Anim, AppHandle, Color, Cx, El, Key, KeyEvent, Spring, TextEdit, Tx, col, el, row, spacer, text, text_input};
 
 use crate::Host;
 
 /// The fixed global chord that toggles the panel (Option+Space alone is Claude's quick entry).
 pub const SHORTCUT: &str = "ctrl+alt+space";
-/// The panel's width and inner padding, in points.
+/// The panel's size and inner padding, in points.
 pub const PANEL_W: f32 = 720.0;
-const INNER: f32 = 12.0;
-/// The field row's height.
+const INNER: f32 = 10.0;
 const ROW_H: f32 = 44.0;
-/// An attached capture's thumbnail, and the gap below the thumbnails.
-pub const THUMB: (f32, f32) = (132.0, 92.0);
-const THUMB_GAP: f32 = 10.0;
-/// The panel's height with thumbnails: the tallest it gets.
-pub const PANEL_MAX_H: f32 = INNER + THUMB.1 + THUMB_GAP + ROW_H + INNER;
-/// How far below its rest the panel waits while closed; it rises this far as it opens.
-pub const SLIDE: f32 = 56.0;
+pub const PANEL_H: f32 = ROW_H + 2.0 * INNER;
 /// Room around the panel for its shadow.
 pub const PAD: f32 = 24.0;
 /// The panel's gap to the bottom of the screen. The window itself reaches the bottom edge, so a
 /// tucked panel slides out of the screen rather than out of the window above it.
 pub const MARGIN: f32 = 40.0;
-/// How far a tucked panel drops: below the screen's bottom edge, shadow included.
-pub const TUCK: f32 = PANEL_MAX_H + MARGIN + PAD;
-/// The overlay's own size: the tallest panel, its shadow room above, the gap below.
-pub const WINDOW: (f32, f32) = (PANEL_W + 2.0 * PAD, PAD + PANEL_MAX_H + MARGIN);
+/// How far a closed or tucked panel drops: below the screen's bottom edge, shadow included. It
+/// opens by rising this far, from outside the screen.
+pub const TUCK: f32 = PANEL_H + MARGIN + PAD;
+/// The overlay's own size: the panel, its shadow room above, the gap below. The panel sits
+/// `PAD` points in from the window's top-left.
+pub const WINDOW: (f32, f32) = (PANEL_W + 2.0 * PAD, PAD + PANEL_H + MARGIN);
+/// The panel's gap to a capture area it sits beside, and to the screen's edges.
+const BESIDE_GAP: f32 = 24.0;
+const EDGE_GAP: f32 = 8.0;
 /// How long the window takes to fade out once closed: long enough for the slide down to play.
 pub const EXIT: Duration = Duration::from_millis(240);
 /// The slide's spring: smooth, no overshoot.
@@ -42,9 +41,12 @@ const MOTION: Spring = tok::motion::GLIDE;
 
 const ACCENT: Color = Color { r: 0.85, g: 0.47, b: 0.34, a: 1.0 };
 
-/// A capture attached to the input: its thumbnail.
+/// A capture attached to the input, by the id of the capture area it came from (the same area
+/// re-exported with marks replaces it).
 pub struct Attached {
-    pixels: Pixels,
+    pub id: u64,
+    /// The image, ready to send.
+    pub png: Vec<u8>,
 }
 
 pub struct QuickInput {
@@ -84,28 +86,35 @@ impl QuickInput {
         self.tucked = tucked;
     }
 
-    /// Adds a capture's thumbnail (RGBA, `width` x `height` pixels).
-    pub fn attach(&mut self, width: u32, height: u32, rgba: Vec<u8>) {
-        let pixels = Pixels::new();
-        pixels.set(width, height, rgba);
-        self.shots.push(Attached { pixels });
+    /// Adds a capture, or replaces the one from the same capture area.
+    pub fn attach(&mut self, id: u64, png: Vec<u8>) {
+        match self.shots.iter_mut().find(|a| a.id == id) {
+            Some(shot) => shot.png = png,
+            None => self.shots.push(Attached { id, png }),
+        }
+    }
+
+    /// Drops a capture (its chip's X). True if it was attached.
+    pub fn remove(&mut self, id: u64) -> bool {
+        let before = self.shots.len();
+        self.shots.retain(|a| a.id != id);
+        self.shots.len() != before
     }
 
     #[cfg(test)]
-    pub fn attached(&self) -> usize {
-        self.shots.len()
+    fn ids(&self) -> Vec<u64> {
+        self.shots.iter().map(|a| a.id).collect()
     }
 
-    /// The typed text, trimmed, and how many captures go with it; the field and the attachments
+    /// The typed text, trimmed, and the captures that go with it; the field and the attachments
     /// clear. Nothing typed and nothing attached submits nothing.
-    pub fn take_submission(&mut self) -> Option<(String, usize)> {
+    pub fn take_submission(&mut self) -> Option<(String, Vec<Attached>)> {
         let text = self.query.text.trim().to_owned();
         if text.is_empty() && self.shots.is_empty() {
             return None;
         }
         self.query.clear();
-        let shots = std::mem::take(&mut self.shots).len();
-        Some((text, shots))
+        Some((text, std::mem::take(&mut self.shots)))
     }
 
     /// Asks the host to close the panel (which calls `close` and fades the window out).
@@ -117,49 +126,84 @@ impl QuickInput {
 
     fn submit(&mut self) {
         if let Some((text, shots)) = self.take_submission() {
-            eprintln!("Capibarapp: quick input: {text:?} with {shots} capture(s)");
+            let bytes: usize = shots.iter().map(|a| a.png.len()).sum();
+            eprintln!("Capibarapp: quick input: {text:?} with {} capture(s), {bytes} bytes of PNG", shots.len());
             self.dismiss();
+        }
+    }
+
+    /// A chip's X: the capture goes, and so does its area if it's still on screen.
+    fn unattach(&mut self, id: u64) {
+        if self.remove(id) && let Some(host) = &self.host {
+            host.update(move |host, _| host.forget_capture_area(id));
         }
     }
 }
 
-/// The panel's vertical offset from its rest and its opacity: closed it waits a little below,
-/// transparent; tucked it's out of the screen, still opaque, so it reads as sliding away.
+/// The panel's vertical offset from its rest and its opacity: closed it waits below the screen,
+/// so opening slides it in from outside; tucked it's out of the screen too and fades as it goes,
+/// so rising again somewhere else (beside a capture area) reads as arriving there.
 pub fn pose(open: bool, tucked: bool) -> (f32, f32) {
     match (open, tucked) {
-        (false, _) => (SLIDE, 0.0),
-        (true, true) => (TUCK, 1.0),
+        (false, _) => (TUCK, 1.0),
+        (true, true) => (TUCK, 0.0),
         (true, false) => (0.0, 1.0),
     }
 }
 
-/// Shrinks `rgba` (`width` x `height`) to fit within `max` pixels, keeping its aspect, by
-/// averaging the source pixels each target pixel covers. Never enlarges.
-pub fn thumbnail(rgba: &[u8], width: u32, height: u32, max: (u32, u32)) -> (u32, u32, Vec<u8>) {
-    let k = (max.0 as f32 / width.max(1) as f32).min(max.1 as f32 / height.max(1) as f32).min(1.0);
-    let (tw, th) = (((width as f32 * k).round() as u32).max(1), ((height as f32 * k).round() as u32).max(1));
-    if (tw, th) == (width, height) {
-        return (width, height, rgba.to_vec());
-    }
-    let mut out = Vec::with_capacity((tw * th * 4) as usize);
-    for ty in 0..th {
-        let (y0, y1) = (ty * height / th, ((ty + 1) * height / th).max(ty * height / th + 1));
-        for tx in 0..tw {
-            let (x0, x1) = (tx * width / tw, ((tx + 1) * width / tw).max(tx * width / tw + 1));
-            let mut sum = [0u32; 4];
-            for y in y0..y1 {
-                for x in x0..x1 {
-                    let i = ((y * width + x) * 4) as usize;
-                    for c in 0..4 {
-                        sum[c] += u32::from(rgba[i + c]);
-                    }
-                }
-            }
-            let n = (x1 - x0) * (y1 - y0);
-            out.extend(sum.iter().map(|s| (s / n) as u8));
-        }
-    }
-    (tw, th, out)
+/// Where the overlay window goes so the panel sits beside capture area `sel` (`[x, y, w, h]`,
+/// points on a `screen` of that size): right of it, else left, else below, else above, else
+/// over its bottom; vertically centred on it beside, left-aligned with it above or below; always
+/// on screen. Returns the window's top-left (the panel is `PAD` in from it).
+pub fn beside(sel: [f32; 4], screen: [f32; 2]) -> [f32; 2] {
+    let ([x, y, w, h], [sw, sh], (pw, ph)) = (sel, screen, (PANEL_W, PANEL_H));
+    let clamp_x = |v: f32| v.min(sw - pw - EDGE_GAP).max(EDGE_GAP);
+    let clamp_y = |v: f32| v.min(sh - ph - EDGE_GAP).max(EDGE_GAP);
+    let middle = clamp_y(y + h / 2.0 - ph / 2.0);
+    let [px, py] = if x + w + BESIDE_GAP + pw <= sw - EDGE_GAP {
+        [x + w + BESIDE_GAP, middle]
+    } else if x - BESIDE_GAP - pw >= EDGE_GAP {
+        [x - BESIDE_GAP - pw, middle]
+    } else if y + h + BESIDE_GAP + ph <= sh - EDGE_GAP {
+        [clamp_x(x), y + h + BESIDE_GAP]
+    } else if y - BESIDE_GAP - ph >= EDGE_GAP {
+        [clamp_x(x), y - BESIDE_GAP - ph]
+    } else {
+        [clamp_x(x + w / 2.0 - pw / 2.0), clamp_y(y + h - ph - BESIDE_GAP)]
+    };
+    [px - PAD, py - PAD]
+}
+
+/// A small picture glyph: a frame with a sun.
+fn image_glyph(color: Color) -> El {
+    el().size(14.0, 11.0).radius(2.5).border(1.4, color).child(el().size(3.0, 3.0).radius(1.5).fill(color).pin(Some(2.5), Some(2.0), None, None))
+}
+
+fn chip(shot: &Attached, t: &tok::Theme) -> El {
+    let id = shot.id;
+    let close = el()
+        .key(format!("shot-x-{id}"))
+        .size(16.0, 16.0)
+        .radius(8.0)
+        .center()
+        .fill(Color::WHITE.alpha(0.18))
+        .hover(Color::WHITE.alpha(0.12))
+        .group_opacity(0.0, 1.0)
+        .child(text("×").font(type_::LABEL.lh(14.0)).color(t.text))
+        .on_press(move |s: &mut QuickInput| s.unattach(id));
+    row()
+        .key(format!("shot-{id}"))
+        .hover_group()
+        .h(28.0)
+        .pl(10.0)
+        .pr(6.0)
+        .gap(6.0)
+        .radius(8.0)
+        .center_y()
+        .fill(Color::WHITE.alpha(0.08))
+        .child(image_glyph(t.text))
+        .child(text("Image").font(type_::LABEL).color(t.text))
+        .child(close)
 }
 
 pub fn view(s: &QuickInput, _: &mut Cx<QuickInput>) -> El {
@@ -189,21 +233,25 @@ pub fn view(s: &QuickInput, _: &mut Cx<QuickInput>) -> El {
         .fill(if ready { ACCENT } else { ACCENT.alpha(0.45) })
         .child(text("↑").font(type_::TITLE).color(Color::WHITE))
         .on_press(|s: &mut QuickInput| s.submit());
-    let field_row = row()
+    let mut field_row = row()
         .key("field-row")
         .w_full()
         .h(ROW_H)
         .px(6.0)
-        .gap(14.0)
+        .gap(10.0)
         .center_y()
-        .child(text("✳").font(type_::TITLE.lh(24.0)).color(ACCENT))
-        .child(field)
-        .child(send);
-    let mut panel = col()
+        .child(text("✳").font(type_::TITLE.lh(24.0)).color(ACCENT).mr(4.0));
+    for shot in &s.shots {
+        field_row = field_row.child(chip(shot, &t));
+    }
+    let field_row = field_row.child(field).child(send);
+    let panel = col()
         .key("panel")
         .hit()
         .w_full()
-        .padding(INNER)
+        .h(PANEL_H)
+        .px(INNER)
+        .center_y()
         .radius(16.0)
         .fill(t.card)
         .border(1.0, Color::WHITE.alpha(0.08))
@@ -212,25 +260,9 @@ pub fn view(s: &QuickInput, _: &mut Cx<QuickInput>) -> El {
         .offset_motion(Anim::from(MOTION))
         .opacity(alpha)
         .opacity_motion(Anim::from(MOTION))
-        .motion(MOTION);
-    if !s.shots.is_empty() {
-        let mut thumbs = row().key("thumbs").w_full().h(THUMB.1).gap(10.0).mb(THUMB_GAP);
-        for (i, shot) in s.shots.iter().enumerate() {
-            thumbs = thumbs.child(
-                el().key(format!("thumb-{i}"))
-                    .size(THUMB.0, THUMB.1)
-                    .radius(10.0)
-                    .clip_rounded(10.0)
-                    .fill(Color::BLACK.alpha(0.35))
-                    .border(1.0, Color::WHITE.alpha(0.12))
-                    .pixels_fit(&shot.pixels, SurfaceFit::Fit),
-            );
-        }
-        panel = panel.child(thumbs);
-    }
-    panel = panel.child(field_row);
-    // Bottom-anchored: thumbnails grow the panel upwards.
-    col().w_full().h_full().px(PAD).pt(PAD).child(spacer()).child(panel).child(el().h(MARGIN))
+        .motion(MOTION)
+        .child(field_row);
+    col().w_full().h_full().px(PAD).pt(PAD).child(panel).child(spacer())
 }
 
 pub fn on_key(s: &mut QuickInput, event: &KeyEvent, _: &mut Tx) -> bool {
@@ -253,10 +285,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn starts_closed_below_its_rest_and_transparent() {
+    fn starts_closed_below_the_screen_so_it_slides_in_from_outside() {
         let s = QuickInput::new(None);
         assert!(!s.is_open());
-        assert_eq!(pose(false, false), (SLIDE, 0.0));
+        assert_eq!(pose(false, false), (TUCK, 1.0));
+        assert!(TUCK >= PANEL_H + MARGIN + PAD, "fully below the bottom edge, shadow included");
     }
 
     #[test]
@@ -284,7 +317,8 @@ mod tests {
         let mut s = QuickInput::new(None);
         s.open();
         s.query = TextEdit::new("  hello there \n");
-        assert_eq!(s.take_submission(), Some(("hello there".into(), 0)));
+        let (text, shots) = s.take_submission().unwrap();
+        assert_eq!((text.as_str(), shots.len()), ("hello there", 0));
         assert_eq!(s.query.text, "");
     }
 
@@ -292,7 +326,7 @@ mod tests {
     fn submitting_nothing_does_nothing() {
         let mut s = QuickInput::new(None);
         s.query = TextEdit::new("   ");
-        assert_eq!(s.take_submission(), None);
+        assert!(s.take_submission().is_none());
         assert_eq!(s.query.text, "   ");
     }
 
@@ -300,19 +334,42 @@ mod tests {
     fn captures_attach_and_go_with_the_submission() {
         let mut s = QuickInput::new(None);
         s.open();
-        s.attach(2, 1, vec![255; 8]);
-        s.attach(1, 1, vec![0; 4]);
-        assert_eq!(s.attached(), 2);
+        s.attach(1, vec![1]);
+        s.attach(2, vec![2]);
+        assert_eq!(s.ids(), vec![1, 2]);
         s.query = TextEdit::new("what is this?");
-        assert_eq!(s.take_submission(), Some(("what is this?".into(), 2)));
-        assert_eq!(s.attached(), 0, "attachments clear on submit");
+        let (text, shots) = s.take_submission().unwrap();
+        assert_eq!(text, "what is this?");
+        assert_eq!(shots.iter().map(|a| a.png.clone()).collect::<Vec<_>>(), vec![vec![1], vec![2]]);
+        assert!(s.ids().is_empty(), "attachments clear on submit");
+    }
+
+    #[test]
+    fn the_same_area_again_replaces_its_capture_in_place() {
+        let mut s = QuickInput::new(None);
+        s.attach(1, vec![1]);
+        s.attach(2, vec![2]);
+        s.attach(1, vec![9]);
+        assert_eq!(s.ids(), vec![1, 2], "no second chip, same place");
+        assert_eq!(s.shots[0].png, vec![9], "with the marked-up image");
+    }
+
+    #[test]
+    fn a_chips_x_removes_only_that_capture() {
+        let mut s = QuickInput::new(None);
+        s.attach(1, vec![1]);
+        s.attach(2, vec![2]);
+        assert!(s.remove(1));
+        assert_eq!(s.ids(), vec![2]);
+        assert!(!s.remove(1), "already gone");
     }
 
     #[test]
     fn a_capture_alone_can_be_submitted() {
         let mut s = QuickInput::new(None);
-        s.attach(1, 1, vec![0; 4]);
-        assert_eq!(s.take_submission(), Some((String::new(), 1)));
+        s.attach(1, vec![0]);
+        let (text, shots) = s.take_submission().unwrap();
+        assert_eq!((text.as_str(), shots.len()), ("", 1));
     }
 
     #[test]
@@ -320,8 +377,8 @@ mod tests {
         let mut s = QuickInput::new(None);
         s.open();
         s.set_tucked(true);
-        assert_eq!(pose(s.open, s.tucked), (TUCK, 1.0), "below the screen, still opaque");
-        assert!(TUCK >= PANEL_MAX_H + MARGIN, "clears the bottom edge");
+        assert_eq!(pose(s.open, s.tucked), (TUCK, 0.0), "below the screen");
+        assert!(TUCK >= PANEL_H + MARGIN, "clears the bottom edge");
         s.set_tucked(false);
         assert_eq!(pose(s.open, s.tucked), (0.0, 1.0));
     }
@@ -330,32 +387,53 @@ mod tests {
     fn a_closed_input_stays_closed_when_tucked_and_reopens_untucked() {
         let mut s = QuickInput::new(None);
         s.set_tucked(true);
-        assert_eq!(pose(s.open, s.tucked), (SLIDE, 0.0));
+        assert_eq!(pose(s.open, s.tucked), (TUCK, 1.0));
         s.open();
         assert!(!s.tucked);
     }
 
-    #[test]
-    fn thumbnails_fit_the_box_keeping_aspect_and_average() {
-        // 4x2: left half white, right half black.
-        let mut rgba = Vec::new();
-        for _ in 0..2 {
-            for x in 0..4 {
-                let v = if x < 2 { 255 } else { 0 };
-                rgba.extend_from_slice(&[v, v, v, 255]);
-            }
-        }
-        let (w, h, out) = thumbnail(&rgba, 4, 2, (2, 2));
-        assert_eq!((w, h), (2, 1));
-        assert_eq!(out, vec![255, 255, 255, 255, 0, 0, 0, 255]);
-        let (w, h, _) = thumbnail(&rgba, 4, 2, (100, 100));
-        assert_eq!((w, h), (4, 2), "never enlarges");
+    /// The panel's own rect for a window at `at`.
+    fn panel_at(at: [f32; 2]) -> [f32; 4] {
+        [at[0] + PAD, at[1] + PAD, PANEL_W, PANEL_H]
     }
 
     #[test]
-    fn the_overlay_has_room_for_the_tallest_panel() {
-        assert!(WINDOW.1 >= PAD + PANEL_MAX_H + MARGIN);
-        assert!(WINDOW.0 > PANEL_W);
+    fn the_input_sits_right_of_the_area_centred_on_it() {
+        let screen = [1920.0, 1080.0];
+        let [x, y, _, h] = panel_at(beside([100.0, 200.0, 600.0, 500.0], screen));
+        assert_eq!(x, 100.0 + 600.0 + BESIDE_GAP);
+        assert_eq!(y + h / 2.0, 200.0 + 250.0);
+    }
+
+    #[test]
+    fn without_room_on_the_right_it_goes_left_then_below() {
+        let screen = [1920.0, 1080.0];
+        let [x, _, w, _] = panel_at(beside([1100.0, 200.0, 600.0, 500.0], screen));
+        assert_eq!(x + w, 1100.0 - BESIDE_GAP, "left of it");
+        let [x, y, _, _] = panel_at(beside([500.0, 100.0, 900.0, 500.0], screen));
+        assert_eq!((x, y), (500.0, 600.0 + BESIDE_GAP), "below, left-aligned");
+        let [_, y, _, h] = panel_at(beside([500.0, 400.0, 900.0, 640.0], screen));
+        assert_eq!(y + h, 400.0 - BESIDE_GAP, "above");
+    }
+
+    #[test]
+    fn the_input_stays_on_screen() {
+        let screen = [1920.0, 1080.0];
+        // Right of an area at the very top: centred would poke above the screen.
+        let [_, y, _, _] = panel_at(beside([100.0, 0.0, 200.0, 20.0], screen));
+        assert_eq!(y, EDGE_GAP);
+        // Below an area near the right edge: left-aligned would run off it.
+        let [x, _, w, _] = panel_at(beside([1300.0, 100.0, 600.0, 500.0], screen));
+        assert!(x + w <= 1920.0 - EDGE_GAP);
+        // The whole screen: over its bottom.
+        let [_, y, _, h] = panel_at(beside([0.0, 0.0, 1920.0, 1080.0], screen));
+        assert!(y + h <= 1080.0 - EDGE_GAP);
+    }
+
+    #[test]
+    fn the_overlay_has_room_for_the_panel() {
+        assert!(WINDOW.1 >= PAD + PANEL_H + MARGIN);
+        assert!(WINDOW.0 >= PANEL_W + 2.0 * PAD);
     }
 
     #[test]

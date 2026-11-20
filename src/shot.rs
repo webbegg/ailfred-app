@@ -60,6 +60,10 @@ enum Stage {
 }
 
 struct Edit {
+    /// Which capture area this is (the quick input's chip for it carries the same id).
+    id: u64,
+    /// The toolbar is out. For the quick input it waits behind an edit button.
+    tools: bool,
     sel: [f32; 4],
     tool: Tool,
     /// Colour and size for the next marks (and text being typed).
@@ -76,8 +80,8 @@ struct Edit {
 }
 
 impl Edit {
-    fn new(sel: [f32; 4]) -> Edit {
-        Edit { sel, tool: Tool::Arrow, style: Style::default(), picking: false, marks: Vec::new(), previews: Vec::new(), draft: None, typing: None }
+    fn new(id: u64, sel: [f32; 4], tools: bool) -> Edit {
+        Edit { id, tools, sel, tool: Tool::Arrow, style: Style::default(), picking: false, marks: Vec::new(), previews: Vec::new(), draft: None, typing: None }
     }
 
     fn push(&mut self, mark: Mark, preview: Option<Pixels>) {
@@ -135,9 +139,13 @@ pub struct Overlay {
     /// Set by confirm/dismiss until the queued clear lands: input in between is ignored, so a held
     /// Enter (or Enter plus a Copy click) can't export twice.
     closing: bool,
-    /// Started by the quick input: a label follows the pointer, and the keys stay with the
-    /// input until an area is picked.
-    cursor_hint: bool,
+    /// For the quick input (open as the capture started): a label follows the pointer, the keys
+    /// stay with the input, and each picked area attaches to it at once, tools tucked away.
+    for_input: bool,
+    /// The last capture area's id.
+    last_id: u64,
+    /// The picked area a new drag started over, back if that drag comes to nothing.
+    kept: Option<Edit>,
 }
 
 impl Overlay {
@@ -150,14 +158,16 @@ impl Overlay {
             windows: Vec::new(),
             pointer: [0.0, 0.0],
             closing: false,
-            cursor_hint: false,
+            for_input: false,
+            last_id: 0,
+            kept: None,
         }
     }
 
-    /// Shows a new capture in `mode`; any previous selection and marks are dropped. `cursor_hint`:
-    /// started by the quick input.
-    pub fn freeze(&mut self, shot: Shot, mode: Mode, cursor_hint: bool) {
-        self.cursor_hint = cursor_hint;
+    /// Shows a new capture in `mode`; any previous selection and marks are dropped. `for_input`:
+    /// the quick input is open.
+    pub fn freeze(&mut self, shot: Shot, mode: Mode, for_input: bool) {
+        self.for_input = for_input;
         self.pixels.set(shot.width, shot.height, shot.rgba.clone());
         let frozen = Frozen { width: shot.width, height: shot.height, scale: shot.scale, rgba: shot.rgba };
         let full = [0.0, 0.0, frozen.width as f32 / frozen.scale, frozen.height as f32 / frozen.scale];
@@ -165,11 +175,67 @@ impl Overlay {
         self.windows = shot.windows;
         self.pointer = shot.pointer;
         self.closing = false;
-        self.stage = match mode {
-            Mode::Area => Stage::Selecting(Pick::Idle),
-            Mode::Window => Stage::Selecting(Pick::Window(window_at(&self.windows, self.pointer))),
-            Mode::FullScreen => Stage::Editing(Edit::new(full)),
-        };
+        match mode {
+            Mode::Area => self.stage = Stage::Selecting(Pick::Idle),
+            Mode::Window => self.stage = Stage::Selecting(Pick::Window(window_at(&self.windows, self.pointer))),
+            Mode::FullScreen => self.pick(full),
+        }
+    }
+
+    /// An area (or window, or the display) is chosen: annotating starts. For the quick input it
+    /// attaches at once, the input moves beside it, and the tools wait behind a button; otherwise
+    /// the toolbar is out and the capture takes the keys.
+    fn pick(&mut self, sel: [f32; 4]) {
+        self.last_id += 1;
+        self.kept = None;
+        self.stage = Stage::Editing(Edit::new(self.last_id, sel, !self.for_input));
+        if !self.for_input {
+            self.host.update(|host, _| host.capture_keys());
+            return;
+        }
+        self.attach();
+        let Some(screen) = self.screen() else { return };
+        self.host.update(move |host, _| host.place_quick_input_beside(sel, screen));
+    }
+
+    /// Sends the current area, with its marks, to the quick input (replacing its earlier image).
+    fn attach(&self) {
+        let (Stage::Editing(edit), Some(frozen)) = (&self.stage, self.frozen.clone()) else { return };
+        let (id, sel, all, host) = (edit.id, edit.sel, edit.all_marks(), self.host.clone());
+        std::thread::spawn(move || export::attach(frozen, sel, all, id, host));
+    }
+
+    /// The frozen display's size in points.
+    fn screen(&self) -> Option<[f32; 2]> {
+        let f = self.frozen.as_ref()?;
+        Some([f.width as f32 / f.scale, f.height as f32 / f.scale])
+    }
+
+    /// The quick input: shows the tools for the area, giving the capture the keys.
+    fn open_tools(&mut self) {
+        if let Stage::Editing(edit) = &mut self.stage {
+            edit.tools = true;
+            self.host.update(|host, _| host.capture_keys());
+        }
+    }
+
+    /// The quick input: done annotating. The marks go into its image, the tools away, and the
+    /// keys back to the input; the area stays on screen.
+    fn close_tools(&mut self) {
+        let Stage::Editing(edit) = &mut self.stage else { return };
+        edit.finish_typing();
+        edit.draft = None;
+        edit.picking = false;
+        edit.tools = false;
+        self.attach();
+        self.host.update(|host, _| host.input_keys());
+    }
+
+    /// The quick input dropped area `id`'s image: if that area is on screen it goes too.
+    pub fn forget(&mut self, id: u64) {
+        if matches!(&self.stage, Stage::Editing(edit) if edit.id == id) {
+            self.stage = Stage::Selecting(Pick::Idle);
+        }
     }
 
     /// The whole display as a selection.
@@ -199,7 +265,8 @@ impl Overlay {
         self.stage = Stage::Selecting(Pick::Idle);
         self.windows = Vec::new();
         self.closing = false;
-        self.cursor_hint = false;
+        self.for_input = false;
+        self.kept = None;
         self.pixels.set(1, 1, vec![0; 4]);
     }
 
@@ -207,6 +274,9 @@ impl Overlay {
     fn confirm(&mut self) {
         if self.closing {
             return;
+        }
+        if self.for_input {
+            return self.close_tools();
         }
         let Stage::Editing(edit) = &self.stage else { return };
         if let Some(frozen) = self.frozen.clone() {
@@ -296,7 +366,7 @@ pub fn view(s: &Overlay, cx: &mut Cx<Overlay>) -> El {
         // Before a drag the frozen screen shows as is, only the hint on top; the dim starts with the
         // drag (its first event creates the selection).
         // Started by the quick input: one label beside the pointer, following it.
-        Stage::Selecting(Pick::Idle) if s.cursor_hint => {
+        Stage::Selecting(Pick::Idle) if s.for_input => {
             let [x, y] = label_at(s.pointer, [sw, sh]);
             root.child(
                 el().key("cursor-hint")
@@ -334,10 +404,14 @@ pub fn view(s: &Overlay, cx: &mut Cx<Overlay>) -> El {
         }
         Stage::Editing(edit) => {
             let [x, y, w, h] = edit.sel;
-            shades(root, edit.sel, sw, sh)
+            let root = shades(root, edit.sel, sw, sh)
                 .child(el().key("selection").size(w, h).border(1.0, EDGE).pin(Some(x), Some(y), None, None))
-                .child(marks_layer(edit).pin(Some(x), Some(y), None, None))
-                .child(toolbar(edit, sw, sh, cx.layout_size("toolbar").map(|[w, _]| w)))
+                .child(marks_layer(edit).pin(Some(x), Some(y), None, None));
+            if edit.tools {
+                root.child(toolbar(edit, s.for_input, sw, sh, cx.layout_size("toolbar").map(|[w, _]| w)))
+            } else {
+                root.child(edit_button(edit, sw, sh))
+            }
         }
     }
 }
@@ -395,10 +469,9 @@ fn text_mark(at: [f32; 2], t: &str, style: Style) -> El {
 /// The tools and actions, under the selection (above it, or inside, when there's no room),
 /// right-aligned with it.
 /// `laid_out`: the bar's width from the last layout (None on its first frame).
-fn toolbar(edit: &Edit, sw: f32, sh: f32, laid_out: Option<f32>) -> El {
-    let [x, y, w, h] = edit.sel;
-    let below = y + h + 8.0;
-    let top = if below + TOOLBAR_H <= sh { below } else if y - TOOLBAR_H - 8.0 >= 0.0 { y - TOOLBAR_H - 8.0 } else { y + 8.0 };
+fn toolbar(edit: &Edit, for_input: bool, sw: f32, sh: f32, laid_out: Option<f32>) -> El {
+    let [x, y, w, _] = edit.sel;
+    let top = bar_top(edit.sel, sh);
     // Right-aligned with the selection, but never pushed off the left edge: the bar's real width
     // once laid out, a generous estimate before.
     let bar_w = laid_out.unwrap_or(720.0);
@@ -418,9 +491,14 @@ fn toolbar(edit: &Edit, sw: f32, sh: f32, laid_out: Option<f32>) -> El {
     let current = el().key("ink").padding(6.0).radius(6.0).fill(if edit.picking { ACTIVE } else { Color { a: 0.0, ..PANEL } });
     bar = bar.child(current.child(swatch(edit.style.ink)).on_press(|s: &mut Overlay| s.toggle_palette()));
     bar = bar.child(button(format!("Size {} W", edit.style.size.label()), false).on_press(|s: &mut Overlay| s.next_size()));
-    let bar = bar.child(button("Undo ⌘Z".into(), false).on_press(|s: &mut Overlay| s.undo()))
-        .child(button("Cancel Esc".into(), false).on_press(|s: &mut Overlay| s.dismiss()))
-        .child(button("Copy ↩".into(), true).on_press(|s: &mut Overlay| s.confirm()));
+    let bar = bar.child(button("Undo ⌘Z".into(), false).on_press(|s: &mut Overlay| s.undo()));
+    // For the quick input there's nothing to cancel or copy: Done puts the marks in its image.
+    let bar = if for_input {
+        bar.child(button("Done ↩".into(), true).on_press(|s: &mut Overlay| s.close_tools()))
+    } else {
+        bar.child(button("Cancel Esc".into(), false).on_press(|s: &mut Overlay| s.dismiss()))
+            .child(button("Copy ↩".into(), true).on_press(|s: &mut Overlay| s.confirm()))
+    };
     if !edit.picking {
         return bar.pin(None, Some(top), Some(right), None);
     }
@@ -444,6 +522,29 @@ fn toolbar(edit: &Edit, sw: f32, sh: f32, laid_out: Option<f32>) -> El {
     }
 }
 
+/// The toolbar's top: under the selection, else above it, else inside it.
+fn bar_top([_, y, _, h]: [f32; 4], sh: f32) -> f32 {
+    let below = y + h + 8.0;
+    if below + TOOLBAR_H <= sh { below } else if y - TOOLBAR_H - 8.0 >= 0.0 { y - TOOLBAR_H - 8.0 } else { y + 8.0 }
+}
+
+/// For the quick input: one button where the toolbar would be, opening it.
+fn edit_button(edit: &Edit, sw: f32, sh: f32) -> El {
+    let [x, _, w, _] = edit.sel;
+    let right = (sw - (x + w)).max(8.0);
+    el().key("edit-tools")
+        .px(10.0)
+        .h(TOOLBAR_H - 8.0)
+        .center_y()
+        .radius(8.0)
+        .fill(PANEL)
+        .hover(ACTIVE)
+        .cursor(Cursor::Pointer)
+        .child(text("✎ Edit").color(EDGE))
+        .on_press(|s: &mut Overlay| s.open_tools())
+        .pin(None, Some(bar_top(edit.sel, sh)), Some(right), None)
+}
+
 fn on_drag(s: &mut Overlay, drag: &mut Drag, tx: &mut Tx) {
     tx.instant();
     if s.closing {
@@ -452,26 +553,30 @@ fn on_drag(s: &mut Overlay, drag: &mut Drag, tx: &mut Tx) {
     match &mut s.stage {
         Stage::Selecting(Pick::Window(_)) => window_click(s, drag),
         Stage::Selecting(_) => select_drag(s, drag),
+        // For the quick input, with the tools away a drag takes another area.
+        Stage::Editing(edit) if !edit.tools => select_drag(s, drag),
         Stage::Editing(_) => edit_drag(s, drag),
     }
 }
 
 fn select_drag(s: &mut Overlay, drag: &Drag) {
-    if drag.cancelled() {
-        s.stage = Stage::Selecting(Pick::Idle);
-        return;
+    let was_dragging = matches!(s.stage, Stage::Selecting(Pick::Dragging(_)));
+    // A drag over an area already picked (the quick input's): kept until this one is an area.
+    if let Stage::Editing(_) = &s.stage
+        && let Stage::Editing(edit) = std::mem::replace(&mut s.stage, Stage::Selecting(Pick::Idle))
+    {
+        s.kept = Some(edit);
     }
     let sel = marks::rect([drag.start_x, drag.start_y], [drag.x, drag.y]);
-    let was_dragging = matches!(s.stage, Stage::Selecting(Pick::Dragging(_)));
-    s.stage = if drag.phase != Phase::Up {
-        Stage::Selecting(Pick::Dragging(sel))
-    } else if sel[2] < MIN_SIDE || sel[3] < MIN_SIDE {
-        Stage::Selecting(Pick::Idle)
+    let nothing = drag.cancelled() || (drag.phase == Phase::Up && (sel[2] < MIN_SIDE || sel[3] < MIN_SIDE));
+    if nothing {
+        // A click or a cancel, not an area: the area picked before comes back.
+        s.stage = s.kept.take().map_or(Stage::Selecting(Pick::Idle), Stage::Editing);
+    } else if drag.phase != Phase::Up {
+        s.stage = Stage::Selecting(Pick::Dragging(sel));
     } else {
-        // Annotating and confirming need the keys, which the quick input may hold.
-        s.host.update(|host, _| host.capture_keys());
-        Stage::Editing(Edit::new(sel))
-    };
+        s.pick(sel);
+    }
     if let Some(tucked) = tuck_change(was_dragging, matches!(s.stage, Stage::Selecting(Pick::Dragging(_)))) {
         s.host.update(move |host, _| host.tuck_quick_input(tucked));
     }
@@ -500,7 +605,7 @@ fn on_pointer_move(s: &mut Overlay, p: rune::PointerEvent, tx: &mut Tx) {
             }
         }
         // The pointer label follows at once, without a spring.
-        Stage::Selecting(Pick::Idle) if s.cursor_hint => tx.instant(),
+        Stage::Selecting(Pick::Idle) if s.for_input => tx.instant(),
         _ => tx.live_only(),
     }
 }
@@ -518,8 +623,7 @@ fn window_click(s: &mut Overlay, drag: &Drag) {
         return;
     }
     if let Some(win) = window_at(&s.windows, [drag.x, drag.y]) {
-        s.host.update(|host, _| host.capture_keys());
-        s.stage = Stage::Editing(Edit::new(win));
+        s.pick(win);
     }
 }
 
@@ -587,12 +691,12 @@ pub fn on_key(s: &mut Overlay, event: &KeyEvent, _: &mut Tx) -> bool {
             },
             // Enter takes the highlighted window.
             Key::Enter => match s.stage {
-                Stage::Selecting(Pick::Window(Some(win))) => s.stage = Stage::Editing(Edit::new(win)),
+                Stage::Selecting(Pick::Window(Some(win))) => s.pick(win),
                 _ => return false,
             },
             Key::Text(t) if t.eq_ignore_ascii_case("f") && !chord => {
                 if let Some(full) = s.full_display() {
-                    s.stage = Stage::Editing(Edit::new(full));
+                    s.pick(full);
                 }
             }
             _ => return false,
@@ -615,6 +719,8 @@ pub fn on_key(s: &mut Overlay, event: &KeyEvent, _: &mut Tx) -> bool {
     match &event.key {
         // Esc closes the palette first, then cancels.
         Key::Escape if edit.picking => edit.picking = false,
+        // For the quick input Esc is Done: the area stays attached.
+        Key::Escape if s.for_input => s.close_tools(),
         Key::Escape => s.dismiss(),
         Key::Enter => s.confirm(),
         Key::Text(t) if !chord && t.eq_ignore_ascii_case("w") => s.next_size(),
