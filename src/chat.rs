@@ -6,27 +6,32 @@
 
 use rune::tok;
 use rune::{
-    Anim, AppHandle, Color, Cursor, Cx, El, GrowthSpec, Key, KeyEvent, Pixels, ScrollSpec, Shadow, Spring, SystemMaterial, TextEdit,
+    Anim, AppHandle, Color, Curve, Cursor, Cx, El, GrowthSpec, Key, KeyEvent, Pixels, ScrollSpec, Shadow, Spring, SystemMaterial, TextEdit,
     TextStyle, Transition, Tx, auto_grow, col, el, icon, row, text, text_input,
 };
 use rune_kit::glyphs;
 
 use crate::Host;
 use crate::icons;
-use crate::quick_input::ACCENT;
+use crate::quick_input::{self, ACCENT};
 
 /// The panel's width, its gap to the screen's edges, and its corner radius, in points.
 pub const CHAT_W: f32 = 400.0;
 const GAP: f32 = 12.0;
 const RADIUS: f32 = 16.0;
-/// Room left of the panel for its shadow.
+/// Room past the panel for its shadow.
 const PAD: f32 = 32.0;
 const HEADER_H: f32 = 44.0;
 /// A message's widest, and its images' largest.
 const BUBBLE_MAX_W: f32 = CHAT_W * 0.82;
 const THUMB_MAX: (f32, f32) = (240.0, 160.0);
-/// The slide in from the edge and back.
+/// The slide in from the edge and back, and the flight from the input.
 const GLIDE: Spring = tok::motion::GLIDE;
+/// The shell and the panel share this, so the one flies into the other (`El::matched`).
+const SHELL: &str = "chat-shell";
+/// How long after the flight starts the content fades in, and over how long.
+pub const LANDING: std::time::Duration = std::time::Duration::from_millis(280);
+const CONTENT_FADE: f32 = 0.18;
 /// The panel's frost over the system material, #1E1E1E (as the quick input's).
 const FROST: Color = Color { r: 0.013, g: 0.013, b: 0.013, a: 0.82 };
 
@@ -45,10 +50,11 @@ pub fn insets(frame: [f32; 4], visible: [f32; 4]) -> Insets {
     Insets { top: (fy + fh - (vy + vh)).max(0.0), bottom: (vy - fy).max(0.0), right: (fx + fw - (vx + vw)).max(0.0) }
 }
 
-/// The overlay's size on a display `height` points tall: the full height, the panel and its
-/// shadow room wide, past a Dock on the right.
-pub fn window_size(insets: Insets, height: f32) -> (f32, f32) {
-    (PAD + CHAT_W + GAP + insets.right, height)
+/// The panel's rect at rest on a `screen` of that size (points, the overlay covers the display):
+/// at its right edge, its full height, past the menu bar and the Dock.
+pub fn side_rect(screen: [f32; 2], insets: Insets) -> [f32; 4] {
+    let [sw, sh] = screen;
+    [sw - GAP - insets.right - CHAT_W, insets.top + GAP, CHAT_W, (sh - insets.top - insets.bottom - 2.0 * GAP).max(0.0)]
 }
 
 /// The panel's horizontal offset from its rest: open, there; closed, past the screen's right
@@ -78,6 +84,9 @@ pub fn decode_png(png: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     rgba.truncate(info.buffer_size());
     Some((info.width, info.height, rgba))
 }
+
+/// Messages typed in the panel take ids from here; the host's (sent from the input) are below.
+const LOCAL_IDS: u64 = 1 << 32;
 
 /// What the quick input's shortcut does.
 #[derive(Debug, PartialEq)]
@@ -118,6 +127,8 @@ impl Image {
 
 /// One sent message: its text (maybe empty) and its captures.
 pub struct Message {
+    /// Its captures arrive once decoded (`set_images`).
+    pub id: u64,
     pub text: String,
     pub images: Vec<Image>,
 }
@@ -127,6 +138,13 @@ pub struct Chat {
     draft: TextEdit,
     open: bool,
     insets: Insets,
+    /// The display's size in points: the overlay covers it.
+    screen: [f32; 2],
+    /// Sent from the quick input: the panel waits as a shell over the input's panel at this rect,
+    /// then `open` flies it into place, reshaping.
+    morph: Option<[f32; 4]>,
+    /// Its content shows: false while it flies from the input, faded in once there (`land`).
+    landed: bool,
     /// Cmd+N: the conversation is over; it still shows while sliding out, and the next message
     /// starts a new one.
     over: bool,
@@ -136,7 +154,7 @@ pub struct Chat {
 
 impl Chat {
     pub fn new(host: Option<AppHandle<Host>>) -> Self {
-        Chat { messages: Vec::new(), draft: TextEdit::new(""), open: false, insets: Insets::default(), over: false, host }
+        Chat { messages: Vec::new(), draft: TextEdit::new(""), open: false, insets: Insets::default(), screen: [1440.0, 900.0], morph: None, landed: true, over: false, host }
     }
 
     #[cfg(test)]
@@ -146,15 +164,43 @@ impl Chat {
 
     /// Before showing, on a display with these `insets`: out of view past its right edge, so
     /// `open` slides in from there. Applied without motion.
-    pub fn place(&mut self, insets: Insets) {
+    pub fn place(&mut self, insets: Insets, screen: [f32; 2]) {
         self.insets = insets;
+        self.screen = screen;
         self.open = false;
+        self.morph = None;
+        self.landed = true;
     }
 
-    /// Slides in, its field focused.
+    /// After `place`: waits as a shell over the input's panel at `rect` instead, so `open`
+    /// turns the input into the panel. Applied without motion.
+    pub fn morph_from(&mut self, rect: [f32; 4]) {
+        self.morph = Some(rect);
+        self.landed = false;
+    }
+
+    /// The input-shaped shell it waits as before flying, if it does.
+    pub fn shell(&self) -> Option<[f32; 4]> {
+        self.morph
+    }
+
+    /// Slides in (or flies from the input), its field focused.
     pub fn open(&mut self) {
         self.open = true;
+        self.morph = None;
         self.draft.focused = true;
+    }
+
+    /// In place after the flight: its content fades in.
+    pub fn land(&mut self) {
+        self.landed = true;
+    }
+
+    /// Message `id`'s captures, decoded.
+    pub fn set_images(&mut self, id: u64, images: Vec<Image>) {
+        if let Some(m) = self.messages.iter_mut().find(|m| m.id == id) {
+            m.images = images;
+        }
     }
 
     /// Slides out; the conversation and the draft stay. True if it was open.
@@ -185,7 +231,8 @@ impl Chat {
             return false;
         }
         self.draft.clear();
-        self.push(Message { text, images: Vec::new() });
+        let id = self.messages.last().map_or(0, |m| m.id + 1).max(LOCAL_IDS);
+        self.push(Message { id, text, images: Vec::new() });
         true
     }
 
@@ -331,43 +378,46 @@ pub fn view(s: &Chat, cx: &mut Cx<Chat>) -> El {
         .border(1.0, Color::WHITE.alpha(0.08))
         .child(col().grow(1.0).min_w(0.0).py(4.0).child(auto_grow(field, 1, 6)))
         .child(send_button(!s.draft.text.trim().is_empty(), &t));
-    let frost = col()
-        .key("frost")
+    // Hidden while it flies from the input (only the frosted shape reshapes), then fades in.
+    let content = col()
+        .key("content")
         .w_full()
         .h_full()
         .min_h(0.0)
-        .radius(RADIUS)
-        .continuous_corners()
         .clip_rounded(RADIUS)
-        .fill(FROST)
-        .border_gradient(1.0, Color::WHITE.alpha(0.14), Color::WHITE.alpha(0.05))
+        .opacity(if s.landed { 1.0 } else { 0.0 })
+        .opacity_motion(Anim::new(Curve::ease_in_out(CONTENT_FADE)))
         .child(header)
         .child(divider())
         .child(messages)
         .child(el().w_full().padding(10.0).child(composer));
-    let motion = Anim::from(GLIDE);
-    let panel = el()
-        .key("panel")
-        .hit()
-        .w(CHAT_W)
-        .h_full()
-        .radius(RADIUS)
+    let root = el().w_full().h_full();
+    // Sent from the input: the same frosted shape as its panel, right over it, about to fly.
+    if let Some([x, y, w, h]) = s.shell() {
+        return root.child(frosted(el().key("shell"), quick_input::RADIUS).size(w, h).pin(Some(x), Some(y), None, None));
+    }
+    let [x, y, w, h] = side_rect(s.screen, s.insets);
+    let panel = frosted(el().key("panel").hit(), RADIUS)
+        .size(w, h)
+        .pin(Some(x), Some(y), None, None)
+        .offset(offset(s.open, s.insets), 0.0)
+        .offset_motion(Anim::from(GLIDE))
+        .child(content);
+    root.child(panel)
+}
+
+/// The input's look, shared by the shell and the panel so one flies into the other: the system
+/// material under the frost, its border and shadows, corners of `radius`.
+fn frosted(e: El, radius: f32) -> El {
+    e.matched(SHELL)
+        .motion(GLIDE)
+        .radius(radius)
         .continuous_corners()
+        .fill(FROST)
+        .border_gradient(1.0, Color::WHITE.alpha(0.14), Color::WHITE.alpha(0.05))
         .box_shadow(Shadow::core_animation(0.0, 0.5, 1.5, Color::BLACK.alpha(0.3)))
         .box_shadow(Shadow::core_animation(0.0, 10.0, 22.0, Color::BLACK.alpha(0.4)))
         .system_material(SystemMaterial::Popover)
-        .offset(offset(s.open, s.insets), 0.0)
-        .offset_motion(motion)
-        .motion(GLIDE)
-        .child(frost);
-    row()
-        .w_full()
-        .h_full()
-        .pl(PAD)
-        .pr(GAP + s.insets.right)
-        .pt(GAP + s.insets.top)
-        .pb(GAP + s.insets.bottom)
-        .child(panel)
 }
 
 pub fn on_key(s: &mut Chat, event: &KeyEvent, _: &mut Tx) -> bool {
@@ -391,16 +441,56 @@ mod tests {
     fn closed_it_waits_past_the_right_edge_and_opens_to_rest() {
         let insets = Insets { top: 33.0, bottom: 0.0, right: 72.0 };
         assert_eq!(offset(true, insets), 0.0);
-        let (w, _) = window_size(insets, 982.0);
-        // The panel sits PAD in from the window's left: past its right edge with PAD of shadow too.
-        assert!(offset(false, insets) >= w, "out of the window, shadow included: {}", offset(false, insets));
+        let [x, ..] = side_rect([1512.0, 982.0], insets);
+        assert!(x + offset(false, insets) >= 1512.0 + PAD, "past the screen's edge, shadow included");
+    }
+
+    #[test]
+    fn at_rest_it_takes_the_right_edge_past_the_menu_bar_and_dock() {
+        let insets = Insets { top: 33.0, bottom: 70.0, right: 0.0 };
+        assert_eq!(side_rect([1512.0, 982.0], insets), [1512.0 - GAP - CHAT_W, 33.0 + GAP, CHAT_W, 982.0 - 33.0 - 70.0 - 2.0 * GAP]);
+        let [x, _, w, _] = side_rect([1512.0, 982.0], Insets { right: 72.0, ..insets });
+        assert_eq!(x + w, 1512.0 - 72.0 - GAP, "left of a Dock on the right");
+    }
+
+    fn msg(id: u64, text: &str) -> Message {
+        Message { id, text: text.into(), images: Vec::new() }
+    }
+
+    #[test]
+    fn sent_from_the_input_it_waits_as_the_inputs_shape_then_flies_and_lands() {
+        let mut c = Chat::new(None);
+        let input = [446.0, 900.0, 620.0, 52.0];
+        c.place(Insets::default(), [1512.0, 982.0]);
+        c.morph_from(input);
+        assert_eq!(c.shell(), Some(input), "right over the input");
+        assert!(!c.landed, "its content waits");
+        c.open();
+        assert_eq!(c.shell(), None, "flying to the side");
+        assert!(!c.landed, "the content stays hidden while it flies");
+        c.land();
+        assert!(c.landed);
+        c.close();
+        c.place(Insets::default(), [1512.0, 982.0]);
+        assert!(c.shell().is_none() && c.landed, "brought back later, it slides in whole");
+    }
+
+    #[test]
+    fn a_messages_captures_arrive_once_decoded() {
+        let mut c = Chat::new(None);
+        c.push(msg(3, "look"));
+        c.push(msg(4, "and"));
+        let image = Image { pixels: Pixels::new(), width: 2, height: 1 };
+        c.set_images(3, vec![image]);
+        assert_eq!(c.messages.iter().map(|m| m.images.len()).collect::<Vec<_>>(), vec![1, 0]);
+        c.set_images(9, Vec::new());
     }
 
     #[test]
     fn opening_focuses_its_field_and_closing_keeps_the_conversation() {
         let mut c = Chat::new(None);
-        c.place(Insets::default());
-        c.push(Message { text: "hello".into(), images: Vec::new() });
+        c.place(Insets::default(), [1512.0, 982.0]);
+        c.push(msg(0, "hello"));
         c.draft.focused = false;
         c.open();
         assert!(c.is_open());
@@ -435,16 +525,16 @@ mod tests {
     #[test]
     fn starting_over_slides_out_and_the_next_message_starts_a_new_chat() {
         let mut c = Chat::new(None);
-        c.push(Message { text: "old".into(), images: Vec::new() });
+        c.push(msg(0, "old"));
         c.open();
         c.draft = TextEdit::new("unsent");
         c.start_over();
         assert!(!c.is_open());
         assert_eq!(c.messages.len(), 1, "still shown while it slides out");
-        c.push(Message { text: "new".into(), images: Vec::new() });
+        c.push(msg(1, "new"));
         assert_eq!(c.messages.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(), vec!["new"]);
         assert_eq!(c.draft.text, "", "the old draft went with it");
-        c.push(Message { text: "more".into(), images: Vec::new() });
+        c.push(msg(2, "more"));
         assert_eq!(c.messages.len(), 2, "then it carries on");
     }
 

@@ -26,7 +26,7 @@ pub const PANEL_W: f32 = 620.0;
 const PANEL_MIN_W: f32 = 480.0;
 pub const PANEL_H: f32 = 52.0;
 const ROW_PAD: f32 = 12.0;
-const RADIUS: f32 = 14.0;
+pub const RADIUS: f32 = 14.0;
 /// Room around the panel for its shadow.
 pub const PAD: f32 = 32.0;
 /// The panel's gap to the bottom of the screen (above the Dock, if there's one). The window
