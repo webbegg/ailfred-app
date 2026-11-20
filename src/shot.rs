@@ -22,8 +22,10 @@ const EDGE: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.9 };
 const ACTIVE: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.18 };
 /// The rune colour of an ink.
 fn color_of(ink: Ink) -> Color {
+    // `Color` is linear; the inks are sRGB, as the export burns them in.
+    let linear = |c: f32| if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
     let [r, g, b] = ink.rgb();
-    Color { r, g, b, a: 1.0 }
+    Color { r: linear(r), g: linear(g), b: linear(b), a: 1.0 }
 }
 
 /// The label beside the pointer in a capture for the quick input or the chat, its size (points, about,
@@ -835,6 +837,15 @@ mod tests {
         assert!(regions.iter().all(|r| r[2] >= 0.0 && r[3] >= 0.0));
         // A hole off the screen's edge leaves no negative bands.
         assert!(hit_regions(Some([-20.0, 780.0, 100.0, 60.0]), screen).iter().all(|r| r[2] >= 0.0 && r[3] >= 0.0));
+    }
+
+    #[test]
+    fn mark_inks_are_their_srgb_colours_in_linear() {
+        for ink in Ink::ALL {
+            let [r, g, b] = ink.rgb();
+            let enc = |c: f32| (c * 255.0).round() as u8;
+            assert_eq!(color_of(ink).hex(), format!("#{:02x}{:02x}{:02x}ff", enc(r), enc(g), enc(b)), "{ink:?}: as exported");
+        }
     }
 
     #[test]
