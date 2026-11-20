@@ -82,6 +82,8 @@ pub struct QuickInput {
     morphing: bool,
     /// The next sent message's id (its captures join it once decoded).
     next_message: u64,
+    /// The next pasted image's id.
+    next_shot: u64,
 }
 
 /// What Esc in a field (the input's or the chat's) does.
@@ -121,6 +123,7 @@ impl QuickInput {
             slot: false,
             morphing: false,
             next_message: 0,
+            next_shot: 0,
         }
     }
 
@@ -256,7 +259,21 @@ impl QuickInput {
         Some(id)
     }
 
-    /// Adds a capture, or replaces the one from the same capture area.
+    /// Cmd+V in the field: an image on the clipboard takes the next id and, once decoded, joins
+    /// the field as a chip (`attach`). False lets the field paste the text.
+    pub fn paste(&mut self, content: &rune::ClipboardContent) -> bool {
+        let Some((id, png)) = self.take_paste(content) else { return false };
+        chat::decode_pasted(&self.host, chat::Field::Input, id, png);
+        true
+    }
+
+    fn take_paste(&mut self, content: &rune::ClipboardContent) -> Option<(u64, Vec<u8>)> {
+        let png = chat::pasted_png(content)?;
+        self.next_shot += 1;
+        Some((self.next_shot, png))
+    }
+
+    /// Adds a capture, or replaces the one with the same id.
     pub fn attach(&mut self, id: u64, png: Vec<u8>, preview: chat::Image) {
         match self.shots.iter_mut().find(|a| a.id == id) {
             Some(shot) => (shot.png, shot.preview) = (png, preview),
@@ -499,6 +516,7 @@ fn input_row(s: &QuickInput, t: &tok::Theme) -> El {
         .animate_layout()
         .on_edit(|s: &mut QuickInput| &mut s.query)
         .on_input_key(|s: &mut QuickInput, ev: &KeyEvent, _: &mut Tx| s.field_key(ev))
+        .on_input_paste(|s: &mut QuickInput, content: &rune::ClipboardContent, _: &mut Tx| s.paste(content))
         .on_submit(|s: &mut QuickInput, _: &mut Tx| s.submit());
     let compact = compact(s.shots.len());
     let mut chips = row().key("chips").gap(6.0).center_y();
@@ -661,6 +679,15 @@ mod tests {
         assert_eq!(s.ids(), vec![1]);
         assert_eq!(s.backspace_empty(), Some(1));
         assert!(s.ids().is_empty());
+    }
+
+    #[test]
+    fn an_image_pasted_into_the_input_takes_the_next_id_and_text_is_left_to_the_field() {
+        use crate::chat::tests::{a_png, clip};
+        let mut s = QuickInput::new(None);
+        assert_eq!(s.take_paste(&clip("just text", None)), None);
+        assert_eq!(s.take_paste(&clip("caption", Some(a_png()))), Some((1, a_png())), "the image, not its text");
+        assert_eq!(s.take_paste(&clip("", Some(a_png()))).map(|(id, _)| id), Some(2));
     }
 
     #[test]

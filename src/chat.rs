@@ -74,37 +74,54 @@ pub fn thumb_size(w: u32, h: u32, max: (f32, f32)) -> (f32, f32) {
     ((w * k).round(), (h * k).round())
 }
 
-/// An 8-bit RGBA PNG (as the captures are encoded) back to its pixels.
+/// A PNG (a capture, or whatever was pasted) to its 8-bit RGBA pixels.
 pub fn decode_png(png: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
-    let mut reader = png::Decoder::new(std::io::Cursor::new(png)).read_info().ok()?;
-    let mut rgba = vec![0; reader.output_buffer_size()?];
-    let info = reader.next_frame(&mut rgba).ok()?;
-    if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
-        return None;
-    }
-    rgba.truncate(info.buffer_size());
+    let mut decoder = png::Decoder::new(std::io::Cursor::new(png));
+    decoder.set_transformations(png::Transformations::normalize_to_color8());
+    let mut reader = decoder.read_info().ok()?;
+    let mut buf = vec![0; reader.output_buffer_size()?];
+    let info = reader.next_frame(&mut buf).ok()?;
+    buf.truncate(info.buffer_size());
+    let rgba = match info.color_type {
+        png::ColorType::Rgba => buf,
+        png::ColorType::Rgb => buf.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
+        png::ColorType::GrayscaleAlpha => buf.chunks_exact(2).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
+        png::ColorType::Grayscale => buf.iter().flat_map(|&g| [g, g, g, 255]).collect(),
+        png::ColorType::Indexed => return None,
+    };
     Some((info.width, info.height, rgba))
 }
 
 /// Messages typed in the panel take ids from here; the host's (sent from the input) are below.
 const LOCAL_IDS: u64 = 1 << 32;
 
-/// Where a picked capture area's image goes.
-#[derive(Debug, PartialEq)]
-pub enum Area {
+/// The field an image was pasted into.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Field {
     Input,
     Chat,
-    Drop,
 }
 
-/// The open input takes it (after Cmd+N, the new input, while the chat slides out), else the
-/// open chat; with neither open it's dropped.
-pub fn area_goes_to(quick_open: bool, chat_open: bool) -> Area {
-    match (quick_open, chat_open) {
-        (true, _) => Area::Input,
-        (false, true) => Area::Chat,
-        (false, false) => Area::Drop,
+/// A pasted image, decoded, still lands only if its field is still open.
+pub fn paste_lands(field: Field, quick_open: bool, chat_open: bool) -> bool {
+    match field {
+        Field::Input => quick_open,
+        Field::Chat => chat_open,
     }
+}
+
+/// The image on the clipboard, if any, as a PNG to send.
+pub fn pasted_png(content: &rune::ClipboardContent) -> Option<Vec<u8>> {
+    content.image().map(|image| image.png().to_vec())
+}
+
+/// Decodes pasted image `id` off the main thread, then hands it to `field` through the host.
+pub fn decode_pasted(host: &Option<AppHandle<Host>>, field: Field, id: u64, png: Vec<u8>) {
+    let Some(host) = host.clone() else { return };
+    std::thread::spawn(move || match Image::from_png(&png) {
+        Some(image) => host.update(move |host, _| host.pasted(field, id, png, image)),
+        None => eprintln!("Capibarapp: the pasted image couldn't be read"),
+    });
 }
 
 /// What the quick input's shortcut does.
@@ -207,11 +224,13 @@ pub struct Chat {
     over: bool,
     /// Where Esc and the close button go (None in tests).
     host: Option<AppHandle<Host>>,
+    /// The next pasted image's id.
+    next_shot: u64,
 }
 
 impl Chat {
     pub fn new(host: Option<AppHandle<Host>>) -> Self {
-        Chat { messages: Vec::new(), draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host }
+        Chat { messages: Vec::new(), draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0 }
     }
 
     pub fn is_open(&self) -> bool {
@@ -327,7 +346,21 @@ impl Chat {
         self.draft.focused = true;
     }
 
-    /// Adds a capture to the draft, or replaces the one from the same capture area.
+    /// Cmd+V in the field: an image on the clipboard takes the next id and, once decoded, joins
+    /// the draft (`attach`). False lets the field paste the text.
+    pub fn paste(&mut self, content: &rune::ClipboardContent) -> bool {
+        let Some((id, png)) = self.take_paste(content) else { return false };
+        decode_pasted(&self.host, Field::Chat, id, png);
+        true
+    }
+
+    fn take_paste(&mut self, content: &rune::ClipboardContent) -> Option<(u64, Vec<u8>)> {
+        let png = pasted_png(content)?;
+        self.next_shot += 1;
+        Some((self.next_shot, png))
+    }
+
+    /// Adds a capture to the draft, or replaces the one with the same id.
     pub fn attach(&mut self, id: u64, png: Vec<u8>, preview: Image) {
         match self.shots.iter_mut().find(|a| a.id == id) {
             Some(shot) => (shot.png, shot.preview) = (png, preview),
@@ -510,6 +543,7 @@ pub fn panel<S: 'static>(s: &Chat, key: &str, lens: fn(&mut S) -> &mut Chat, inp
         .placeholder("Message…", t.text_secondary.alpha(0.8))
         .on_edit(move |s: &mut S| &mut lens(s).draft)
         .on_input_key(move |s: &mut S, ev: &KeyEvent, _: &mut Tx| lens(s).field_key(ev))
+        .on_input_paste(move |s: &mut S, content: &rune::ClipboardContent, _: &mut Tx| lens(s).paste(content))
         .on_submit(move |s: &mut S, tx: &mut Tx| send(lens(s), tx));
     let typing = row()
         .key("typing")
@@ -572,7 +606,7 @@ pub fn on_key(s: &mut Chat, event: &KeyEvent) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -677,6 +711,54 @@ mod tests {
         Image::from_rgba(1, 1, vec![0; 4])
     }
 
+    /// A 2 × 1 PNG of `color`'s kind, its pixels `data`.
+    fn png_of(color: png::ColorType, data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut enc = png::Encoder::new(&mut out, 2, 1);
+        enc.set_color(color);
+        enc.set_depth(png::BitDepth::Eight);
+        enc.write_header().unwrap().write_image_data(data).unwrap();
+        out
+    }
+
+    /// What the clipboard holds: `text`, and an image when `png` is given.
+    pub(crate) fn clip(text: &str, png: Option<Vec<u8>>) -> rune::ClipboardContent {
+        let content = rune::ClipboardContent::new(text);
+        match png.and_then(rune::ClipboardImage::from_png) {
+            Some(image) => content.with_image(image),
+            None => content,
+        }
+    }
+
+    pub(crate) fn a_png() -> Vec<u8> {
+        png_of(png::ColorType::Rgba, &[1, 2, 3, 255, 4, 5, 6, 255])
+    }
+
+    #[test]
+    fn pasted_images_take_their_own_ids_and_text_is_left_to_the_field() {
+        let mut c = Chat::new(None);
+        assert_eq!(c.take_paste(&clip("just text", None)), None);
+        assert_eq!(c.take_paste(&clip("", Some(a_png()))), Some((1, a_png())));
+        assert_eq!(c.take_paste(&clip("", Some(a_png()))).map(|(id, _)| id), Some(2));
+    }
+
+    #[test]
+    fn any_8_bit_png_decodes_to_rgba() {
+        assert_eq!(decode_png(&png_of(png::ColorType::Rgb, &[1, 2, 3, 4, 5, 6])), Some((2, 1, vec![1, 2, 3, 255, 4, 5, 6, 255])));
+        assert_eq!(decode_png(&png_of(png::ColorType::Grayscale, &[7, 8])), Some((2, 1, vec![7, 7, 7, 255, 8, 8, 8, 255])));
+        assert_eq!(decode_png(&png_of(png::ColorType::GrayscaleAlpha, &[7, 9, 8, 10])), Some((2, 1, vec![7, 7, 7, 9, 8, 8, 8, 10])));
+        assert_eq!(decode_png(&a_png()).map(|(.., px)| px), Some(vec![1, 2, 3, 255, 4, 5, 6, 255]));
+    }
+
+    #[test]
+    fn a_pasted_image_lands_only_in_a_field_still_open() {
+        assert!(paste_lands(Field::Input, true, false));
+        assert!(paste_lands(Field::Chat, false, true));
+        assert!(paste_lands(Field::Chat, true, true), "Cmd+N right after: the chat still shows");
+        assert!(!paste_lands(Field::Input, false, true), "the input closed meanwhile");
+        assert!(!paste_lands(Field::Chat, true, false), "the chat closed meanwhile");
+    }
+
     #[test]
     fn a_chips_image_opens_enlarged_and_esc_closes_it_before_the_chat() {
         let mut c = Chat::new(None);
@@ -714,14 +796,6 @@ mod tests {
         assert_eq!(c.backspace_empty(), Some(2));
         assert_eq!(c.backspace_empty(), Some(1));
         assert_eq!(c.backspace_empty(), None);
-    }
-
-    #[test]
-    fn a_picked_areas_image_goes_to_the_open_input_else_the_open_chat() {
-        assert_eq!(area_goes_to(true, false), Area::Input);
-        assert_eq!(area_goes_to(true, true), Area::Input, "Cmd+N: the new input, as the chat slides out");
-        assert_eq!(area_goes_to(false, true), Area::Chat);
-        assert_eq!(area_goes_to(false, false), Area::Drop);
     }
 
     #[test]

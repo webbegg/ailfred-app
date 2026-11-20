@@ -308,21 +308,20 @@ impl Host {
         self.release();
     }
 
-    /// A pasted capture area's image (PNG, and `preview` to show): to the open input's field,
-    /// else the open chat's, else dropped.
-    pub fn attach_to_quick_input(&self, id: u64, png: Vec<u8>, preview: chat::Image) {
+    /// Image `id`, pasted into `field` (PNG, and `preview` decoded to show), joins it if it's
+    /// still open.
+    pub fn pasted(&self, field: chat::Field, id: u64, png: Vec<u8>, preview: chat::Image) {
         let Some(quick) = &self.quick else { return };
-        match chat::area_goes_to(self.quick_open, self.chat_open) {
-            chat::Area::Input => quick.update(move |s, tx| {
-                s.attach(id, png, preview);
-                tx.animated();
-            }),
-            chat::Area::Chat => quick.update(move |s, tx| {
-                s.chat.attach(id, png, preview);
-                tx.animated();
-            }),
-            chat::Area::Drop => {}
+        if !chat::paste_lands(field, self.quick_open, self.chat_open) {
+            return;
         }
+        quick.update(move |s, tx| {
+            match field {
+                chat::Field::Input => s.attach(id, png, preview),
+                chat::Field::Chat => s.chat.attach(id, png, preview),
+            }
+            tx.animated();
+        });
     }
 
     /// Who a capture is for: the open input, else the open chat, else itself.
@@ -505,8 +504,8 @@ pub(crate) fn on_shortcut(host: &mut Host, _: &mut Tx) {
 
 /// Captures off the UI thread after `delay`, then shows the frozen display (starting in `mode`) on the display it came
 /// from. A missing Screen Recording permission shows in the menu. With the quick input or the chat
-/// open, the capture is for it: a label follows the pointer, and Enter pastes the picked area
-/// into its field.
+/// open, a label follows the pointer and their panel is left alone; the capture still copies
+/// and saves, and Cmd+V puts it in their field.
 fn start_capture(host: &mut Host, delay: Duration, mode: Mode) {
     let target = host.capture_target();
     let Some(overlay) = host.overlay.clone() else { return };

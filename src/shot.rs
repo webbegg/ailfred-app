@@ -65,8 +65,6 @@ enum Stage {
 }
 
 struct Edit {
-    /// Which capture area this is (the chip it's pasted as carries the same id).
-    id: u64,
     sel: [f32; 4],
     tool: Tool,
     /// Colour and size for the next marks (and text being typed).
@@ -83,8 +81,8 @@ struct Edit {
 }
 
 impl Edit {
-    fn new(id: u64, sel: [f32; 4]) -> Edit {
-        Edit { id, sel, tool: Tool::Arrow, style: Style::default(), picking: false, marks: Vec::new(), previews: Vec::new(), draft: None, typing: None }
+    fn new(sel: [f32; 4]) -> Edit {
+        Edit { sel, tool: Tool::Arrow, style: Style::default(), picking: false, marks: Vec::new(), previews: Vec::new(), draft: None, typing: None }
     }
 
     fn push(&mut self, mark: Mark, preview: Option<Pixels>) {
@@ -142,14 +140,11 @@ pub struct Overlay {
     /// Set by confirm/dismiss until the queued clear lands: input in between is ignored, so a held
     /// Enter (or Enter plus a Copy click) can't export twice.
     closing: bool,
-    /// For the quick input or the chat (open as the capture started): a label follows the
-    /// pointer, and the picked area, marked up or not, is pasted into the field (Enter) as the
-    /// capture closes.
+    /// The quick input or the chat was open as the capture started: a label follows the pointer
+    /// and their panel is left alone. Enter still copies and saves; pasting is up to the user.
     for_input: bool,
     /// For the chat (`input_at` is its panel, which stays put): the input doesn't tuck.
     for_chat: bool,
-    /// The last capture area's id.
-    last_id: u64,
     /// Where the quick input's or the chat's panel is over this display (points), while it's on
     /// screen: this overlay leaves that rect to it, pointer and cursor alike.
     input_at: Option<[f32; 4]>,
@@ -187,7 +182,6 @@ impl Overlay {
             closing: false,
             for_input: false,
             for_chat: false,
-            last_id: 0,
             input_at: None,
             leaving: false,
         }
@@ -218,23 +212,15 @@ impl Overlay {
         }
     }
 
-    /// An area (or window, or the display) is chosen: annotating starts, the toolbar out. For the
-    /// quick input, it stays out of view until the area is pasted or the capture cancelled, the
-    /// whole screen now taking the pointer.
+    /// An area (or window, or the display) is chosen: annotating starts, the toolbar out. The
+    /// quick input stays out of view until the capture closes, the whole screen now taking the
+    /// pointer.
     fn pick(&mut self, sel: [f32; 4]) {
-        self.last_id += 1;
-        self.stage = Stage::Editing(Edit::new(self.last_id, sel));
+        self.stage = Stage::Editing(Edit::new(sel));
         self.input_at = hole_on_pick(self.for_chat, self.input_at);
         if self.for_input && !self.for_chat {
             self.host.update(|host, _| host.tuck_quick_input(true));
         }
-    }
-
-    /// Sends the current area, with its marks, to the open input or chat.
-    fn attach(&self) {
-        let (Stage::Editing(edit), Some(frozen)) = (&self.stage, self.frozen.clone()) else { return };
-        let (id, sel, all, host) = (edit.id, edit.sel, edit.all_marks(), self.host.clone());
-        std::thread::spawn(move || export::attach(frozen, sel, all, id, host));
     }
 
     /// The frozen display's size in points.
@@ -269,21 +255,16 @@ impl Overlay {
         self.pixels.set(1, 1, vec![0; 4]);
     }
 
-    /// Enter: the selection with its marks is pasted into the open input or chat, or else copied
-    /// and saved (off the UI thread); then the capture closes.
+    /// Enter: copies and saves the selection with its marks (off the UI thread), then closes.
+    /// With the input or chat open too: it's a capture of its own, pasted there only if wanted.
     fn confirm(&mut self) {
         if self.closing {
             return;
         }
         let Stage::Editing(edit) = &self.stage else { return };
-        match confirm_for(self.for_input) {
-            Confirm::Paste => self.attach(),
-            Confirm::Copy => {
-                if let Some(frozen) = self.frozen.clone() {
-                    let (sel, all, host) = (edit.sel, edit.all_marks(), self.host.clone());
-                    std::thread::spawn(move || export::export(frozen, sel, all, host));
-                }
-            }
+        if let Some(frozen) = self.frozen.clone() {
+            let (sel, all, host) = (edit.sel, edit.all_marks(), self.host.clone());
+            std::thread::spawn(move || export::export(frozen, sel, all, host));
         }
         self.dismiss();
     }
@@ -428,7 +409,7 @@ pub fn view(s: &Overlay, cx: &mut Cx<Overlay>) -> El {
                 .child(el().key("selection").size(w, h).border(1.0, EDGE).pin(Some(x), Some(y), None, None))
                 .child(marks_layer(edit).pin(Some(x), Some(y), None, None));
             let top = bar_top(edit.sel, sh, s.input_at);
-            root.child(toolbar(edit, s.for_input, top, sw, sh, cx.layout_size("toolbar").map(|[w, _]| w)))
+            root.child(toolbar(edit, top, sw, sh, cx.layout_size("toolbar").map(|[w, _]| w)))
         }
     }
 }
@@ -501,7 +482,7 @@ fn text_mark(at: [f32; 2], t: &str, style: Style) -> El {
 /// The tools and actions, under the selection (above it, or inside, when there's no room),
 /// right-aligned with it.
 /// `laid_out`: the bar's width from the last layout (None on its first frame).
-fn toolbar(edit: &Edit, for_input: bool, top: f32, sw: f32, sh: f32, laid_out: Option<f32>) -> El {
+fn toolbar(edit: &Edit, top: f32, sw: f32, sh: f32, laid_out: Option<f32>) -> El {
     let [x, y, w, _] = edit.sel;
     // Right-aligned with the selection, but never pushed off the left edge: the bar's real width
     // once laid out, a generous estimate before.
@@ -523,14 +504,9 @@ fn toolbar(edit: &Edit, for_input: bool, top: f32, sw: f32, sh: f32, laid_out: O
     bar = bar.child(current.child(swatch(edit.style.ink)).on_press(|s: &mut Overlay| s.toggle_palette()));
     bar = bar.child(button(format!("Size {} W", edit.style.size.label()), false).on_press(|s: &mut Overlay| s.next_size()));
     let bar = bar.child(button("Undo ⌘Z".into(), false).on_press(|s: &mut Overlay| s.undo()));
-    // For the quick input or the chat, Enter pastes into its field; otherwise it copies.
-    let confirm = match confirm_for(for_input) {
-        Confirm::Paste => "Paste ↩",
-        Confirm::Copy => "Copy ↩",
-    };
     let bar = bar
         .child(button("Cancel Esc".into(), false).on_press(|s: &mut Overlay| s.dismiss()))
-        .child(button(confirm.into(), true).on_press(|s: &mut Overlay| s.confirm()));
+        .child(button("Copy ↩".into(), true).on_press(|s: &mut Overlay| s.confirm()));
     if !edit.picking {
         return bar.pin(None, Some(top), Some(right), None);
     }
@@ -566,19 +542,6 @@ fn bar_top([_, y, _, h]: [f32; 4], sh: f32, avoid: Option<[f32; 4]>) -> f32 {
     } else {
         y + 8.0
     }
-}
-
-/// What Enter (or the toolbar's main button) does.
-#[derive(Debug, PartialEq)]
-enum Confirm {
-    /// Into the open input's or chat's field.
-    Paste,
-    /// To the clipboard, and saved.
-    Copy,
-}
-
-fn confirm_for(for_input: bool) -> Confirm {
-    if for_input { Confirm::Paste } else { Confirm::Copy }
 }
 
 /// For `target`, on a `screen` of that size: whether it's for a field (the input's or the
@@ -621,8 +584,8 @@ fn select_drag(s: &mut Overlay, drag: &Drag) {
     } else {
         s.pick(sel);
     }
-    // A picked area keeps the quick input away until it's pasted (`pick`). The chat's panel
-    // stays.
+    // A picked area keeps the quick input away until the capture closes (`pick`). The chat's
+    // panel stays.
     let picked = s.for_input && matches!(s.stage, Stage::Editing(_));
     if let Some(tucked) = tuck_change(was_dragging, matches!(s.stage, Stage::Selecting(Pick::Dragging(_))))
         && !(picked && !tucked)
@@ -844,11 +807,7 @@ mod tests {
         assert_eq!(hole_on_pick(false, None), None);
     }
 
-    #[test]
-    fn enter_pastes_into_the_open_field_else_copies() {
-        assert_eq!(confirm_for(true), Confirm::Paste);
-        assert_eq!(confirm_for(false), Confirm::Copy);
-    }
+
 
     #[test]
     fn leaving_fades_everything_drawn_to_transparent() {
