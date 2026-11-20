@@ -13,6 +13,7 @@ mod export;
 mod login;
 mod marks;
 mod output;
+mod quick_input;
 mod settings;
 mod settings_ui;
 mod shot;
@@ -23,9 +24,12 @@ use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rune::{
-    App, AppSpec, Cx, DisplayTarget, El, KeyPolicy, NativeDisplayId, OverlayHandle, OverlayInput, OverlayLevel,
-    AppHandle, OverlayOptions, WindowHandle, WindowOptions, OverlayPlacement, OverlaySpec, RunOptions, Tx, WindowSpec, el,
+    Align, App, AppSpec, Cx, DisplayTarget, El, KeyPolicy, NativeDisplayId, OverlayHandle, OverlayInput, OverlayLevel,
+    AppHandle, OverlayOptions, WindowHandle, WindowOptions, OverlayPlacement, OverlaySpec, RunOptions, ScreenEdge, Tx,
+    WindowSpec, el,
 };
+
+use crate::quick_input::QuickInput;
 
 use crate::shot::{Mode, Overlay};
 use crate::settings::{CaptureShortcut, Settings};
@@ -49,9 +53,53 @@ pub struct Host {
     initial_shortcut: Option<rune::Shortcut>,
     settings_window: Option<WindowHandle>,
     settings_ui: Option<AppHandle<SettingsUi>>,
+    /// The quick input panel, and whether it's open (or opening).
+    quick: Option<OverlayHandle<QuickInput>>,
+    quick_open: bool,
 }
 
 impl Host {
+    pub fn toggle_quick_input(&mut self) {
+        if self.quick_open { self.hide_quick_input() } else { self.show_quick_input() }
+    }
+
+    /// Slides the quick input up on the display under the pointer and gives it the keys.
+    pub fn show_quick_input(&mut self) {
+        let Some(quick) = &self.quick else { return };
+        self.quick_open = true;
+        // The state changes while hidden; `animate_reveal` plays the rise from the first frame.
+        quick.update(|s, tx| {
+            s.open();
+            tx.animated();
+        });
+        quick.set_display(DisplayTarget::UnderPointer);
+        quick.show();
+        quick.request_keys();
+    }
+
+    /// Slides the quick input down; the window fades out over the slide, then hides.
+    pub fn hide_quick_input(&mut self) {
+        let Some(quick) = &self.quick else { return };
+        if !self.quick_open {
+            return;
+        }
+        self.quick_open = false;
+        quick.update(|s, tx| {
+            s.close();
+            tx.animated();
+        });
+        quick.fade_out(quick_input::EXIT);
+    }
+
+    /// Registers the quick input's fixed chord. Main thread, loop running.
+    fn register_quick_shortcut(&mut self) {
+        let Some(handle) = self.handle.clone() else { return };
+        let Ok(shortcut) = quick_input::SHORTCUT.parse::<rune::Shortcut>() else { return };
+        if let Err(e) = handle.register_shortcut(shortcut, |host: &mut Host, _| host.toggle_quick_input()) {
+            eprintln!("Capibarapp: the quick input shortcut {} couldn't be registered: {e}", quick_input::SHORTCUT);
+        }
+    }
+
     pub fn hide_overlay(&self) {
         if let Some(overlay) = &self.overlay {
             overlay.hide();
@@ -107,6 +155,7 @@ impl Host {
             Action::Capture => start_capture(self, Duration::from_millis(200), Mode::Area),
             Action::CaptureWindow => start_capture(self, Duration::from_millis(200), Mode::Window),
             Action::CaptureFullScreen => start_capture(self, Duration::from_millis(200), Mode::FullScreen),
+            Action::QuickInput => self.show_quick_input(),
             Action::OpenFolder => open(&app_env::screenshots_dir()),
             Action::OpenPermissionSettings => open("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"),
             Action::ToggleLogin => {
@@ -153,6 +202,8 @@ fn host_init() -> Host {
         initial_shortcut: None,
         settings_window: None,
         settings_ui: None,
+        quick: None,
+        quick_open: false,
     }
 }
 
@@ -231,6 +282,29 @@ fn main() {
                 .on_key(shot::on_key),
             Overlay::new(handle.clone()),
         );
+        let quick = app.overlay(
+            OverlaySpec::new("Capibarapp quick input", quick_input::WINDOW, quick_input::view)
+                .options(OverlayOptions {
+                    display: DisplayTarget::UnderPointer,
+                    placement: Some(OverlayPlacement::Edge {
+                        edge: ScreenEdge::Bottom,
+                        margin: quick_input::MARGIN,
+                        align: Align::Center,
+                        inset: 0.0,
+                    }),
+                    level: OverlayLevel::AboveStatus,
+                    // Only the panel takes clicks; its shadow room passes them through.
+                    input: OverlayInput::Regions,
+                    keys: KeyPolicy::OnDemand,
+                    exclude_from_capture: true,
+                    prewarm: true,
+                    ..Default::default()
+                })
+                .on_key(quick_input::on_key)
+                .on_focus(quick_input::on_focus)
+                .animate_reveal(),
+            QuickInput::new(Some(handle.clone())),
+        );
         let settings = Settings::open();
         let initial_shortcut = settings.shortcut();
         let capture_shortcut = CaptureShortcut::default();
@@ -252,12 +326,15 @@ fn main() {
             initial_shortcut,
             settings_window: Some(settings_window),
             settings_ui: Some(settings_ui),
+            quick: Some(quick),
+            quick_open: false,
         });
         // Runs on the main thread at the loop's first turn: the status item needs a running NSApp,
         // and runtime shortcut registration needs the host started.
         handle.update(|host, _| {
             host.add_tray();
             host.register_saved_shortcut();
+            host.register_quick_shortcut();
         });
         // Off the UI thread: both talk to system services.
         std::thread::spawn(move || {

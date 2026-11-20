@@ -14,6 +14,7 @@ pub enum Action {
     Capture,
     CaptureWindow,
     CaptureFullScreen,
+    QuickInput,
     OpenFolder,
     ToggleLogin,
     OpenPermissionSettings,
@@ -22,10 +23,11 @@ pub enum Action {
 }
 
 impl Action {
-    const ALL: [(Action, &'static str); 8] = [
+    const ALL: [(Action, &'static str); 9] = [
         (Action::Capture, "capture"),
         (Action::CaptureWindow, "capture-window"),
         (Action::CaptureFullScreen, "capture-full-screen"),
+        (Action::QuickInput, "quick-input"),
         (Action::OpenFolder, "open-folder"),
         (Action::ToggleLogin, "login"),
         (Action::OpenPermissionSettings, "permission"),
@@ -59,6 +61,13 @@ impl Tray {
         let capture = MenuItem::with_id(Action::Capture.id(), "Capture Area", true, None);
         let window = MenuItem::with_id(Action::CaptureWindow.id(), "Capture Window", true, None);
         let full = MenuItem::with_id(Action::CaptureFullScreen.id(), "Capture Full Screen", true, None);
+        // Shows the fixed chord (`quick_input::SHORTCUT`, Ctrl+Option+Space).
+        let quick = MenuItem::with_id(
+            Action::QuickInput.id(),
+            "Quick Input",
+            true,
+            Some(Accelerator::new(Modifiers::CONTROL | Modifiers::ALT, Code::Space)),
+        );
         let folder = MenuItem::with_id(Action::OpenFolder.id(), "Open Screenshots Folder", true, None);
         let login = CheckMenuItem::with_id(Action::ToggleLogin.id(), "Launch at Login", can_login, login_enabled, None);
         let permission = MenuItem::with_id(
@@ -74,6 +83,8 @@ impl Tray {
             &capture,
             &window,
             &full,
+            &PredefinedMenuItem::separator(),
+            &quick,
             &PredefinedMenuItem::separator(),
             &folder,
             &PredefinedMenuItem::separator(),
