@@ -55,13 +55,29 @@ pub struct QuickInput {
     /// Out of the screen while a capture area is dragged.
     tucked: bool,
     shots: Vec<Attached>,
+    /// The capture area on screen that the input sits beside, while there is one.
+    area: Option<u64>,
     /// Where closing goes, so the host hides the window after the slide (None in tests).
     host: Option<AppHandle<Host>>,
 }
 
+/// What Esc in the field does.
+#[derive(Debug, PartialEq)]
+pub enum Escape {
+    /// Discards the capture area on screen and its image; the input stays.
+    Area(u64),
+    /// Closes the input.
+    Close,
+}
+
+/// More chips than this show as icons only, so the field keeps its room.
+const LABELLED_CHIPS: usize = 3;
+/// The field never gets narrower than this, however many chips there are.
+const FIELD_MIN_W: f32 = 200.0;
+
 impl QuickInput {
     pub fn new(host: Option<AppHandle<Host>>) -> Self {
-        QuickInput { query: TextEdit::new(""), open: false, tucked: false, shots: Vec::new(), host }
+        QuickInput { query: TextEdit::new(""), open: false, tucked: false, shots: Vec::new(), area: None, host }
     }
 
     pub fn is_open(&self) -> bool {
@@ -75,10 +91,30 @@ impl QuickInput {
         self.query.focused = true;
     }
 
-    /// Slides back down; the text and attachments stay for next time. True if it was open.
+    /// Slides back down, discarding its captures; the text stays for next time. True if it was
+    /// open.
     pub fn close(&mut self) -> bool {
         self.tucked = false;
+        self.shots.clear();
+        self.area = None;
         std::mem::replace(&mut self.open, false)
+    }
+
+    /// Area `id` is on screen and the input beside it (None: no area any more).
+    pub fn set_area(&mut self, id: Option<u64>) {
+        self.area = id;
+    }
+
+    /// Esc in the field, one step at a time: the capture area on screen goes first (its image
+    /// too), then the input closes.
+    pub fn escape(&mut self) -> Escape {
+        match self.area.take() {
+            Some(id) => {
+                self.remove(id);
+                Escape::Area(id)
+            }
+            None => Escape::Close,
+        }
     }
 
     /// Slides out of the screen (true) or back into place (false).
@@ -134,8 +170,23 @@ impl QuickInput {
 
     /// A chip's X: the capture goes, and so does its area if it's still on screen.
     fn unattach(&mut self, id: u64) {
+        if self.area == Some(id) {
+            self.area = None;
+        }
         if self.remove(id) && let Some(host) = &self.host {
             host.update(move |host, _| host.forget_capture_area(id));
+        }
+    }
+
+    /// Esc in the field: see `escape`.
+    fn on_escape(&mut self) {
+        match self.escape() {
+            Escape::Area(id) => {
+                if let Some(host) = &self.host {
+                    host.update(move |host, _| host.forget_capture_area(id));
+                }
+            }
+            Escape::Close => self.dismiss(),
         }
     }
 }
@@ -174,12 +225,25 @@ pub fn beside(sel: [f32; 4], screen: [f32; 2]) -> [f32; 2] {
     [px - PAD, py - PAD]
 }
 
+/// Whether `n` chips show as icons only.
+fn compact(n: usize) -> bool {
+    n > LABELLED_CHIPS
+}
+
+/// The panel's own rect (points on the screen) when it sits beside `sel`.
+pub fn panel_beside(sel: [f32; 4], screen: [f32; 2]) -> [f32; 4] {
+    let [x, y] = beside(sel, screen);
+    [x + PAD, y + PAD, PANEL_W, PANEL_H]
+}
+
 /// A small picture glyph: a frame with a sun.
 fn image_glyph(color: Color) -> El {
     el().size(14.0, 11.0).radius(2.5).border(1.4, color).child(el().size(3.0, 3.0).radius(1.5).fill(color).pin(Some(2.5), Some(2.0), None, None))
 }
 
-fn chip(shot: &Attached, t: &tok::Theme) -> El {
+/// A capture's chip: "Image" with an X on hover, or (`compact`, many of them) just the glyph,
+/// which the X replaces on hover.
+fn chip(shot: &Attached, compact: bool, t: &tok::Theme) -> El {
     let id = shot.id;
     let close = el()
         .key(format!("shot-x-{id}"))
@@ -191,6 +255,16 @@ fn chip(shot: &Attached, t: &tok::Theme) -> El {
         .group_opacity(0.0, 1.0)
         .child(text("×").font(type_::LABEL.lh(14.0)).color(t.text))
         .on_press(move |s: &mut QuickInput| s.unattach(id));
+    if compact {
+        return el()
+            .key(format!("shot-{id}"))
+            .hover_group()
+            .size(28.0, 28.0)
+            .radius(8.0)
+            .fill(Color::WHITE.alpha(0.08))
+            .child(el().size(28.0, 28.0).center().group_opacity(1.0, 0.0).child(image_glyph(t.text)).pin(Some(0.0), Some(0.0), None, None))
+            .child(el().size(28.0, 28.0).center().child(close).pin(Some(0.0), Some(0.0), None, None));
+    }
     row()
         .key(format!("shot-{id}"))
         .hover_group()
@@ -213,12 +287,13 @@ pub fn view(s: &QuickInput, _: &mut Cx<QuickInput>) -> El {
         .key("query")
         .single_line()
         .grow(1.0)
+        .min_w(FIELD_MIN_W)
         .color(t.text)
         .placeholder("What can I help you with?", t.text_secondary)
         .on_edit(|s: &mut QuickInput| &mut s.query)
         .on_input_key(|s: &mut QuickInput, ev: &KeyEvent, _: &mut Tx| {
             if ev.key == Key::Escape {
-                s.dismiss();
+                s.on_escape();
                 return true;
             }
             false
@@ -241,8 +316,9 @@ pub fn view(s: &QuickInput, _: &mut Cx<QuickInput>) -> El {
         .gap(10.0)
         .center_y()
         .child(text("✳").font(type_::TITLE.lh(24.0)).color(ACCENT).mr(4.0));
+    let compact = compact(s.shots.len());
     for shot in &s.shots {
-        field_row = field_row.child(chip(shot, &t));
+        field_row = field_row.child(chip(shot, compact, &t));
     }
     let field_row = field_row.child(field).child(send);
     let panel = col()
@@ -267,7 +343,7 @@ pub fn view(s: &QuickInput, _: &mut Cx<QuickInput>) -> El {
 
 pub fn on_key(s: &mut QuickInput, event: &KeyEvent, _: &mut Tx) -> bool {
     if event.key == Key::Escape {
-        s.dismiss();
+        s.on_escape();
         return true;
     }
     false
@@ -362,6 +438,47 @@ mod tests {
         assert!(s.remove(1));
         assert_eq!(s.ids(), vec![2]);
         assert!(!s.remove(1), "already gone");
+    }
+
+    #[test]
+    fn esc_discards_the_area_on_screen_first_then_closes() {
+        let mut s = QuickInput::new(None);
+        s.open();
+        s.attach(1, vec![1]);
+        s.attach(2, vec![2]);
+        s.set_area(Some(2));
+        assert_eq!(s.escape(), Escape::Area(2), "the area on screen goes");
+        assert_eq!(s.ids(), vec![1], "with its image only");
+        assert!(s.is_open(), "the input stays");
+        assert_eq!(s.escape(), Escape::Close, "then the input closes");
+    }
+
+    #[test]
+    fn closing_discards_the_captures_and_keeps_the_text() {
+        let mut s = QuickInput::new(None);
+        s.open();
+        s.attach(1, vec![1]);
+        s.set_area(Some(1));
+        s.query = TextEdit::new("draft");
+        s.close();
+        assert!(s.ids().is_empty());
+        assert_eq!(s.escape(), Escape::Close, "no area left either");
+        assert_eq!(s.query.text, "draft");
+    }
+
+    #[test]
+    fn a_chips_x_on_the_area_on_screen_forgets_it() {
+        let mut s = QuickInput::new(None);
+        s.attach(1, vec![1]);
+        s.set_area(Some(1));
+        s.unattach(1);
+        assert_eq!(s.escape(), Escape::Close);
+    }
+
+    #[test]
+    fn many_chips_go_compact() {
+        assert!(!compact(LABELLED_CHIPS));
+        assert!(compact(LABELLED_CHIPS + 1));
     }
 
     #[test]

@@ -95,7 +95,7 @@ impl Host {
 
     /// Moves the open input beside capture area `sel` (points on a `screen` of that size) and
     /// lets it rise there.
-    pub fn place_quick_input_beside(&self, sel: [f32; 4], screen: [f32; 2]) {
+    pub fn place_quick_input_beside(&self, id: u64, sel: [f32; 4], screen: [f32; 2]) {
         let Some(quick) = &self.quick else { return };
         if !self.quick_open {
             return;
@@ -103,7 +103,8 @@ impl Host {
         let [x, y] = quick_input::beside(sel, screen);
         let (width, height) = quick_input::WINDOW;
         quick.set_placement(Some(OverlayPlacement::Rect { x, y, width, height }));
-        quick.update(|s, tx| {
+        quick.update(move |s, tx| {
+            s.set_area(Some(id));
             s.set_tucked(false);
             tx.animated();
         });
