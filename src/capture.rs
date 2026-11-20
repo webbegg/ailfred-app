@@ -128,7 +128,7 @@ fn rgba(image: &CGImage) -> Result<(Vec<u8>, u32, u32), String> {
 
 /// A JPEG's pixels as straight RGBA in sRGB (opaque), its width and height.
 pub fn jpeg_rgba(jpeg: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
-    let data = CFData::from_buffer(jpeg);
+    let data = CFData::from_bytes(jpeg);
     let provider = CGDataProvider::with_cf_data(Some(&data))?;
     // SAFETY: a null decode array is allowed (no remapping).
     let image = unsafe { CGImage::with_jpeg_data_provider(Some(&provider), std::ptr::null(), true, CGColorRenderingIntent::RenderingIntentDefault) }?;
