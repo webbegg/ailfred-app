@@ -60,6 +60,8 @@ pub struct Host {
     quick_open: bool,
     /// The Dock's height under the open input at the bottom (0 when there's none).
     quick_dock: f32,
+    /// Counts the captures shown (main thread), so an earlier one's fade out doesn't hide a newer.
+    overlay_shown: u64,
     /// The capture overlay is on screen (set by the capture thread as it shows it, cleared on
     /// hide): it takes the keys, which mustn't close the quick input.
     capture_shown: Arc<AtomicBool>,
@@ -252,11 +254,26 @@ impl Host {
         if let (Some(quick), true) = (&self.quick, self.quick_open) {
             quick.request_keys();
         }
-        // It fades out with the frozen screen still drawn (cleared once it's out, see `leave`).
-        if let Some(overlay) = &self.overlay {
-            overlay.update(|s, _| s.leave());
-            overlay.fade_out(shot::FADE_OUT);
-        }
+        // Its content fades to transparent with the window still up, then the window hides and
+        // the capture is freed, unless another capture showed meanwhile. The window's last frame
+        // is then an empty one: the next reveal can't flash the old capture.
+        let Some(overlay) = self.overlay.clone() else { return };
+        overlay.set_input(OverlayInput::None);
+        overlay.update(|s, tx| {
+            s.leave();
+            tx.animated();
+        });
+        let (shown, handle) = (self.overlay_shown, self.handle.clone());
+        std::thread::spawn(move || {
+            std::thread::sleep(shot::FADE_OUT + Duration::from_millis(60));
+            let Some(handle) = handle else { return };
+            handle.update(move |host, _| {
+                if host.overlay_shown == shown && !host.capture_shown.load(Ordering::Acquire) {
+                    overlay.update(|s, _| s.clear());
+                    overlay.hide();
+                }
+            });
+        });
     }
 
     /// Creates the menu-bar icon. Main thread, event loop running: called from a queued update.
@@ -358,6 +375,7 @@ fn host_init() -> Host {
         quick: None,
         quick_open: false,
         quick_dock: 0.0,
+        overlay_shown: 0,
         capture_shown: Arc::default(),
     }
 }
@@ -399,28 +417,40 @@ fn start_capture(host: &mut Host, delay: Duration, mode: Mode) {
             handle.update(move |host, _| host.set_permission(allowed));
         }
         match result {
-            Ok(shot) => {
-                let display = shot.display_id;
-                // Queued in this order: state, placement, reveal. They may be applied over more than
-                // one event-loop turn; the update is queued before `show`, and show refreshes first.
-                overlay.update(move |s, _| {
-                    s.freeze(shot, mode, from_input);
-                    if from_input {
-                        s.input_at_bottom(dock);
-                    }
-                });
-                // For the input, the overlay leaves its panel's rect to it (see `Overlay::input_at`).
-                overlay.set_input(if from_input { OverlayInput::Regions } else { OverlayInput::All });
-                overlay.set_display(DisplayTarget::Native(NativeDisplayId::MacOS(display)));
-                capture_shown.store(true, Ordering::Release);
-                overlay.fade_in(shot::FADE_IN);
-                if !from_input {
-                    overlay.request_keys();
-                }
-            }
+            // Shown from the main thread, so it's ordered with a fade out's hide (`hide_overlay`).
+            Ok(shot) => match &handle {
+                Some(handle) => handle.update(move |host, _| {
+                    host.overlay_shown += 1;
+                    show_capture(&overlay, &capture_shown, shot, mode, from_input, dock);
+                }),
+                None => show_capture(&overlay, &capture_shown, shot, mode, from_input, dock),
+            },
             Err(e) => eprintln!("Capibarapp: {e}"),
         }
     });
+}
+
+/// Puts `shot` on screen in `mode`, fading in.
+fn show_capture(overlay: &OverlayHandle<Overlay>, shown: &AtomicBool, shot: capture::Shot, mode: Mode, from_input: bool, dock: f32) {
+    let display = shot.display_id;
+    // Queued in this order: state, placement, reveal. They may be applied over more than one
+    // event-loop turn; the update is queued before the reveal, and a reveal refreshes first.
+    overlay.update(move |s, tx| {
+        s.freeze(shot, mode, from_input);
+        if from_input {
+            s.input_at_bottom(dock);
+        }
+        // Back from a fade out cut short, the content fades in again rather than jump.
+        tx.animated();
+    });
+    // For the input, the overlay leaves its panel's rect to it (see `Overlay::input_at`).
+    overlay.set_input(if from_input { OverlayInput::Regions } else { OverlayInput::All });
+    overlay.set_display(DisplayTarget::Native(NativeDisplayId::MacOS(display)));
+    shown.store(true, Ordering::Release);
+    overlay.fade_in(shot::FADE_IN);
+    if !from_input {
+        overlay.request_keys();
+    }
 }
 
 /// Clears the "capture running" flag when dropped.
@@ -501,6 +531,7 @@ fn main() {
             quick: Some(quick),
             quick_open: false,
             quick_dock: 0.0,
+            overlay_shown: 0,
             capture_shown: Arc::default(),
         });
         // Runs on the main thread at the loop's first turn: the status item needs a running NSApp,

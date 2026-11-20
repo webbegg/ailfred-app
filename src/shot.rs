@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use rune::{AppHandle, Color, Cursor, Cx, Drag, El, Key, KeyEvent, LineCap, Phase, Pixels, Shadow, Shape, TextStyle, Tx, canvas, col, el, icon, row, text};
+use rune::{Anim, AppHandle, Color, Curve, Cursor, Cx, Drag, El, Key, KeyEvent, LineCap, Phase, Pixels, Shadow, Shape, TextStyle, Tx, canvas, col, el, icon, row, text};
 
 use crate::Host;
 use crate::capture::Shot;
@@ -159,14 +159,15 @@ pub struct Overlay {
     /// Where the quick input's panel is over this display (points), while it's open: this
     /// overlay leaves that rect to it, pointer and cursor alike.
     input_at: Option<[f32; 4]>,
-    /// Counts the captures shown, so a clear queued by an earlier one's fade out leaves a newer
-    /// one alone.
-    shown: u64,
+    /// Fading out (`leave`): everything drawn goes to transparent, so the window's last frame
+    /// before it hides is empty and never shows again on the next reveal.
+    leaving: bool,
 }
 
 /// The capture fades in over this as it shows.
 pub const FADE_IN: Duration = Duration::from_millis(180);
-/// And out over this as it goes: the quick input's slide out, as they often leave together.
+/// And out over this as it goes (its content's opacity, then the window hides): the quick
+/// input's slide out, as they often leave together.
 pub const FADE_OUT: Duration = crate::quick_input::EXIT;
 
 impl Overlay {
@@ -184,27 +185,15 @@ impl Overlay {
             display: 0,
             kept: None,
             input_at: None,
-            shown: 0,
+            leaving: false,
         }
     }
 
-    /// The overlay fades out: input is ignored now, and the frozen screen stays drawn through the
-    /// fade, then goes unless another capture showed meanwhile.
+    /// The overlay fades out (`Host::hide_overlay` hides and clears it once it's transparent):
+    /// input is ignored now.
     pub fn leave(&mut self) {
         self.closing = true;
-        let (shown, host) = (self.shown, self.host.clone());
-        std::thread::spawn(move || {
-            std::thread::sleep(FADE_OUT + Duration::from_millis(60));
-            host.update(move |host, _| {
-                if let Some(overlay) = &host.overlay {
-                    overlay.update(move |s, _| {
-                        if s.shown == shown && s.closing {
-                            s.clear();
-                        }
-                    });
-                }
-            });
-        });
+        self.leaving = true;
     }
 
     /// The quick input opened this capture: its panel waits at the bottom, over a Dock `dock`
@@ -218,7 +207,7 @@ impl Overlay {
     pub fn freeze(&mut self, shot: Shot, mode: Mode, for_input: bool) {
         self.for_input = for_input;
         self.input_at = None;
-        self.shown += 1;
+        self.leaving = false;
         self.pixels.set(shot.width, shot.height, shot.rgba.clone());
         let frozen = Frozen { width: shot.width, height: shot.height, scale: shot.scale, rgba: shot.rgba };
         let full = [0.0, 0.0, frozen.width as f32 / frozen.scale, frozen.height as f32 / frozen.scale];
@@ -340,6 +329,7 @@ impl Overlay {
         self.for_input = false;
         self.kept = None;
         self.input_at = None;
+        self.leaving = false;
         self.pixels.set(1, 1, vec![0; 4]);
     }
 
@@ -432,7 +422,15 @@ pub fn view(s: &Overlay, cx: &mut Cx<Overlay>) -> El {
     let Some(f) = &s.frozen else { return el() };
     // The overlay covers the display's frame, so its size in points is the capture over its scale.
     let (sw, sh) = (f.width as f32 / f.scale, f.height as f32 / f.scale);
-    let mut root = el().w_full().h_full().pixels(&s.pixels).cursor(Cursor::Crosshair).on_drag(on_drag).on_pointer_move_local(on_pointer_move);
+    let mut root = el()
+        .w_full()
+        .h_full()
+        .opacity(content_alpha(s.leaving))
+        .opacity_motion(Anim::new(Curve::ease_in_out(FADE_OUT.as_secs_f32())))
+        .pixels(&s.pixels)
+        .cursor(Cursor::Crosshair)
+        .on_drag(on_drag)
+        .on_pointer_move_local(on_pointer_move);
     // What takes the pointer (and shows the crosshair): all of it but the quick input's panel,
     // whose own cursor would otherwise flicker against this one. Behind everything else.
     for (i, [x, y, w, h]) in hit_regions(s.input_at, [sw, sh]).into_iter().enumerate() {
@@ -499,6 +497,11 @@ pub fn view(s: &Overlay, cx: &mut Cx<Overlay>) -> El {
             }
         }
     }
+}
+
+/// The capture's opacity: all of it, or none while it fades out.
+fn content_alpha(leaving: bool) -> f32 {
+    if leaving { 0.0 } else { 1.0 }
 }
 
 /// The overlay's input regions on a `screen`: all of it, or (`hole`, the quick input's panel)
@@ -912,6 +915,12 @@ mod tests {
         assert_eq!(y, 790.0 - LABEL_GAP - LABEL.1, "near the bottom: above");
         let [x, _] = label_at([800.0, 100.0], screen, (250.0, 22.0));
         assert_eq!(x, 800.0 - LABEL_GAP - 250.0, "its measured width decides the flip");
+    }
+
+    #[test]
+    fn leaving_fades_everything_drawn_to_transparent() {
+        assert_eq!(content_alpha(false), 1.0);
+        assert_eq!(content_alpha(true), 0.0, "the frame left behind when hidden is empty");
     }
 
     #[test]
