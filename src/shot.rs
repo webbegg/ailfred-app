@@ -427,6 +427,7 @@ fn select_drag(s: &mut Overlay, drag: &Drag) {
         return;
     }
     let sel = marks::rect([drag.start_x, drag.start_y], [drag.x, drag.y]);
+    let was_dragging = matches!(s.stage, Stage::Selecting(Pick::Dragging(_)));
     s.stage = if drag.phase != Phase::Up {
         Stage::Selecting(Pick::Dragging(sel))
     } else if sel[2] < MIN_SIDE || sel[3] < MIN_SIDE {
@@ -434,6 +435,15 @@ fn select_drag(s: &mut Overlay, drag: &Drag) {
     } else {
         Stage::Editing(Edit::new(sel))
     };
+    if let Some(tucked) = tuck_change(was_dragging, matches!(s.stage, Stage::Selecting(Pick::Dragging(_)))) {
+        s.host.update(move |host, _| host.tuck_quick_input(tucked));
+    }
+}
+
+/// The quick input leaves the screen as an area drag starts (Some(true)) and comes back as it
+/// ends (Some(false)); None while nothing changes.
+fn tuck_change(was_dragging: bool, dragging: bool) -> Option<bool> {
+    (was_dragging != dragging).then_some(dragging)
 }
 
 /// The front-most window containing `p`.
@@ -601,5 +611,13 @@ mod tests {
         assert_eq!((w, h), (4, 4));
         assert!(out.chunks(4).all(|p| p == [127, 127, 127, 255]), "one averaged block: {:?}", &out[0..4]);
         assert!(pixelate_region(&f, [3.5, 0.0, 1.0, 1.0], [0.5, 0.0, 0.0, 1.0]).is_none(), "empty area");
+    }
+
+    #[test]
+    fn the_quick_input_tucks_for_an_area_drag_only() {
+        assert_eq!(tuck_change(false, true), Some(true), "drag starts: out of the screen");
+        assert_eq!(tuck_change(true, true), None, "drag moves: nothing to do");
+        assert_eq!(tuck_change(true, false), Some(false), "drag ends or is cancelled: back");
+        assert_eq!(tuck_change(false, false), None);
     }
 }

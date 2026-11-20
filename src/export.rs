@@ -9,6 +9,7 @@ use rune::{AppHandle, ClipboardContent, ClipboardImage};
 
 use crate::Host;
 use crate::marks::{self, Mark, Style};
+use crate::quick_input;
 
 /// The display as captured, kept for cropping at native resolution.
 pub struct Frozen {
@@ -29,6 +30,10 @@ pub fn export(frozen: Arc<Frozen>, sel: [f32; 4], marks: Vec<Mark>, host: AppHan
     if let Err(e) = apply(&mut rgba, width, height, frozen.scale, &marks) {
         eprintln!("Capibarapp: drawing the marks failed: {e}");
     }
+    // The quick input shows it as a thumbnail if it's open (at 2x, for Retina).
+    let max = ((quick_input::THUMB.0 * 2.0) as u32, (quick_input::THUMB.1 * 2.0) as u32);
+    let (tw, th, thumb) = quick_input::thumbnail(&rgba, width, height, max);
+    host.update(move |host, _| host.attach_to_quick_input(tw, th, thumb));
     let png = match encode_png(width, height, frozen.scale, &rgba) {
         Ok(png) => png,
         Err(e) => return eprintln!("Capibarapp: encoding failed: {e}"),
