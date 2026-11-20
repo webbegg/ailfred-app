@@ -66,9 +66,10 @@ impl Host {
         if self.quick_open { self.hide_quick_input() } else { self.show_quick_input() }
     }
 
-    /// Slides the quick input up on the display under the pointer and gives it the keys.
+    /// Slides the quick input up on the display under the pointer and gives it the keys, and
+    /// starts an area capture there: dragging takes a screenshot that lands in the input.
     pub fn show_quick_input(&mut self) {
-        let Some(quick) = &self.quick else { return };
+        let Some(quick) = self.quick.clone() else { return };
         self.quick_open = true;
         // The state changes while hidden; `animate_reveal` plays the rise from the first frame.
         quick.update(|s, tx| {
@@ -78,6 +79,24 @@ impl Host {
         quick.set_display(DisplayTarget::UnderPointer);
         quick.show();
         quick.request_keys();
+        if !self.capture_shown.load(Ordering::Acquire) {
+            start_capture(self, Duration::ZERO, Mode::Area, true);
+        }
+    }
+
+    /// Gives the capture overlay the keys (the quick input holds them while selecting).
+    pub fn capture_keys(&self) {
+        if let Some(overlay) = &self.overlay {
+            overlay.request_keys();
+        }
+    }
+
+    /// Ends a capture on screen without exporting.
+    fn dismiss_capture(&self) {
+        if let Some(overlay) = &self.overlay {
+            overlay.update(|s, _| s.clear());
+        }
+        self.hide_overlay();
     }
 
     /// Slides the quick input down; the window fades out over the slide, then hides.
@@ -92,6 +111,10 @@ impl Host {
             tx.animated();
         });
         quick.fade_out(quick_input::EXIT);
+        // Closing the input ends the capture it started (or one still on screen).
+        if self.capture_shown.load(Ordering::Acquire) {
+            self.dismiss_capture();
+        }
     }
 
     /// The quick input lost the keys: a click elsewhere closes it, a capture taking them doesn't.
@@ -191,9 +214,9 @@ impl Host {
         match action {
             // Our windows (the menu, the highlight) are excluded from the capture; the pause lets
             // the menu bar settle and the app under the menu redraw.
-            Action::Capture => start_capture(self, Duration::from_millis(200), Mode::Area),
-            Action::CaptureWindow => start_capture(self, Duration::from_millis(200), Mode::Window),
-            Action::CaptureFullScreen => start_capture(self, Duration::from_millis(200), Mode::FullScreen),
+            Action::Capture => start_capture(self, Duration::from_millis(200), Mode::Area, false),
+            Action::CaptureWindow => start_capture(self, Duration::from_millis(200), Mode::Window, false),
+            Action::CaptureFullScreen => start_capture(self, Duration::from_millis(200), Mode::FullScreen, false),
             Action::QuickInput => self.show_quick_input(),
             Action::OpenFolder => open(&app_env::screenshots_dir()),
             Action::OpenPermissionSettings => open("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"),
@@ -252,12 +275,13 @@ fn host_view(_: &Host, _: &mut Cx<Host>) -> El {
 }
 
 pub(crate) fn on_shortcut(host: &mut Host, _: &mut Tx) {
-    start_capture(host, Duration::ZERO, Mode::Area);
+    start_capture(host, Duration::ZERO, Mode::Area, false);
 }
 
 /// Captures off the UI thread after `delay`, then shows the frozen display (starting in `mode`) on the display it came
-/// from. A missing Screen Recording permission shows in the menu.
-fn start_capture(host: &mut Host, delay: Duration, mode: Mode) {
+/// from. A missing Screen Recording permission shows in the menu. `from_input`: the quick input
+/// started it, keeps the keys, and a label follows the pointer.
+fn start_capture(host: &mut Host, delay: Duration, mode: Mode, from_input: bool) {
     let Some(overlay) = host.overlay.clone() else { return };
     if host.capturing.swap(true, Ordering::AcqRel) {
         return;
@@ -278,11 +302,13 @@ fn start_capture(host: &mut Host, delay: Duration, mode: Mode) {
                 let display = shot.display_id;
                 // Queued in this order: state, placement, reveal. They may be applied over more than
                 // one event-loop turn; the update is queued before `show`, and show refreshes first.
-                overlay.update(move |s, _| s.freeze(shot, mode));
+                overlay.update(move |s, _| s.freeze(shot, mode, from_input));
                 overlay.set_display(DisplayTarget::Native(NativeDisplayId::MacOS(display)));
                 capture_shown.store(true, Ordering::Release);
                 overlay.show();
-                overlay.request_keys();
+                if !from_input {
+                    overlay.request_keys();
+                }
             }
             Err(e) => eprintln!("Capibarapp: {e}"),
         }

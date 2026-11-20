@@ -21,6 +21,12 @@ fn color_of(ink: Ink) -> Color {
     Color { r, g, b, a: 1.0 }
 }
 
+/// The label beside the pointer when the quick input starts a capture, its size (points, about),
+/// and its gap to the pointer.
+const CURSOR_HINT: &str = "Drag to take a screenshot";
+const LABEL: (f32, f32) = (190.0, 30.0);
+const LABEL_GAP: f32 = 16.0;
+
 /// A drag smaller than this (points) is a click, not a selection.
 const MIN_SIDE: f32 = 3.0;
 const TOOLBAR_H: f32 = 40.0;
@@ -129,15 +135,29 @@ pub struct Overlay {
     /// Set by confirm/dismiss until the queued clear lands: input in between is ignored, so a held
     /// Enter (or Enter plus a Copy click) can't export twice.
     closing: bool,
+    /// Started by the quick input: a label follows the pointer, and the keys stay with the
+    /// input until an area is picked.
+    cursor_hint: bool,
 }
 
 impl Overlay {
     pub fn new(host: AppHandle<Host>) -> Self {
-        Overlay { host, pixels: Pixels::new(), frozen: None, stage: Stage::Selecting(Pick::Idle), windows: Vec::new(), pointer: [0.0, 0.0], closing: false }
+        Overlay {
+            host,
+            pixels: Pixels::new(),
+            frozen: None,
+            stage: Stage::Selecting(Pick::Idle),
+            windows: Vec::new(),
+            pointer: [0.0, 0.0],
+            closing: false,
+            cursor_hint: false,
+        }
     }
 
-    /// Shows a new capture in `mode`; any previous selection and marks are dropped.
-    pub fn freeze(&mut self, shot: Shot, mode: Mode) {
+    /// Shows a new capture in `mode`; any previous selection and marks are dropped. `cursor_hint`:
+    /// started by the quick input.
+    pub fn freeze(&mut self, shot: Shot, mode: Mode, cursor_hint: bool) {
+        self.cursor_hint = cursor_hint;
         self.pixels.set(shot.width, shot.height, shot.rgba.clone());
         let frozen = Frozen { width: shot.width, height: shot.height, scale: shot.scale, rgba: shot.rgba };
         let full = [0.0, 0.0, frozen.width as f32 / frozen.scale, frozen.height as f32 / frozen.scale];
@@ -174,11 +194,12 @@ impl Overlay {
     }
 
     /// Drops the frozen capture (the export thread keeps its own reference while it runs).
-    fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.frozen = None;
         self.stage = Stage::Selecting(Pick::Idle);
         self.windows = Vec::new();
         self.closing = false;
+        self.cursor_hint = false;
         self.pixels.set(1, 1, vec![0; 4]);
     }
 
@@ -274,6 +295,20 @@ pub fn view(s: &Overlay, cx: &mut Cx<Overlay>) -> El {
     match &s.stage {
         // Before a drag the frozen screen shows as is, only the hint on top; the dim starts with the
         // drag (its first event creates the selection).
+        // Started by the quick input: one label beside the pointer, following it.
+        Stage::Selecting(Pick::Idle) if s.cursor_hint => {
+            let [x, y] = label_at(s.pointer, [sw, sh]);
+            root.child(
+                el().key("cursor-hint")
+                    .px(10.0)
+                    .h(LABEL.1)
+                    .center_y()
+                    .radius(8.0)
+                    .fill(PANEL)
+                    .pin(Some(x), Some(y), None, None)
+                    .child(text(CURSOR_HINT).color(EDGE)),
+            )
+        }
         Stage::Selecting(Pick::Idle) => root.child(hint("Drag to select · Space: window · F: full screen · Esc: cancel")),
         Stage::Selecting(Pick::Window(None)) => root.child(hint("Click a window · Space: area · F: full screen · Esc: cancel")),
         Stage::Selecting(Pick::Window(Some(win))) => {
@@ -433,6 +468,8 @@ fn select_drag(s: &mut Overlay, drag: &Drag) {
     } else if sel[2] < MIN_SIDE || sel[3] < MIN_SIDE {
         Stage::Selecting(Pick::Idle)
     } else {
+        // Annotating and confirming need the keys, which the quick input may hold.
+        s.host.update(|host, _| host.capture_keys());
         Stage::Editing(Edit::new(sel))
     };
     if let Some(tucked) = tuck_change(was_dragging, matches!(s.stage, Stage::Selecting(Pick::Dragging(_)))) {
@@ -462,8 +499,17 @@ fn on_pointer_move(s: &mut Overlay, p: rune::PointerEvent, tx: &mut Tx) {
                 *hover = under;
             }
         }
+        // The pointer label follows at once, without a spring.
+        Stage::Selecting(Pick::Idle) if s.cursor_hint => tx.instant(),
         _ => tx.live_only(),
     }
+}
+
+/// Where the pointer label goes: below and right of `pointer`, flipped to the other side near the
+/// right or bottom edge of a `screen` (points), so it stays on screen.
+fn label_at(pointer: [f32; 2], screen: [f32; 2]) -> [f32; 2] {
+    let place = |p: f32, size: f32, max: f32| if p + LABEL_GAP + size <= max { p + LABEL_GAP } else { p - LABEL_GAP - size };
+    [place(pointer[0], LABEL.0, screen[0]), place(pointer[1], LABEL.1, screen[1])]
 }
 
 /// Window mode: a click (released over a window) selects it.
@@ -472,6 +518,7 @@ fn window_click(s: &mut Overlay, drag: &Drag) {
         return;
     }
     if let Some(win) = window_at(&s.windows, [drag.x, drag.y]) {
+        s.host.update(|host, _| host.capture_keys());
         s.stage = Stage::Editing(Edit::new(win));
     }
 }
@@ -611,6 +658,16 @@ mod tests {
         assert_eq!((w, h), (4, 4));
         assert!(out.chunks(4).all(|p| p == [127, 127, 127, 255]), "one averaged block: {:?}", &out[0..4]);
         assert!(pixelate_region(&f, [3.5, 0.0, 1.0, 1.0], [0.5, 0.0, 0.0, 1.0]).is_none(), "empty area");
+    }
+
+    #[test]
+    fn the_pointer_label_sits_beside_the_pointer_and_stays_on_screen() {
+        let screen = [1000.0, 800.0];
+        assert_eq!(label_at([100.0, 100.0], screen), [100.0 + LABEL_GAP, 100.0 + LABEL_GAP], "below right");
+        let [x, _] = label_at([990.0, 100.0], screen);
+        assert_eq!(x, 990.0 - LABEL_GAP - LABEL.0, "near the right edge: on the left");
+        let [_, y] = label_at([100.0, 790.0], screen);
+        assert_eq!(y, 790.0 - LABEL_GAP - LABEL.1, "near the bottom: above");
     }
 
     #[test]
