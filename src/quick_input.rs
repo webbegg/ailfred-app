@@ -89,6 +89,8 @@ pub struct QuickInput {
     next_shot: u64,
     /// Enter or the send button: the panel is pressed in, sending once it's down (`release`).
     pressed: bool,
+    /// The capture shortcut's symbols, shown in the empty field's hint.
+    capture_chord: Option<String>,
 }
 
 /// What Esc in a field (the input's or the chat's) does.
@@ -137,6 +139,7 @@ impl QuickInput {
             next_message: 0,
             next_shot: 0,
             pressed: false,
+            capture_chord: None,
         }
     }
 
@@ -298,15 +301,21 @@ impl QuickInput {
     /// Cmd+V in the field: an image on the clipboard takes the next id and, once decoded, joins
     /// the field as a chip (`attach`). False lets the field paste the text.
     pub fn paste(&mut self, content: &rune::ClipboardContent) -> bool {
-        let Some((id, png)) = self.take_paste(content) else { return false };
-        chat::decode_pasted(&self.host, chat::Field::Input, id, png);
-        true
+        let taken = self.take_paste(content);
+        let any = !taken.is_empty();
+        for (id, pasted) in taken {
+            chat::decode_pasted(&self.host, chat::Field::Input, id, pasted);
+        }
+        any
     }
 
-    fn take_paste(&mut self, content: &rune::ClipboardContent) -> Option<(u64, Vec<u8>)> {
-        let png = chat::pasted_png(content)?;
-        self.next_shot += 1;
-        Some((self.next_shot, png))
+    fn take_paste(&mut self, content: &rune::ClipboardContent) -> Vec<(u64, chat::Pasted)> {
+        chat::take_ids(&mut self.next_shot, chat::pasted_images(content))
+    }
+
+    /// The capture shortcut, as its symbols (`chord_symbols`), for the hint; None when unset.
+    pub fn set_capture_chord(&mut self, chord: Option<String>) {
+        self.capture_chord = chord;
     }
 
     /// Adds a capture, or replaces the one with the same id.
@@ -428,8 +437,31 @@ pub fn bottom_panel(screen: [f32; 2], dock: f32) -> [f32; 4] {
     [(screen[0] - PANEL_W) / 2.0, screen[1] - dock.max(0.0) - MARGIN - PANEL_H, PANEL_W, PANEL_H]
 }
 
-/// The field's hint: what it's for, given `shots` attached.
-pub fn placeholder(shots: usize) -> &'static str {
+/// The field's hint: what it's for, given `shots` attached; with none, how to take a screenshot
+/// with the capture shortcut `chord`, if one is set.
+pub fn hint(shots: usize, chord: Option<&str>) -> String {
+    match (shots, chord) {
+        (0, Some(chord)) => format!("{}  {chord} to take a screenshot", placeholder(0)),
+        _ => placeholder(shots).to_owned(),
+    }
+}
+
+/// A shortcut as written (`shift+super+space`) in the Mac's symbols, in its order: `⇧⌘Space`.
+pub fn chord_symbols(shortcut: &str) -> String {
+    const ORDER: [(&[&str], &str); 4] =
+        [(&["ctrl", "control"], "⌃"), (&["alt", "option", "opt"], "⌥"), (&["shift"], "⇧"), (&["super", "cmd", "command", "meta"], "⌘")];
+    let parts: Vec<String> = shortcut.split('+').map(|p| p.trim().to_ascii_lowercase()).collect();
+    let mut out: String = ORDER.iter().filter(|(names, _)| parts.iter().any(|p| names.contains(&p.as_str()))).map(|(_, s)| *s).collect();
+    let modifier = |p: &String| ORDER.iter().any(|(names, _)| names.contains(&p.as_str()));
+    if let Some(key) = parts.iter().rfind(|p| !modifier(p)) {
+        let mut chars = key.chars();
+        out.extend(chars.next().map(|c| c.to_ascii_uppercase()));
+        out.push_str(chars.as_str());
+    }
+    out
+}
+
+fn placeholder(shots: usize) -> &'static str {
     match shots {
         0 => "Ask anything…",
         1 => "Ask about this screenshot…",
@@ -589,7 +621,7 @@ fn input_row(s: &QuickInput, t: &tok::Theme) -> El {
         .min_w(FIELD_MIN_W)
         .color(t.text)
         .caret(t.text, ACCENT.alpha(0.35))
-        .placeholder(placeholder(s.shots.len()), t.text_secondary.alpha(0.8))
+        .placeholder(hint(s.shots.len(), s.capture_chord.as_deref()), t.text_secondary.alpha(0.8))
         .animate_layout()
         .on_edit(|s: &mut QuickInput| &mut s.query)
         .on_input_key(|s: &mut QuickInput, ev: &KeyEvent, _: &mut Tx| s.field_key(ev))
@@ -765,9 +797,9 @@ mod tests {
     fn an_image_pasted_into_the_input_takes_the_next_id_and_text_is_left_to_the_field() {
         use crate::chat::tests::{a_png, clip};
         let mut s = QuickInput::new(None);
-        assert_eq!(s.take_paste(&clip("just text", None)), None);
-        assert_eq!(s.take_paste(&clip("caption", Some(a_png()))), Some((1, a_png())), "the image, not its text");
-        assert_eq!(s.take_paste(&clip("", Some(a_png()))).map(|(id, _)| id), Some(2));
+        assert_eq!(s.take_paste(&clip("just text", None)), vec![]);
+        assert_eq!(s.take_paste(&clip("caption", Some(a_png()))), vec![(1, chat::Pasted::Png(a_png()))], "the image, not its text");
+        assert_eq!(s.take_paste(&clip("", Some(a_png()))).first().map(|(id, _)| *id), Some(2));
     }
 
     #[test]
@@ -857,6 +889,17 @@ mod tests {
         assert_eq!(placeholder(0), "Ask anything…");
         assert_eq!(placeholder(1), "Ask about this screenshot…");
         assert_eq!(placeholder(3), "Ask about these screenshots…");
+        assert_eq!(hint(0, Some("⇧⌘Space")), "Ask anything…  ⇧⌘Space to take a screenshot");
+        assert_eq!(hint(0, None), "Ask anything…", "no capture shortcut set");
+        assert_eq!(hint(1, Some("⇧⌘Space")), "Ask about this screenshot…");
+    }
+
+    #[test]
+    fn a_shortcut_reads_in_the_macs_symbols() {
+        assert_eq!(chord_symbols("shift+super+space"), "⇧⌘Space");
+        assert_eq!(chord_symbols("super+shift+4"), "⇧⌘4", "in the Mac's order");
+        assert_eq!(chord_symbols("ctrl+alt+cmd+shift+k"), "⌃⌥⇧⌘K");
+        assert_eq!(chord_symbols("Option+F5"), "⌥F5");
     }
 
     #[test]

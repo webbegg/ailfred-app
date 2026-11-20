@@ -110,17 +110,60 @@ pub fn paste_lands(field: Field, quick_open: bool, chat_open: bool) -> bool {
     }
 }
 
-/// The image on the clipboard, if any, as a PNG to send.
-pub fn pasted_png(content: &rune::ClipboardContent) -> Option<Vec<u8>> {
-    content.image().map(|image| image.png().to_vec())
+/// One image a paste brings: the clipboard's, or an image file copied in Finder (read later,
+/// off the main thread).
+#[derive(Debug, PartialEq)]
+pub enum Pasted {
+    Png(Vec<u8>),
+    File(std::path::PathBuf),
 }
 
-/// Decodes pasted image `id` off the main thread, then hands it to `field` through the host.
-pub fn decode_pasted(host: &Option<AppHandle<Host>>, field: Field, id: u64, png: Vec<u8>) {
+/// The images a paste brings: copied files, those that are PNG or JPEG images (Finder puts
+/// their icon on the clipboard too, so other files bring none); else the clipboard's image.
+pub fn pasted_images(content: &rune::ClipboardContent) -> Vec<Pasted> {
+    if !content.files().is_empty() {
+        let image = |p: &&std::path::PathBuf| {
+            p.extension().and_then(|e| e.to_str()).is_some_and(|e| ["png", "jpg", "jpeg"].contains(&e.to_ascii_lowercase().as_str()))
+        };
+        return content.files().iter().filter(image).cloned().map(Pasted::File).collect();
+    }
+    content.image().map(|image| vec![Pasted::Png(image.png().to_vec())]).unwrap_or_default()
+}
+
+/// Each pasted image with the next of the field's ids (`next` is the last taken).
+pub fn take_ids(next: &mut u64, pasted: Vec<Pasted>) -> Vec<(u64, Pasted)> {
+    pasted
+        .into_iter()
+        .map(|p| {
+            *next += 1;
+            (*next, p)
+        })
+        .collect()
+}
+
+/// The image in the file at `path` as a PNG: a PNG as it is, a JPEG converted. Else None.
+pub fn image_file_png(path: &std::path::Path) -> Option<Vec<u8>> {
+    let bytes = std::fs::read(path).ok()?;
+    if decode_png(&bytes).is_some() {
+        return Some(bytes);
+    }
+    let (rgba, w, h) = crate::capture::jpeg_rgba(&bytes)?;
+    crate::export::encode_png(w, h, 1.0, &rgba).ok()
+}
+
+/// Decodes pasted image `id` off the main thread (reading it first, if a file), then hands it to
+/// `field` through the host.
+pub fn decode_pasted(host: &Option<AppHandle<Host>>, field: Field, id: u64, pasted: Pasted) {
     let Some(host) = host.clone() else { return };
-    std::thread::spawn(move || match Image::from_png(&png) {
-        Some(image) => host.update(move |host, _| host.pasted(field, id, png, image)),
-        None => eprintln!("Capibarapp: the pasted image couldn't be read"),
+    std::thread::spawn(move || {
+        let png = match pasted {
+            Pasted::Png(png) => Some(png),
+            Pasted::File(path) => image_file_png(&path),
+        };
+        match png.and_then(|png| Image::from_png(&png).map(|image| (png, image))) {
+            Some((png, image)) => host.update(move |host, _| host.pasted(field, id, png, image)),
+            None => eprintln!("Capibarapp: the pasted image couldn't be read"),
+        }
     });
 }
 
@@ -353,15 +396,16 @@ impl Chat {
     /// Cmd+V in the field: an image on the clipboard takes the next id and, once decoded, joins
     /// the draft (`attach`). False lets the field paste the text.
     pub fn paste(&mut self, content: &rune::ClipboardContent) -> bool {
-        let Some((id, png)) = self.take_paste(content) else { return false };
-        decode_pasted(&self.host, Field::Chat, id, png);
-        true
+        let taken = self.take_paste(content);
+        let any = !taken.is_empty();
+        for (id, pasted) in taken {
+            decode_pasted(&self.host, Field::Chat, id, pasted);
+        }
+        any
     }
 
-    fn take_paste(&mut self, content: &rune::ClipboardContent) -> Option<(u64, Vec<u8>)> {
-        let png = pasted_png(content)?;
-        self.next_shot += 1;
-        Some((self.next_shot, png))
+    fn take_paste(&mut self, content: &rune::ClipboardContent) -> Vec<(u64, Pasted)> {
+        take_ids(&mut self.next_shot, pasted_images(content))
     }
 
     /// Adds a capture to the draft, or replaces the one with the same id.
@@ -755,9 +799,40 @@ pub(crate) mod tests {
     #[test]
     fn pasted_images_take_their_own_ids_and_text_is_left_to_the_field() {
         let mut c = Chat::new(None);
-        assert_eq!(c.take_paste(&clip("just text", None)), None);
-        assert_eq!(c.take_paste(&clip("", Some(a_png()))), Some((1, a_png())));
-        assert_eq!(c.take_paste(&clip("", Some(a_png()))).map(|(id, _)| id), Some(2));
+        assert_eq!(c.take_paste(&clip("just text", None)), vec![]);
+        assert_eq!(c.take_paste(&clip("", Some(a_png()))), vec![(1, Pasted::Png(a_png()))]);
+        assert_eq!(c.take_paste(&clip("", Some(a_png()))).first().map(|(id, _)| *id), Some(2));
+    }
+
+    #[test]
+    fn image_files_copied_in_finder_paste_as_images_and_other_files_as_none() {
+        let files = |names: &[&str]| clip("names", Some(a_png())).with_files(names.iter().map(std::path::PathBuf::from));
+        let file = |n: &str| Pasted::File(n.into());
+        assert_eq!(pasted_images(&files(&["/a/one.PNG", "/a/notes.txt", "/a/two.jpeg", "/a/3.jpg"])), vec![file("/a/one.PNG"), file("/a/two.jpeg"), file("/a/3.jpg")], "the files, not Finder's icon");
+        assert_eq!(pasted_images(&files(&["/a/notes.txt"])), vec![], "not the icon of a file that isn't an image");
+        assert_eq!(pasted_images(&clip("", Some(a_png()))), vec![Pasted::Png(a_png())]);
+        assert_eq!(pasted_images(&clip("text", None)), vec![]);
+        let mut next = 0;
+        assert_eq!(take_ids(&mut next, vec![file("/a"), file("/b")]), vec![(1, file("/a")), (2, file("/b"))], "one chip each");
+    }
+
+    #[test]
+    fn an_image_file_is_read_as_a_png() {
+        let dir = std::env::temp_dir().join(format!("capibarapp-paste-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("a.png");
+        std::fs::write(&png, a_png()).unwrap();
+        assert_eq!(image_file_png(&png), Some(a_png()), "a PNG as it is");
+        let jpeg = dir.join("a.jpg");
+        std::fs::write(&jpeg, include_bytes!("testdata/tiny.jpg")).unwrap();
+        let converted = image_file_png(&jpeg).expect("a JPEG converted");
+        let (w, h, _) = decode_png(&converted).unwrap();
+        assert_eq!((w, h), (4, 3));
+        let text = dir.join("fake.png");
+        std::fs::write(&text, "not an image").unwrap();
+        assert_eq!(image_file_png(&text), None);
+        assert_eq!(image_file_png(&dir.join("missing.png")), None);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

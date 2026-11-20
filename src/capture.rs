@@ -10,9 +10,10 @@ use std::time::Duration;
 use block2::RcBlock;
 use objc2::AllocAnyThread;
 use objc2::rc::Retained;
-use objc2_core_foundation::{CFArray, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
+use objc2_core_foundation::{CFArray, CFData, CFDictionary, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
-    CGBitmapContextCreate, CGColorSpace, CGContext, CGEvent, CGImage, CGImageAlphaInfo, CGRectMakeWithDictionaryRepresentation,
+    CGBitmapContextCreate, CGColorRenderingIntent, CGColorSpace, CGContext, CGDataProvider, CGEvent, CGImage, CGImageAlphaInfo,
+    CGRectMakeWithDictionaryRepresentation,
     CGWindowListCopyWindowInfo, CGWindowListOption, kCGColorSpaceSRGB, kCGWindowAlpha, kCGWindowBounds, kCGWindowLayer, kCGWindowOwnerPID,
 };
 use objc2_foundation::{NSArray, NSError};
@@ -123,6 +124,15 @@ fn rgba(image: &CGImage) -> Result<(Vec<u8>, u32, u32), String> {
     CGContext::draw_image(Some(&context), rect, Some(image));
     drop(context);
     Ok((pixels, w as u32, h as u32))
+}
+
+/// A JPEG's pixels as straight RGBA in sRGB (opaque), its width and height.
+pub fn jpeg_rgba(jpeg: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+    let data = CFData::from_buffer(jpeg);
+    let provider = CGDataProvider::with_cf_data(Some(&data))?;
+    // SAFETY: a null decode array is allowed (no remapping).
+    let image = unsafe { CGImage::with_jpeg_data_provider(Some(&provider), std::ptr::null(), true, CGColorRenderingIntent::RenderingIntentDefault) }?;
+    rgba(&image).ok()
 }
 
 /// Windows smaller than this (points, either side) aren't offered: status items, tooltips.

@@ -435,9 +435,14 @@ impl Host {
         }
     }
 
+    /// Shows the active capture shortcut (None: unset) in the menu and the input's hint.
     pub fn show_capture_shortcut(&self, shortcut: Option<&rune::Shortcut>) {
         if let Some(tray) = &self.tray {
             tray.show_capture_shortcut(shortcut);
+        }
+        if let Some(quick) = &self.quick {
+            let chord = shortcut.map(|s| quick_input::chord_symbols(&s.to_string()));
+            quick.update(move |s, _| s.set_capture_chord(chord));
         }
     }
 
