@@ -66,6 +66,8 @@ pub struct Host {
     shown_count: u64,
     /// The Dock's height under the open input at the bottom (0 when there's none).
     quick_dock: f32,
+    /// How many images the input holds (it tells us), for the capture to leave its strip alone.
+    quick_chips: usize,
     /// Counts the captures shown (main thread), so an earlier one's fade out doesn't hide a newer.
     overlay_shown: u64,
     /// The chat side panel (in the input's window) is open (or opening).
@@ -336,10 +338,15 @@ impl Host {
         });
     }
 
+    /// The input holds `n` images now.
+    pub fn set_quick_chips(&mut self, n: usize) {
+        self.quick_chips = n;
+    }
+
     /// Who a capture is for: the open input, else the open chat, else itself.
     fn capture_target(&self) -> shot::For {
         if self.quick_open {
-            shot::For::Input { dock: self.quick_dock }
+            shot::For::Input { dock: self.quick_dock, chips: self.quick_chips }
         } else if self.chat_open {
             let screen = self.window_screen();
             shot::For::Chat { panel: chat::side_rect(screen.size(), chat::insets(screen.frame, screen.visible)) }
@@ -497,6 +504,7 @@ fn host_init() -> Host {
         quick: None,
         quick_open: false,
         quick_dock: 0.0,
+        quick_chips: 0,
         shown: None,
         shown_count: 0,
         overlay_shown: 0,
@@ -650,6 +658,7 @@ fn main() {
             quick: Some(quick),
             quick_open: false,
             quick_dock: 0.0,
+            quick_chips: 0,
             shown: None,
             shown_count: 0,
             overlay_shown: 0,

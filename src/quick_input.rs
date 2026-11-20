@@ -190,6 +190,7 @@ impl QuickInput {
         if std::mem::replace(&mut self.morphing, false) {
             self.query.clear();
             self.shots.clear();
+            self.tell_chips();
         }
         self.chat.land();
         // Cmd+N meanwhile: the new input keeps the keys.
@@ -221,6 +222,7 @@ impl QuickInput {
         self.tucked = false;
         self.pressed = false;
         self.shots.clear();
+        self.tell_chips();
         self.preview = None;
         std::mem::replace(&mut self.open, false)
     }
@@ -244,9 +246,15 @@ impl QuickInput {
 
     /// The panel's rect now: its rest, grown upward by the chip strip (the field row stays put).
     pub fn panel_rect(&self) -> [f32; 4] {
-        let [x, y, w, h] = self.rect;
-        let grow = strip_h(self.shots.len());
-        [x, y - grow, w, h + grow]
+        grown(self.rect, self.shots.len())
+    }
+
+    /// Tells the host how many images it holds now (a capture leaves their strip alone).
+    fn tell_chips(&self) {
+        if let Some(host) = &self.host {
+            let n = self.shots.len();
+            host.update(move |host, _| host.set_quick_chips(n));
+        }
     }
 
     /// Slides out of view (true) or back into place (false).
@@ -307,6 +315,7 @@ impl QuickInput {
             Some(shot) => (shot.png, shot.preview) = (png, preview),
             None => self.shots.push(Attached { id, png, preview }),
         }
+        self.tell_chips();
     }
 
     /// Drops a capture (its chip's X). True if it was attached.
@@ -316,6 +325,7 @@ impl QuickInput {
         }
         let before = self.shots.len();
         self.shots.retain(|a| a.id != id);
+        self.tell_chips();
         self.shots.len() != before
     }
 
@@ -425,6 +435,18 @@ pub fn placeholder(shots: usize) -> &'static str {
         1 => "Ask about this screenshot…",
         _ => "Ask about these screenshots…",
     }
+}
+
+/// The input's panel at the bottom of a `screen` over a Dock `dock` points tall, with `chips`
+/// images in its strip (`QuickInput::panel_rect` once placed).
+pub fn input_panel(screen: [f32; 2], dock: f32, chips: usize) -> [f32; 4] {
+    grown(bottom_panel(screen, dock), chips)
+}
+
+/// `rest` grown upward by the strip of `chips` images.
+fn grown([x, y, w, h]: [f32; 4], chips: usize) -> [f32; 4] {
+    let grow = strip_h(chips);
+    [x, y - grow, w, h + grow]
 }
 
 /// Whether `n` chips show smaller, when only `full` fit at their size.

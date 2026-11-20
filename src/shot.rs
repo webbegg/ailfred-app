@@ -158,8 +158,9 @@ pub struct Overlay {
 pub enum For {
     /// Itself: Enter copies and saves.
     Nothing,
-    /// The quick input, waiting at the bottom over a Dock `dock` points tall.
-    Input { dock: f32 },
+    /// The quick input, waiting at the bottom over a Dock `dock` points tall, with `chips`
+    /// images in its strip.
+    Input { dock: f32, chips: usize },
     /// The chat, its panel at `panel` (points on the display).
     Chat { panel: [f32; 4] },
 }
@@ -549,7 +550,7 @@ fn bar_top([_, y, _, h]: [f32; 4], sh: f32, avoid: Option<[f32; 4]>) -> f32 {
 fn served(target: For, screen: Option<[f32; 2]>) -> (bool, bool, Option<[f32; 4]>) {
     match target {
         For::Nothing => (false, false, None),
-        For::Input { dock } => (true, false, screen.map(|screen| crate::quick_input::bottom_panel(screen, dock))),
+        For::Input { dock, chips } => (true, false, screen.map(|screen| crate::quick_input::input_panel(screen, dock, chips))),
         For::Chat { panel } => (true, true, Some(panel)),
     }
 }
@@ -795,7 +796,11 @@ mod tests {
         let screen = [1920.0, 1080.0];
         let chat = [1508.0, 45.0, 400.0, 1023.0];
         assert_eq!(served(For::Chat { panel: chat }, Some(screen)), (true, true, Some(chat)));
-        assert_eq!(served(For::Input { dock: 70.0 }, Some(screen)), (true, false, Some(crate::quick_input::bottom_panel(screen, 70.0))));
+        let bottom = crate::quick_input::bottom_panel(screen, 70.0);
+        assert_eq!(served(For::Input { dock: 70.0, chips: 0 }, Some(screen)), (true, false, Some(bottom)));
+        let grow = crate::quick_input::strip_h(2);
+        let with_chips = [bottom[0], bottom[1] - grow, bottom[2], bottom[3] + grow];
+        assert_eq!(served(For::Input { dock: 70.0, chips: 2 }, Some(screen)), (true, false, Some(with_chips)), "its strip of images too");
         assert_eq!(served(For::Nothing, Some(screen)), (false, false, None));
     }
 
