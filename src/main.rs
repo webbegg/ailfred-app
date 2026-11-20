@@ -13,7 +13,9 @@ mod export;
 mod login;
 mod marks;
 mod output;
+mod icons;
 mod quick_input;
+mod screens;
 mod settings;
 mod settings_ui;
 mod shot;
@@ -76,8 +78,9 @@ impl Host {
             s.open();
             tx.animated();
         });
-        // Back at the bottom, wherever a capture area took it last time.
-        quick.set_placement(Some(quick_bottom()));
+        // Back at the bottom (above a Dock there), wherever a capture area took it last time.
+        quick.resize(quick_input::WINDOW);
+        quick.set_placement(Some(quick_bottom(screens::dock_inset_under_pointer())));
         quick.set_display(DisplayTarget::UnderPointer);
         quick.show();
         quick.request_keys();
@@ -93,21 +96,42 @@ impl Host {
         }
     }
 
-    /// Moves the open input beside capture area `sel` (points on a `screen` of that size) and
-    /// lets it rise there.
-    pub fn place_quick_input_beside(&self, id: u64, sel: [f32; 4], screen: [f32; 2]) {
-        let Some(quick) = &self.quick else { return };
+    /// Moves the open input beside capture area `id` (`sel`, points on `display`, a `screen` of
+    /// that size) and lets it arrive there: it waits there out of view (at once), then, a frame
+    /// or two later, rises into place.
+    pub fn place_quick_input_beside(&self, id: u64, display: u32, sel: [f32; 4], screen: [f32; 2]) {
+        let Some(quick) = self.quick.clone() else { return };
         if !self.quick_open {
             return;
         }
-        let [x, y] = quick_input::beside(sel, screen);
-        let (width, height) = quick_input::WINDOW;
-        quick.set_placement(Some(OverlayPlacement::Rect { x, y, width, height }));
         quick.update(move |s, tx| {
-            s.set_area(Some(id));
-            s.set_tucked(false);
-            tx.animated();
+            s.arrive(id);
+            tx.instant();
         });
+        let [x, y, width, height] = quick_input::window_for(quick_input::beside(sel, screen));
+        quick.set_display(DisplayTarget::Native(NativeDisplayId::MacOS(display)));
+        quick.set_placement(Some(OverlayPlacement::Rect { x, y, width, height }));
+        std::thread::spawn(move || {
+            std::thread::sleep(quick_input::ARRIVAL_DELAY);
+            quick.update(move |s, tx| {
+                s.arrived(id);
+                tx.animated();
+            });
+        });
+    }
+
+    /// The capture's tools took the keys (true) or gave them back: the input shows it.
+    pub fn quick_editing(&self, editing: bool) {
+        if let Some(quick) = &self.quick {
+            quick.update(move |s, _| s.set_editing(editing));
+        }
+    }
+
+    /// ⌘E in the input: the capture area's tools open or close.
+    pub fn toggle_capture_tools(&self) {
+        if let Some(overlay) = &self.overlay {
+            overlay.update(|s, _| s.toggle_tools());
+        }
     }
 
     /// A capture area's chip was removed: the area goes too if it's still on screen.
@@ -144,6 +168,17 @@ impl Host {
             tx.animated();
         });
         quick.fade_out(quick_input::EXIT);
+        // Once out of view, back to the bottom: the next opening slides in from the screen edge.
+        let rest = quick.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(quick_input::EXIT + Duration::from_millis(60));
+            rest.update(|s, tx| {
+                if !s.is_open() {
+                    s.rest();
+                    tx.instant();
+                }
+            });
+        });
         // Closing the input ends the capture it started (or one still on screen).
         if self.capture_shown.load(Ordering::Acquire) {
             self.dismiss_capture();
@@ -311,10 +346,10 @@ pub(crate) fn on_shortcut(host: &mut Host, _: &mut Tx) {
     start_capture(host, Duration::ZERO, Mode::Area);
 }
 
-/// The quick input's resting place: flush with the bottom edge (the view keeps the gap, so a
-/// tucked panel slides out of the screen), centred.
-fn quick_bottom() -> OverlayPlacement {
-    OverlayPlacement::Edge { edge: ScreenEdge::Bottom, margin: 0.0, align: Align::Center, inset: 0.0 }
+/// The quick input's resting place: flush with the bottom edge, or the Dock's top (`dock`
+/// points up); the view keeps the gap, so a tucked panel slides out of view. Centred.
+fn quick_bottom(dock: f32) -> OverlayPlacement {
+    OverlayPlacement::Edge { edge: ScreenEdge::Bottom, margin: dock, align: Align::Center, inset: 0.0 }
 }
 
 /// Captures off the UI thread after `delay`, then shows the frozen display (starting in `mode`) on the display it came
@@ -395,7 +430,7 @@ fn main() {
             OverlaySpec::new("Capibarapp quick input", quick_input::WINDOW, quick_input::view)
                 .options(OverlayOptions {
                     display: DisplayTarget::UnderPointer,
-                    placement: Some(quick_bottom()),
+                    placement: Some(quick_bottom(0.0)),
                     // Above the capture overlay, so it stays in view over a frozen screen.
                     level: OverlayLevel::AboveOverlays,
                     // Only the panel takes clicks; its shadow room passes them through.

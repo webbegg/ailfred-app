@@ -3,16 +3,23 @@
 
 use std::sync::Arc;
 
-use rune::{AppHandle, Color, Cursor, Cx, Drag, El, Key, KeyEvent, LineCap, Phase, Pixels, Shape, TextStyle, Tx, canvas, col, el, row, text};
+use rune::{AppHandle, Color, Cursor, Cx, Drag, El, Key, KeyEvent, LineCap, Phase, Pixels, Shadow, Shape, TextStyle, Tx, canvas, col, el, icon, row, text};
 
 use crate::Host;
 use crate::capture::Shot;
 use crate::export::{self, Frozen};
 use crate::marks::{self, Ink, Mark, Style, Tool};
 
-const DIM: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.35 };
-/// The hint's and toolbar's own background: they sit on the screen, so they must read on white.
-const PANEL: Color = Color { r: 0.08, g: 0.08, b: 0.09, a: 0.92 };
+/// Outside the selection; and over the whole frozen screen while the quick input waits for a
+/// drag, so the frozen screen reads as a mode.
+const DIM: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.5 };
+const IDLE_DIM: Color = Color { r: 0.0, g: 0.0, b: 0.0, a: 0.2 };
+/// The hint's and toolbar's own background, #161618 (Rune colours are linear): they sit on the
+/// screen, so they must read on white.
+const PANEL: Color = Color { r: 0.008, g: 0.008, b: 0.009, a: 0.92 };
+/// The edit button's size and its gap to the selection.
+const EDIT_BUTTON: f32 = 28.0;
+const EDIT_GAP: f32 = 6.0;
 const EDGE: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.9 };
 const ACTIVE: Color = Color { r: 1.0, g: 1.0, b: 1.0, a: 0.18 };
 /// The rune colour of an ink.
@@ -21,10 +28,10 @@ fn color_of(ink: Ink) -> Color {
     Color { r, g, b, a: 1.0 }
 }
 
-/// The label beside the pointer when the quick input starts a capture, its size (points, about),
-/// and its gap to the pointer.
+/// The label beside the pointer when the quick input starts a capture, its size (points, about,
+/// until it's laid out), and its gap to the pointer.
 const CURSOR_HINT: &str = "Drag to take a screenshot";
-const LABEL: (f32, f32) = (190.0, 30.0);
+const LABEL: (f32, f32) = (160.0, 22.0);
 const LABEL_GAP: f32 = 16.0;
 
 /// A drag smaller than this (points) is a click, not a selection.
@@ -144,6 +151,8 @@ pub struct Overlay {
     for_input: bool,
     /// The last capture area's id.
     last_id: u64,
+    /// The frozen display (its CGDirectDisplayID), where the quick input goes beside an area.
+    display: u32,
     /// The picked area a new drag started over, back if that drag comes to nothing.
     kept: Option<Edit>,
 }
@@ -160,6 +169,7 @@ impl Overlay {
             closing: false,
             for_input: false,
             last_id: 0,
+            display: 0,
             kept: None,
         }
     }
@@ -173,6 +183,7 @@ impl Overlay {
         let full = [0.0, 0.0, frozen.width as f32 / frozen.scale, frozen.height as f32 / frozen.scale];
         self.frozen = Some(Arc::new(frozen));
         self.windows = shot.windows;
+        self.display = shot.display_id;
         self.pointer = shot.pointer;
         self.closing = false;
         match mode {
@@ -195,8 +206,8 @@ impl Overlay {
         }
         self.attach();
         let Some(screen) = self.screen() else { return };
-        let id = self.last_id;
-        self.host.update(move |host, _| host.place_quick_input_beside(id, sel, screen));
+        let (id, display) = (self.last_id, self.display);
+        self.host.update(move |host, _| host.place_quick_input_beside(id, display, sel, screen));
     }
 
     /// Sends the current area, with its marks, to the quick input (replacing its earlier image).
@@ -216,8 +227,28 @@ impl Overlay {
     fn open_tools(&mut self) {
         if let Stage::Editing(edit) = &mut self.stage {
             edit.tools = true;
-            self.host.update(|host, _| host.capture_keys());
+            self.host.update(|host, _| {
+                host.capture_keys();
+                host.quick_editing(true);
+            });
         }
+    }
+
+    /// ⌘E in the quick input: the tools open, or close as Done does.
+    pub(crate) fn toggle_tools(&mut self) {
+        match &self.stage {
+            Stage::Editing(edit) if edit.tools => self.close_tools(),
+            Stage::Editing(_) => self.open_tools(),
+            Stage::Selecting(_) => {}
+        }
+    }
+
+    /// The keys go back to the quick input, which stops showing the tools have them.
+    fn give_back_keys(&self) {
+        self.host.update(|host, _| {
+            host.quick_editing(false);
+            host.input_keys();
+        });
     }
 
     /// The quick input: done annotating. The marks go into its image, the tools away, and the
@@ -229,13 +260,18 @@ impl Overlay {
         edit.picking = false;
         edit.tools = false;
         self.attach();
-        self.host.update(|host, _| host.input_keys());
+        self.give_back_keys();
     }
 
     /// The quick input dropped area `id`'s image (its X, or Esc): if that area is on screen it
     /// goes too, and a new one can be dragged.
     pub fn forget(&mut self, id: u64) {
-        if matches!(&self.stage, Stage::Editing(edit) if edit.id == id) {
+        if let Stage::Editing(edit) = &self.stage
+            && edit.id == id
+        {
+            if edit.tools {
+                self.give_back_keys();
+            }
             self.stage = Stage::Selecting(Pick::Idle);
         }
     }
@@ -369,16 +405,20 @@ pub fn view(s: &Overlay, cx: &mut Cx<Overlay>) -> El {
         // drag (its first event creates the selection).
         // Started by the quick input: one label beside the pointer, following it.
         Stage::Selecting(Pick::Idle) if s.for_input => {
-            let [x, y] = label_at(s.pointer, [sw, sh]);
-            root.child(
+            let size = cx.layout_size("cursor-hint").map_or(LABEL, |[w, h]| (w, h));
+            let [x, y] = label_at(s.pointer, [sw, sh], size);
+            root.child(el().key("idle-dim").w_full().h_full().fill(IDLE_DIM).pin(Some(0.0), Some(0.0), None, None)).child(
                 el().key("cursor-hint")
-                    .px(10.0)
+                    .px(8.0)
                     .h(LABEL.1)
                     .center_y()
-                    .radius(8.0)
+                    .radius(6.0)
+                    .continuous_corners()
                     .fill(PANEL)
+                    .border(1.0, Color::WHITE.alpha(0.14))
+                    .box_shadow(Shadow::core_animation(0.0, 2.0, 8.0, Color::BLACK.alpha(0.3)))
                     .pin(Some(x), Some(y), None, None)
-                    .child(text(CURSOR_HINT).color(EDGE)),
+                    .child(text(CURSOR_HINT).font(TextStyle::new(11.5, 500.0)).color(EDGE)),
             )
         }
         Stage::Selecting(Pick::Idle) => root.child(hint("Drag to select · Space: window · F: full screen · Esc: cancel")),
@@ -409,11 +449,12 @@ pub fn view(s: &Overlay, cx: &mut Cx<Overlay>) -> El {
             let root = shades(root, edit.sel, sw, sh)
                 .child(el().key("selection").size(w, h).border(1.0, EDGE).pin(Some(x), Some(y), None, None))
                 .child(marks_layer(edit).pin(Some(x), Some(y), None, None));
-            let top = bar_top(edit.sel, sh, input_panel(s, edit.sel));
+            let panel = input_panel(s, edit.sel);
             if edit.tools {
+                let top = bar_top(edit.sel, sh, panel);
                 root.child(toolbar(edit, s.for_input, top, sw, sh, cx.layout_size("toolbar").map(|[w, _]| w)))
             } else {
-                root.child(edit_button(edit, top, sw))
+                root.child(edit_button(edit_anchor(edit.sel, panel, [sw, sh])))
             }
         }
     }
@@ -543,24 +584,46 @@ fn input_panel(s: &Overlay, sel: [f32; 4]) -> Option<[f32; 4]> {
     if !s.for_input {
         return None;
     }
-    s.screen().map(|screen| crate::quick_input::panel_beside(sel, screen))
+    s.screen().map(|screen| crate::quick_input::beside(sel, screen))
+}
+
+/// Where the edit button goes: just outside the selection's corner nearest the quick input's
+/// `panel`, clear of it, on `screen`; inside that corner when there's no room outside.
+fn edit_anchor(sel: [f32; 4], panel: Option<[f32; 4]>, screen: [f32; 2]) -> [f32; 2] {
+    let ([x, y, w, h], [sw, sh], b, g) = (sel, screen, EDIT_BUTTON, EDIT_GAP);
+    let overlaps = |[bx, by]: [f32; 2], [px, py, pw, ph]: [f32; 4]| bx < px + pw && bx + b > px && by < py + ph && by + b > py;
+    let fits = |at: [f32; 2]| at[0] >= 0.0 && at[1] >= 0.0 && at[0] + b <= sw && at[1] + b <= sh && panel.is_none_or(|p| !overlaps(at, p));
+    let candidates: &[[f32; 2]] = match panel {
+        // Right of it: under the selection, at its right end (above, if no room).
+        Some([px, ..]) if px >= x + w => &[[x + w - b, y + h + g], [x + w - b, y - g - b]],
+        // Left of it: under the selection, at its left end.
+        Some([px, _, pw, _]) if px + pw <= x => &[[x, y + h + g], [x, y - g - b]],
+        // Below it: beside the selection's bottom corner, right then left.
+        Some([_, py, ..]) if py >= y + h => &[[x + w + g, y + h - b], [x - g - b, y + h - b], [x + w - b, y - g - b]],
+        // Above it, or no input: beside the top-right corner, else under the bottom-right one.
+        _ => &[[x + w + g, y], [x + w - b, y + h + g]],
+    };
+    let inside = [(x + w - b - g).clamp(0.0, sw - b), (y + h - b - g).clamp(0.0, sh - b)];
+    candidates.iter().copied().find(|&at| fits(at)).unwrap_or(inside)
 }
 
 /// For the quick input: one button where the toolbar would be, opening it.
-fn edit_button(edit: &Edit, top: f32, sw: f32) -> El {
-    let [x, _, w, _] = edit.sel;
-    let right = (sw - (x + w)).max(8.0);
+fn edit_button([x, y]: [f32; 2]) -> El {
     el().key("edit-tools")
-        .px(10.0)
-        .h(TOOLBAR_H - 8.0)
-        .center_y()
+        .size(EDIT_BUTTON, EDIT_BUTTON)
+        .center()
         .radius(8.0)
+        .continuous_corners()
         .fill(PANEL)
+        .border(1.0, Color::WHITE.alpha(0.14))
+        .box_shadow(Shadow::core_animation(0.0, 2.0, 8.0, Color::BLACK.alpha(0.3)))
         .hover(ACTIVE)
         .cursor(Cursor::Pointer)
-        .child(text("✎ Edit").color(EDGE))
+        .label("Edit screenshot")
+        .shortcut_hint("⌘E")
+        .child(icon(&crate::icons::PENCIL, 15.0).color(EDGE))
         .on_press(|s: &mut Overlay| s.open_tools())
-        .pin(None, Some(top), Some(right), None)
+        .pin(Some(x), Some(y), None, None)
 }
 
 fn on_drag(s: &mut Overlay, drag: &mut Drag, tx: &mut Tx) {
@@ -595,7 +658,11 @@ fn select_drag(s: &mut Overlay, drag: &Drag) {
     } else {
         s.pick(sel);
     }
-    if let Some(tucked) = tuck_change(was_dragging, matches!(s.stage, Stage::Selecting(Pick::Dragging(_)))) {
+    // A picked area for the quick input brings it back itself, beside the area.
+    let picked = s.for_input && matches!(s.stage, Stage::Editing(_));
+    if let Some(tucked) = tuck_change(was_dragging, matches!(s.stage, Stage::Selecting(Pick::Dragging(_))))
+        && !(picked && !tucked)
+    {
         s.host.update(move |host, _| host.tuck_quick_input(tucked));
     }
 }
@@ -630,9 +697,9 @@ fn on_pointer_move(s: &mut Overlay, p: rune::PointerEvent, tx: &mut Tx) {
 
 /// Where the pointer label goes: below and right of `pointer`, flipped to the other side near the
 /// right or bottom edge of a `screen` (points), so it stays on screen.
-fn label_at(pointer: [f32; 2], screen: [f32; 2]) -> [f32; 2] {
+fn label_at(pointer: [f32; 2], screen: [f32; 2], size: (f32, f32)) -> [f32; 2] {
     let place = |p: f32, size: f32, max: f32| if p + LABEL_GAP + size <= max { p + LABEL_GAP } else { p - LABEL_GAP - size };
-    [place(pointer[0], LABEL.0, screen[0]), place(pointer[1], LABEL.1, screen[1])]
+    [place(pointer[0], size.0, screen[0]), place(pointer[1], size.1, screen[1])]
 }
 
 /// Window mode: a click (released over a window) selects it.
@@ -787,23 +854,52 @@ mod tests {
     #[test]
     fn the_pointer_label_sits_beside_the_pointer_and_stays_on_screen() {
         let screen = [1000.0, 800.0];
-        assert_eq!(label_at([100.0, 100.0], screen), [100.0 + LABEL_GAP, 100.0 + LABEL_GAP], "below right");
-        let [x, _] = label_at([990.0, 100.0], screen);
+        assert_eq!(label_at([100.0, 100.0], screen, LABEL), [100.0 + LABEL_GAP, 100.0 + LABEL_GAP], "below right");
+        let [x, _] = label_at([990.0, 100.0], screen, LABEL);
         assert_eq!(x, 990.0 - LABEL_GAP - LABEL.0, "near the right edge: on the left");
-        let [_, y] = label_at([100.0, 790.0], screen);
+        let [_, y] = label_at([100.0, 790.0], screen, LABEL);
         assert_eq!(y, 790.0 - LABEL_GAP - LABEL.1, "near the bottom: above");
+        let [x, _] = label_at([800.0, 100.0], screen, (250.0, 22.0));
+        assert_eq!(x, 800.0 - LABEL_GAP - 250.0, "its measured width decides the flip");
+    }
+
+    #[test]
+    fn the_panel_colour_is_the_srgb_one_in_linear() {
+        let want = rune::color::hex("#161618").unwrap();
+        assert!([PANEL.r - want.r, PANEL.g - want.g, PANEL.b - want.b].iter().all(|d| d.abs() < 0.002), "{PANEL:?}");
+    }
+
+    #[test]
+    fn the_edit_button_sits_at_the_corner_nearest_the_input() {
+        let screen = [1920.0, 1080.0];
+        let (b, g) = (EDIT_BUTTON, EDIT_GAP);
+        // Input below: the button right of the selection's bottom-right corner.
+        let sel = [500.0, 100.0, 1000.0, 500.0];
+        let panel = crate::quick_input::beside(sel, screen);
+        assert!(panel[1] > 600.0, "the input is below");
+        assert_eq!(edit_anchor(sel, Some(panel), screen), [1500.0 + g, 600.0 - b]);
+        // Input right: under the selection, right-aligned (clear of the input).
+        let sel = [100.0, 100.0, 400.0, 300.0];
+        assert_eq!(edit_anchor(sel, Some(crate::quick_input::beside(sel, screen)), screen), [500.0 - b, 400.0 + g]);
+        // Input left: under the selection, left-aligned.
+        let sel = [1300.0, 200.0, 600.0, 500.0];
+        assert_eq!(edit_anchor(sel, Some(crate::quick_input::beside(sel, screen)), screen), [1300.0, 700.0 + g]);
+        // No room outside (the whole screen): inside the corner.
+        let sel = [0.0, 0.0, 1920.0, 1080.0];
+        let [x, y] = edit_anchor(sel, Some(crate::quick_input::beside(sel, screen)), screen);
+        assert!(x + b <= 1920.0 && y + b <= 1080.0 && x >= 0.0 && y >= 0.0, "on screen: {x},{y}");
     }
 
     #[test]
     fn the_toolbar_keeps_clear_of_the_quick_input() {
         let (sel, screen) = ([500.0, 100.0, 900.0, 500.0], [1920.0, 1080.0]);
         assert_eq!(bar_top(sel, screen[1], None), 608.0, "under the selection");
-        let panel = crate::quick_input::panel_beside(sel, screen);
+        let panel = crate::quick_input::beside(sel, screen);
         assert!(panel[1] < 648.0, "the input sits under it too");
         assert_eq!(bar_top(sel, screen[1], Some(panel)), 100.0 - TOOLBAR_H - 8.0, "so the bar goes above");
         // The input beside it (right): under it is free.
         let sel = [100.0, 100.0, 400.0, 300.0];
-        assert_eq!(bar_top(sel, screen[1], Some(crate::quick_input::panel_beside(sel, screen))), 408.0);
+        assert_eq!(bar_top(sel, screen[1], Some(crate::quick_input::beside(sel, screen))), 408.0);
     }
 
     #[test]
