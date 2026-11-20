@@ -43,7 +43,7 @@ pub const ARRIVAL_DELAY: Duration = Duration::from_millis(40);
 /// The slide from the screen edge.
 const GLIDE: Spring = tok::motion::GLIDE;
 /// Sending presses the whole panel in to this scale, this fast, before it goes.
-pub const PRESSED_SCALE: f32 = 0.96;
+pub const PRESSED_SCALE: f32 = 0.98;
 pub const PRESS: Duration = Duration::from_millis(110);
 
 /// The accent, #D97757 (Rune colours are linear).
