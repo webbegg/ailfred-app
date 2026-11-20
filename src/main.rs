@@ -67,14 +67,42 @@ pub struct Host {
     /// The chat side panel, and whether it's open (or opening).
     chat: Option<OverlayHandle<Chat>>,
     chat_open: bool,
+    /// A conversation is going (sent to, not ended by Cmd+N): the input's shortcut shows it.
+    chat_started: bool,
     /// The capture overlay is on screen (set by the capture thread as it shows it, cleared on
     /// hide): it takes the keys, which mustn't close the quick input.
     capture_shown: Arc<AtomicBool>,
 }
 
 impl Host {
+    /// The input's shortcut: a started chat comes back (or goes) instead of a new input.
     pub fn toggle_quick_input(&mut self) {
-        if self.quick_open { self.hide_quick_input() } else { self.show_quick_input() }
+        match chat::toggle(self.quick_open, self.chat_started, self.chat_open) {
+            chat::Toggle::ShowInput => self.show_quick_input(),
+            chat::Toggle::HideInput => self.hide_quick_input(),
+            chat::Toggle::ShowChat => self.show_chat(None),
+            chat::Toggle::HideChat => self.hide_chat(),
+        }
+    }
+
+    /// The menu's item: the started chat, else the input.
+    fn show_input_or_chat(&mut self) {
+        if self.chat_started { self.show_chat(None) } else { self.show_quick_input() }
+    }
+
+    /// Cmd+N in the chat: it slides out past the right edge, over, and a new input rises.
+    pub fn new_chat(&mut self) {
+        self.chat_started = false;
+        if let (Some(chat), true) = (&self.chat, std::mem::replace(&mut self.chat_open, false)) {
+            chat.update(|s, tx| {
+                s.start_over();
+                tx.animated();
+            });
+            chat.fade_out(quick_input::EXIT);
+        }
+        if !self.quick_open {
+            self.show_quick_input();
+        }
     }
 
     /// Slides the quick input up on the display under the pointer and gives it the keys, and
@@ -239,18 +267,21 @@ impl Host {
         let Some(handle) = self.handle.clone() else { return };
         std::thread::spawn(move || {
             let images = shots.iter().filter_map(|a| chat::Image::from_png(&a.png)).collect();
-            handle.update(move |host, _| host.show_chat(chat::Message { text, images }));
+            handle.update(move |host, _| host.show_chat(Some(chat::Message { text, images })));
         });
     }
 
-    /// Adds `message` to the chat and gives its field the keys. Closed, it first waits past the
-    /// right edge of the display under the pointer, then slides in.
-    fn show_chat(&mut self, message: chat::Message) {
+    /// Adds `message` (if any) to the chat and gives its field the keys. Closed, it first waits
+    /// past the right edge of the display under the pointer, then slides in.
+    fn show_chat(&mut self, message: Option<chat::Message>) {
         let Some(chat) = self.chat.clone() else { return };
+        self.chat_started |= message.is_some();
         if self.chat_open {
             chat.update(move |s, tx| {
-                s.push(message);
-                tx.scroll_to_bottom("messages");
+                if let Some(message) = message {
+                    s.push(message);
+                    tx.scroll_to_bottom("messages");
+                }
                 tx.animated();
             });
             chat.request_keys();
@@ -261,7 +292,9 @@ impl Host {
         let insets = chat::insets(frame, visible);
         chat.update(move |s, tx| {
             s.place(insets);
-            s.push(message);
+            if let Some(message) = message {
+                s.push(message);
+            }
             tx.scroll_to_bottom_instant("messages");
             tx.instant();
         });
@@ -397,7 +430,7 @@ impl Host {
             Action::Capture => start_capture(self, Duration::from_millis(200), Mode::Area),
             Action::CaptureWindow => start_capture(self, Duration::from_millis(200), Mode::Window),
             Action::CaptureFullScreen => start_capture(self, Duration::from_millis(200), Mode::FullScreen),
-            Action::QuickInput => self.show_quick_input(),
+            Action::QuickInput => self.show_input_or_chat(),
             Action::OpenFolder => open(&app_env::screenshots_dir()),
             Action::OpenPermissionSettings => open("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"),
             Action::ToggleLogin => {
@@ -450,6 +483,7 @@ fn host_init() -> Host {
         overlay_shown: 0,
         chat: None,
         chat_open: false,
+        chat_started: false,
         capture_shown: Arc::default(),
     }
 }
@@ -634,6 +668,7 @@ fn main() {
             overlay_shown: 0,
             chat: Some(chat),
             chat_open: false,
+            chat_started: false,
             capture_shown: Arc::default(),
         });
         // Runs on the main thread at the loop's first turn: the status item needs a running NSApp,

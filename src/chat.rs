@@ -1,7 +1,8 @@
 //! The chat side panel: sending from the quick input slides it in from the right edge of the
 //! display, with what was sent as the first message and its own field focused. It stays open
-//! when another app is clicked; Esc or its close button slide it back out. No AI: it shows the
-//! conversation typed into it.
+//! when another app is clicked; Esc or its close button slide it back out, and the input's
+//! shortcut brings it back. Cmd+N slides it out for good and opens a new input. No AI: it shows
+//! the conversation typed into it.
 
 use rune::tok;
 use rune::{
@@ -78,6 +79,27 @@ pub fn decode_png(png: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     Some((info.width, info.height, rgba))
 }
 
+/// What the quick input's shortcut does.
+#[derive(Debug, PartialEq)]
+pub enum Toggle {
+    ShowInput,
+    HideInput,
+    ShowChat,
+    HideChat,
+}
+
+/// The shortcut with the input `quick_open`, a conversation `started` (not replaced by Cmd+N),
+/// shown or not (`chat_open`): an open input closes; a conversation comes back instead of a new
+/// input, or goes; otherwise the input opens.
+pub fn toggle(quick_open: bool, started: bool, chat_open: bool) -> Toggle {
+    match (quick_open, started, chat_open) {
+        (true, _, _) => Toggle::HideInput,
+        (false, true, false) => Toggle::ShowChat,
+        (false, true, true) => Toggle::HideChat,
+        (false, false, _) => Toggle::ShowInput,
+    }
+}
+
 /// A sent capture, ready to draw.
 pub struct Image {
     pixels: Pixels,
@@ -105,13 +127,16 @@ pub struct Chat {
     draft: TextEdit,
     open: bool,
     insets: Insets,
+    /// Cmd+N: the conversation is over; it still shows while sliding out, and the next message
+    /// starts a new one.
+    over: bool,
     /// Where Esc and the close button go (None in tests).
     host: Option<AppHandle<Host>>,
 }
 
 impl Chat {
     pub fn new(host: Option<AppHandle<Host>>) -> Self {
-        Chat { messages: Vec::new(), draft: TextEdit::new(""), open: false, insets: Insets::default(), host }
+        Chat { messages: Vec::new(), draft: TextEdit::new(""), open: false, insets: Insets::default(), over: false, host }
     }
 
     #[cfg(test)]
@@ -137,8 +162,18 @@ impl Chat {
         std::mem::replace(&mut self.open, false)
     }
 
+    /// Cmd+N: slides out, the conversation over (see `over`).
+    pub fn start_over(&mut self) {
+        self.open = false;
+        self.over = true;
+    }
+
     /// Adds a message at the end of the conversation, the field focused for the next.
     pub fn push(&mut self, message: Message) {
+        if std::mem::replace(&mut self.over, false) {
+            self.messages.clear();
+            self.draft.clear();
+        }
         self.messages.push(message);
         self.draft.focused = true;
     }
@@ -160,9 +195,16 @@ impl Chat {
         }
     }
 
+    /// Esc slides the panel out; Cmd+N starts a new chat (`Host::new_chat`).
     fn field_key(&mut self, ev: &KeyEvent) -> bool {
         if ev.key == Key::Escape {
             self.dismiss();
+            return true;
+        }
+        if ev.is_command('n') {
+            if let Some(host) = &self.host {
+                host.update(|host, _| host.new_chat());
+            }
             return true;
         }
         false
@@ -379,6 +421,31 @@ mod tests {
         assert!(c.send());
         assert_eq!(c.messages.last().map(|m| m.text.as_str()), Some("and this?"));
         assert_eq!(c.draft.text, "");
+    }
+
+    #[test]
+    fn the_input_shortcut_brings_back_a_started_chat() {
+        assert_eq!(toggle(false, false, false), Toggle::ShowInput, "no chat yet");
+        assert_eq!(toggle(true, false, false), Toggle::HideInput);
+        assert_eq!(toggle(true, true, true), Toggle::HideInput, "an open input closes first");
+        assert_eq!(toggle(false, true, false), Toggle::ShowChat, "the chat instead of the input");
+        assert_eq!(toggle(false, true, true), Toggle::HideChat);
+    }
+
+    #[test]
+    fn starting_over_slides_out_and_the_next_message_starts_a_new_chat() {
+        let mut c = Chat::new(None);
+        c.push(Message { text: "old".into(), images: Vec::new() });
+        c.open();
+        c.draft = TextEdit::new("unsent");
+        c.start_over();
+        assert!(!c.is_open());
+        assert_eq!(c.messages.len(), 1, "still shown while it slides out");
+        c.push(Message { text: "new".into(), images: Vec::new() });
+        assert_eq!(c.messages.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(), vec!["new"]);
+        assert_eq!(c.draft.text, "", "the old draft went with it");
+        c.push(Message { text: "more".into(), images: Vec::new() });
+        assert_eq!(c.messages.len(), 2, "then it carries on");
     }
 
     #[test]
