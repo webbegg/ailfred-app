@@ -449,14 +449,13 @@ pub fn placeholder(shots: usize, editing: bool) -> &'static str {
 }
 
 /// Whether `n` chips show as icons only.
-fn compact(n: usize) -> bool {
+pub fn compact(n: usize) -> bool {
     n > LABELLED_CHIPS
 }
 
 /// A capture's chip: "Image" with an X on hover, or (`compact`, many of them) just the icon,
 /// which the X replaces on hover.
-fn chip(shot: &Attached, compact: bool, t: &tok::Theme) -> El {
-    let id = shot.id;
+pub fn chip<S: 'static>(id: u64, compact: bool, t: &tok::Theme, remove: impl Fn(&mut S) + 'static) -> El {
     let close = el()
         .key(format!("shot-x-{id}"))
         .size(20.0, 20.0)
@@ -467,7 +466,7 @@ fn chip(shot: &Attached, compact: bool, t: &tok::Theme) -> El {
         .group_opacity(0.0, 1.0)
         .label("Remove image")
         .child(icon(&glyphs::CLOSE, 11.0).color(t.text))
-        .on_press(move |s: &mut QuickInput| s.unattach(id));
+        .on_press(remove);
     let base = |e: El| {
         e.key(format!("shot-{id}"))
             .hover_group()
@@ -591,7 +590,8 @@ fn input_row(s: &QuickInput, t: &tok::Theme) -> El {
     let compact = compact(s.shots.len());
     let mut chips = row().key("chips").gap(6.0).center_y();
     for shot in &s.shots {
-        chips = chips.child(chip(shot, compact, &t));
+        let id = shot.id;
+        chips = chips.child(chip(id, compact, t, move |s: &mut QuickInput| s.unattach(id)));
     }
     let mut field_row = row()
         .key("field-row")

@@ -14,7 +14,7 @@ use rune_kit::glyphs;
 
 use crate::Host;
 use crate::icons;
-use crate::quick_input::{self, ACCENT};
+use crate::quick_input::{self, ACCENT, Attached};
 
 /// The panel's width and its gap to the screen's edges, in points. Its corners are the input's
 /// (`quick_input::RADIUS`): it's the same panel.
@@ -87,6 +87,24 @@ pub fn decode_png(png: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
 /// Messages typed in the panel take ids from here; the host's (sent from the input) are below.
 const LOCAL_IDS: u64 = 1 << 32;
 
+/// Where a picked capture area's image goes.
+#[derive(Debug, PartialEq)]
+pub enum Area {
+    Input,
+    Chat,
+    Drop,
+}
+
+/// The open input takes it (after Cmd+N, the new input, while the chat slides out), else the
+/// open chat; with neither open it's dropped.
+pub fn area_goes_to(quick_open: bool, chat_open: bool) -> Area {
+    match (quick_open, chat_open) {
+        (true, _) => Area::Input,
+        (false, true) => Area::Chat,
+        (false, false) => Area::Drop,
+    }
+}
+
 /// What the quick input's shortcut does.
 #[derive(Debug, PartialEq)]
 pub enum Toggle {
@@ -135,6 +153,8 @@ pub struct Message {
 pub struct Chat {
     messages: Vec<Message>,
     draft: TextEdit,
+    /// Captures dragged on the screenshot behind the panel, to go with the next message.
+    shots: Vec<Attached>,
     open: bool,
     insets: Insets,
     /// The display's size in points: the overlay covers it.
@@ -151,7 +171,7 @@ pub struct Chat {
 
 impl Chat {
     pub fn new(host: Option<AppHandle<Host>>) -> Self {
-        Chat { messages: Vec::new(), draft: TextEdit::new(""), open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host }
+        Chat { messages: Vec::new(), draft: TextEdit::new(""), shots: Vec::new(), open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host }
     }
 
     pub fn is_open(&self) -> bool {
@@ -225,21 +245,58 @@ impl Chat {
         if std::mem::replace(&mut self.over, false) {
             self.messages.clear();
             self.draft.clear();
+            self.shots.clear();
         }
         self.messages.push(message);
         self.draft.focused = true;
     }
 
-    /// Sends the draft, trimmed, as a message; nothing typed sends nothing. True if it went.
-    pub fn send(&mut self) -> bool {
-        let text = self.draft.text.trim().to_owned();
-        if text.is_empty() {
-            return false;
+    /// Adds a capture to the draft, or replaces the one from the same capture area.
+    pub fn attach(&mut self, id: u64, png: Vec<u8>) {
+        match self.shots.iter_mut().find(|a| a.id == id) {
+            Some(shot) => shot.png = png,
+            None => self.shots.push(Attached { id, png }),
         }
+    }
+
+    /// Drops a capture (its chip's X). True if it was attached.
+    pub fn remove(&mut self, id: u64) -> bool {
+        let before = self.shots.len();
+        self.shots.retain(|a| a.id != id);
+        self.shots.len() != before
+    }
+
+    #[cfg(test)]
+    fn shot_ids(&self) -> Vec<u64> {
+        self.shots.iter().map(|a| a.id).collect()
+    }
+
+    /// Something to send: text or a capture.
+    fn send_ready(&self) -> bool {
+        !self.draft.text.trim().is_empty() || !self.shots.is_empty()
+    }
+
+    /// Sends the draft, trimmed, with its captures as a message; nothing typed or attached sends
+    /// nothing. The message's id and its captures' PNGs (to decode, `set_images`).
+    pub fn send(&mut self) -> Option<(u64, Vec<Vec<u8>>)> {
+        if !self.send_ready() {
+            return None;
+        }
+        let text = self.draft.text.trim().to_owned();
         self.draft.clear();
+        let pngs = std::mem::take(&mut self.shots).into_iter().map(|a| a.png).collect();
         let id = self.messages.last().map_or(0, |m| m.id + 1).max(LOCAL_IDS);
         self.push(Message { id, text, images: Vec::new() });
-        true
+        Some((id, pngs))
+    }
+
+    /// A chip's X: the capture goes, and its area too if it's still on screen.
+    fn unattach(&mut self, id: u64) {
+        if self.remove(id)
+            && let Some(host) = &self.host
+        {
+            host.update(move |host, _| host.forget_capture_area(id));
+        }
     }
 
     fn dismiss(&self) {
@@ -295,9 +352,15 @@ fn send_button<S: 'static>(ready: bool, t: &tok::Theme, lens: fn(&mut S) -> &mut
     }
 }
 
+/// Enter or the send button: the draft and its captures join the conversation; the captures
+/// are decoded off the main thread and show when ready.
 fn send(s: &mut Chat, tx: &mut Tx) {
-    if s.send() {
-        tx.scroll_to_bottom("messages");
+    let Some((id, pngs)) = s.send() else { return };
+    tx.scroll_to_bottom("messages");
+    if !pngs.is_empty()
+        && let Some(host) = &s.host
+    {
+        host.update(move |host, _| host.decode_into_chat(id, pngs));
     }
 }
 
@@ -371,20 +434,35 @@ pub fn panel<S: 'static>(s: &Chat, key: &str, lens: fn(&mut S) -> &mut Chat, inp
         .on_edit(move |s: &mut S| &mut lens(s).draft)
         .on_input_key(move |s: &mut S, ev: &KeyEvent, _: &mut Tx| lens(s).field_key(ev))
         .on_submit(move |s: &mut S, tx: &mut Tx| send(lens(s), tx));
-    let composer = row()
-        .key("composer")
+    let typing = row()
+        .key("typing")
         .w_full()
         .items_end()
         .gap(8.0)
+        .child(col().grow(1.0).min_w(0.0).py(4.0).child(auto_grow(field, 1, 6)))
+        .child(send_button(s.send_ready(), &t, lens));
+    let mut composer = col()
+        .key("composer")
+        .w_full()
+        .gap(6.0)
         .pl(12.0)
         .pr(8.0)
         .py(8.0)
         .radius(12.0)
         .continuous_corners()
         .fill(Color::WHITE.alpha(0.05))
-        .border(1.0, Color::WHITE.alpha(0.08))
-        .child(col().grow(1.0).min_w(0.0).py(4.0).child(auto_grow(field, 1, 6)))
-        .child(send_button(!s.draft.text.trim().is_empty(), &t, lens));
+        .border(1.0, Color::WHITE.alpha(0.08));
+    // Captures dragged on the screenshot behind, as the input's chips.
+    if !s.shots.is_empty() {
+        let compact = quick_input::compact(s.shots.len());
+        let mut chips = row().key("chips").gap(6.0).pt(2.0).center_y();
+        for shot in &s.shots {
+            let id = shot.id;
+            chips = chips.child(quick_input::chip(id, compact, &t, move |s: &mut S| lens(s).unattach(id)));
+        }
+        composer = composer.child(chips);
+    }
+    let composer = composer.child(typing);
     let [x, y, w, h] = side_rect(s.screen, s.insets);
     // At its landed size from the start, pinned to the panel's top left: the panel reveals it as
     // it grows. Hidden while the input's panel reshapes, then faded in.
@@ -494,12 +572,35 @@ mod tests {
     fn sending_appends_the_trimmed_draft_and_clears_it() {
         let mut c = Chat::new(None);
         c.draft = TextEdit::new("   ");
-        assert!(!c.send(), "nothing to send");
+        assert!(c.send().is_none(), "nothing to send");
         assert!(c.messages.is_empty());
         c.draft = TextEdit::new("  and this?\n");
-        assert!(c.send());
+        assert!(c.send().is_some());
         assert_eq!(c.messages.last().map(|m| m.text.as_str()), Some("and this?"));
         assert_eq!(c.draft.text, "");
+    }
+
+    #[test]
+    fn captures_attach_to_the_draft_replace_in_place_and_go_with_the_next_message() {
+        let mut c = Chat::new(None);
+        c.attach(1, vec![1]);
+        c.attach(2, vec![2]);
+        c.attach(1, vec![9]);
+        assert_eq!(c.shot_ids(), vec![1, 2], "the same area again replaces its image in place");
+        assert!(c.remove(2));
+        assert!(!c.remove(2));
+        let (id, pngs) = c.send().expect("a capture alone sends");
+        assert_eq!(pngs, vec![vec![9]]);
+        assert!(c.shot_ids().is_empty());
+        assert_eq!(c.messages.last().map(|m| (m.id, m.text.as_str())), Some((id, "")));
+    }
+
+    #[test]
+    fn a_picked_areas_image_goes_to_the_open_input_else_the_open_chat() {
+        assert_eq!(area_goes_to(true, false), Area::Input);
+        assert_eq!(area_goes_to(true, true), Area::Input, "Cmd+N: the new input, as the chat slides out");
+        assert_eq!(area_goes_to(false, true), Area::Chat);
+        assert_eq!(area_goes_to(false, false), Area::Drop);
     }
 
     #[test]

@@ -147,9 +147,13 @@ pub struct Overlay {
     /// Set by confirm/dismiss until the queued clear lands: input in between is ignored, so a held
     /// Enter (or Enter plus a Copy click) can't export twice.
     closing: bool,
-    /// For the quick input (open as the capture started): a label follows the pointer, the keys
-    /// stay with the input, and each picked area attaches to it at once, tools tucked away.
+    /// For the quick input (open as the capture started) or the chat: a label follows the
+    /// pointer, the keys stay with the field, and each picked area attaches to it at once, tools
+    /// tucked away.
     for_input: bool,
+    /// For the chat (`input_at` is its panel, which stays put): picked areas attach to its field
+    /// and the input neither tucks nor moves.
+    for_chat: bool,
     /// The last capture area's id.
     last_id: u64,
     /// The frozen display (its CGDirectDisplayID), where the quick input goes beside an area.
@@ -162,6 +166,17 @@ pub struct Overlay {
     /// Fading out (`leave`): everything drawn goes to transparent, so the window's last frame
     /// before it hides is empty and never shows again on the next reveal.
     leaving: bool,
+}
+
+/// Who a capture is for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum For {
+    /// Itself: Enter copies and saves.
+    Nothing,
+    /// The quick input, waiting at the bottom over a Dock `dock` points tall.
+    Input { dock: f32 },
+    /// The chat, its panel at `panel` (points on the display).
+    Chat { panel: [f32; 4] },
 }
 
 /// The capture fades in over this as it shows.
@@ -181,6 +196,7 @@ impl Overlay {
             pointer: [0.0, 0.0],
             closing: false,
             for_input: false,
+            for_chat: false,
             last_id: 0,
             display: 0,
             kept: None,
@@ -196,22 +212,27 @@ impl Overlay {
         self.leaving = true;
     }
 
-    /// The quick input opened this capture: its panel waits at the bottom, over a Dock `dock`
-    /// points tall.
-    pub fn input_at_bottom(&mut self, dock: f32) {
-        self.input_at = self.screen().map(|screen| crate::quick_input::bottom_panel(screen, dock));
+    /// Who the capture on screen is for now: the input sending turns into the chat, Cmd+N in the
+    /// chat opens a new input. Areas picked for the one before went with it.
+    pub fn serve(&mut self, target: For) {
+        (self.for_input, self.for_chat, self.input_at) = served(target, self.screen());
+        if let Stage::Editing(edit) = &self.stage {
+            if edit.tools {
+                self.give_back_keys();
+            }
+            self.stage = Stage::Selecting(Pick::Idle);
+        }
+        self.kept = None;
     }
 
-    /// Shows a new capture in `mode`; any previous selection and marks are dropped. `for_input`:
-    /// the quick input is open.
-    pub fn freeze(&mut self, shot: Shot, mode: Mode, for_input: bool) {
-        self.for_input = for_input;
-        self.input_at = None;
+    /// Shows a new capture in `mode`, for `target`; any previous selection and marks are dropped.
+    pub fn freeze(&mut self, shot: Shot, mode: Mode, target: For) {
         self.leaving = false;
         self.pixels.set(shot.width, shot.height, shot.rgba.clone());
         let frozen = Frozen { width: shot.width, height: shot.height, scale: shot.scale, rgba: shot.rgba };
         let full = [0.0, 0.0, frozen.width as f32 / frozen.scale, frozen.height as f32 / frozen.scale];
         self.frozen = Some(Arc::new(frozen));
+        (self.for_input, self.for_chat, self.input_at) = served(target, self.screen());
         self.windows = shot.windows;
         self.display = shot.display_id;
         self.pointer = shot.pointer;
@@ -235,6 +256,9 @@ impl Overlay {
             return;
         }
         self.attach();
+        if self.for_chat {
+            return;
+        }
         let Some(screen) = self.screen() else { return };
         self.input_at = Some(crate::quick_input::beside(sel, screen));
         let (id, display) = (self.last_id, self.display);
@@ -327,6 +351,7 @@ impl Overlay {
         self.windows = Vec::new();
         self.closing = false;
         self.for_input = false;
+        self.for_chat = false;
         self.kept = None;
         self.input_at = None;
         self.leaving = false;
@@ -633,12 +658,27 @@ fn bar_top([_, y, _, h]: [f32; 4], sh: f32, avoid: Option<[f32; 4]>) -> f32 {
     }
 }
 
-/// Where the quick input's panel is while this capture is for it.
+/// Where the panel this capture is for is, with area `sel` picked.
 fn input_panel(s: &Overlay, sel: [f32; 4]) -> Option<[f32; 4]> {
     if !s.for_input {
         return None;
     }
-    s.screen().map(|screen| crate::quick_input::beside(sel, screen))
+    panel_near(s.for_chat, s.input_at, sel, s.screen()?)
+}
+
+/// For `target`, on a `screen` of that size: whether it's for a field (the input's or the
+/// chat's), whether for the chat, and the panel's rect it leaves alone.
+fn served(target: For, screen: Option<[f32; 2]>) -> (bool, bool, Option<[f32; 4]>) {
+    match target {
+        For::Nothing => (false, false, None),
+        For::Input { dock } => (true, false, screen.map(|screen| crate::quick_input::bottom_panel(screen, dock))),
+        For::Chat { panel } => (true, true, Some(panel)),
+    }
+}
+
+/// The chat's panel (`at`) stays put; the input's goes beside the area `sel`.
+fn panel_near(for_chat: bool, at: Option<[f32; 4]>, sel: [f32; 4], screen: [f32; 2]) -> Option<[f32; 4]> {
+    if for_chat { at } else { Some(crate::quick_input::beside(sel, screen)) }
 }
 
 /// Where the edit button goes: just outside the selection's corner nearest the quick input's
@@ -712,10 +752,12 @@ fn select_drag(s: &mut Overlay, drag: &Drag) {
     } else {
         s.pick(sel);
     }
-    // A picked area for the quick input brings it back itself, beside the area.
+    // A picked area for the quick input brings it back itself, beside the area. The chat's
+    // panel stays.
     let picked = s.for_input && matches!(s.stage, Stage::Editing(_));
     if let Some(tucked) = tuck_change(was_dragging, matches!(s.stage, Stage::Selecting(Pick::Dragging(_))))
         && !(picked && !tucked)
+        && !s.for_chat
     {
         s.host.update(move |host, _| host.tuck_quick_input(tucked));
     }
@@ -915,6 +957,23 @@ mod tests {
         assert_eq!(y, 790.0 - LABEL_GAP - LABEL.1, "near the bottom: above");
         let [x, _] = label_at([800.0, 100.0], screen, (250.0, 22.0));
         assert_eq!(x, 800.0 - LABEL_GAP - 250.0, "its measured width decides the flip");
+    }
+
+    #[test]
+    fn serving_the_chat_leaves_its_panel_to_it_and_the_input_waits_at_the_bottom() {
+        let screen = [1920.0, 1080.0];
+        let chat = [1508.0, 45.0, 400.0, 1023.0];
+        assert_eq!(served(For::Chat { panel: chat }, Some(screen)), (true, true, Some(chat)));
+        assert_eq!(served(For::Input { dock: 70.0 }, Some(screen)), (true, false, Some(crate::quick_input::bottom_panel(screen, 70.0))));
+        assert_eq!(served(For::Nothing, Some(screen)), (false, false, None));
+    }
+
+    #[test]
+    fn for_the_chat_the_tools_keep_clear_of_its_panel_where_it_is() {
+        let (screen, sel) = ([1920.0, 1080.0], [300.0, 300.0, 400.0, 300.0]);
+        let chat = [1508.0, 45.0, 400.0, 1023.0];
+        assert_eq!(panel_near(true, Some(chat), sel, screen), Some(chat));
+        assert_eq!(panel_near(false, Some(chat), sel, screen), Some(crate::quick_input::beside(sel, screen)), "the input moves beside it");
     }
 
     #[test]
