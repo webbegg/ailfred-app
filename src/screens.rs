@@ -13,13 +13,19 @@ fn rect(r: CGRect) -> [f32; 4] {
 /// The bottom gap the Dock takes on the display under the pointer (points; 0 when it's hidden
 /// or on a side). Main thread.
 pub fn dock_inset_under_pointer() -> f32 {
+    under_pointer().map_or(0.0, |(frame, visible)| quick_input::dock_inset(frame, visible))
+}
+
+/// The display under the pointer: its frame and its visible frame (without the menu bar and the
+/// Dock), AppKit rects in points with y up. Main thread.
+pub fn under_pointer() -> Option<([f32; 4], [f32; 4])> {
     // SAFETY: plain AppKit class and instance messages with their documented signatures, on the
     // main thread (the host's loop); `screens` is an autoreleased NSArray kept alive by the pool.
     unsafe {
         let mouse: CGPoint = msg_send![class!(NSEvent), mouseLocation];
         let screens: *mut AnyObject = msg_send![class!(NSScreen), screens];
         if screens.is_null() {
-            return 0.0;
+            return None;
         }
         let count: usize = msg_send![screens, count];
         for i in 0..count {
@@ -29,9 +35,9 @@ pub fn dock_inset_under_pointer() -> f32 {
             let (mx, my) = (mouse.x as f32, mouse.y as f32);
             if mx >= x && mx < x + w && my >= y && my < y + h {
                 let visible: CGRect = msg_send![screen, visibleFrame];
-                return quick_input::dock_inset(rect(frame), rect(visible));
+                return Some((rect(frame), rect(visible)));
             }
         }
     }
-    0.0
+    None
 }

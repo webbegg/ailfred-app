@@ -202,7 +202,7 @@ fn draw_text(context: &CGContext, at: [f32; 2], text: &str, size: f32, ink: &CGC
 }
 
 /// RGBA to PNG, tagged sRGB and with 72 DPI per point so a Retina capture pastes at its point size.
-fn encode_png(width: u32, height: u32, scale: f32, rgba: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn encode_png(width: u32, height: u32, scale: f32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     let mut buf = Vec::new();
     let mut encoder = png::Encoder::new(&mut buf, width, height);
     encoder.set_color(png::ColorType::Rgba);

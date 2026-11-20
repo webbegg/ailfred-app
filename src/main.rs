@@ -9,6 +9,7 @@
 
 mod app_env;
 mod capture;
+mod chat;
 mod export;
 mod login;
 mod marks;
@@ -31,6 +32,7 @@ use rune::{
     WindowSpec, el,
 };
 
+use crate::chat::Chat;
 use crate::quick_input::QuickInput;
 
 use crate::shot::{Mode, Overlay};
@@ -62,6 +64,9 @@ pub struct Host {
     quick_dock: f32,
     /// Counts the captures shown (main thread), so an earlier one's fade out doesn't hide a newer.
     overlay_shown: u64,
+    /// The chat side panel, and whether it's open (or opening).
+    chat: Option<OverlayHandle<Chat>>,
+    chat_open: bool,
     /// The capture overlay is on screen (set by the capture thread as it shows it, cleared on
     /// hide): it takes the keys, which mustn't close the quick input.
     capture_shown: Arc<AtomicBool>,
@@ -227,6 +232,73 @@ impl Host {
         }
     }
 
+    /// Enter in the quick input: it slides down, and the chat panel slides in with the message
+    /// (its captures decoded off the main thread first).
+    pub fn send_from_quick_input(&mut self, text: String, shots: Vec<quick_input::Attached>) {
+        self.hide_quick_input();
+        let Some(handle) = self.handle.clone() else { return };
+        std::thread::spawn(move || {
+            let images = shots.iter().filter_map(|a| chat::Image::from_png(&a.png)).collect();
+            handle.update(move |host, _| host.show_chat(chat::Message { text, images }));
+        });
+    }
+
+    /// Adds `message` to the chat and gives its field the keys. Closed, it first waits past the
+    /// right edge of the display under the pointer, then slides in.
+    fn show_chat(&mut self, message: chat::Message) {
+        let Some(chat) = self.chat.clone() else { return };
+        if self.chat_open {
+            chat.update(move |s, tx| {
+                s.push(message);
+                tx.scroll_to_bottom("messages");
+                tx.animated();
+            });
+            chat.request_keys();
+            return;
+        }
+        self.chat_open = true;
+        let (frame, visible) = screens::under_pointer().unwrap_or(([0.0, 0.0, 1440.0, 900.0], [0.0, 0.0, 1440.0, 900.0]));
+        let insets = chat::insets(frame, visible);
+        chat.update(move |s, tx| {
+            s.place(insets);
+            s.push(message);
+            tx.scroll_to_bottom_instant("messages");
+            tx.instant();
+        });
+        chat.resize(chat::window_size(insets, frame[3]));
+        chat.set_placement(Some(chat_edge()));
+        chat.set_display(DisplayTarget::UnderPointer);
+        chat.show();
+        chat.request_keys();
+        // On screen first, then the slide (one started while hidden would play out unseen).
+        let Some(handle) = self.handle.clone() else { return };
+        std::thread::spawn(move || {
+            std::thread::sleep(quick_input::ARRIVAL_DELAY);
+            handle.update(|host, _| {
+                if let (true, Some(chat)) = (host.chat_open, &host.chat) {
+                    chat.update(|s, tx| {
+                        s.open();
+                        tx.animated();
+                    });
+                }
+            });
+        });
+    }
+
+    /// Esc or the close button: the chat slides out past the right edge; the window fades out
+    /// over the slide, then hides. The conversation stays for next time.
+    pub fn hide_chat(&mut self) {
+        let Some(chat) = &self.chat else { return };
+        if !std::mem::replace(&mut self.chat_open, false) {
+            return;
+        }
+        chat.update(|s, tx| {
+            s.close();
+            tx.animated();
+        });
+        chat.fade_out(quick_input::EXIT);
+    }
+
     /// A capture area's image (PNG): attached if the input is open, else dropped.
     pub fn attach_to_quick_input(&self, id: u64, png: Vec<u8>) {
         let Some(quick) = &self.quick else { return };
@@ -376,6 +448,8 @@ fn host_init() -> Host {
         quick_open: false,
         quick_dock: 0.0,
         overlay_shown: 0,
+        chat: None,
+        chat_open: false,
         capture_shown: Arc::default(),
     }
 }
@@ -392,6 +466,13 @@ pub(crate) fn on_shortcut(host: &mut Host, _: &mut Tx) {
 /// Dock too), so a closed or tucked panel waits out of the screen. Centred.
 fn quick_bottom() -> OverlayPlacement {
     OverlayPlacement::Edge { edge: ScreenEdge::Bottom, margin: 0.0, align: Align::Center, inset: 0.0 }
+}
+
+/// The chat's place: the display's right edge, full height (the view keeps the gaps, past the
+/// menu bar and the Dock), so a closed panel waits out of the screen.
+fn chat_edge() -> OverlayPlacement {
+    // A window the display's height, at its top and aligned right: flush with the right edge.
+    OverlayPlacement::Edge { edge: ScreenEdge::Top, margin: 0.0, align: Align::End, inset: 0.0 }
 }
 
 /// Captures off the UI thread after `delay`, then shows the frozen display (starting in `mode`) on the display it came
@@ -507,6 +588,25 @@ fn main() {
                 .animate_reveal(),
             QuickInput::new(Some(handle.clone())),
         );
+        let chat = app.overlay(
+            // The size is replaced on each opening: the display's height (`Host::show_chat`).
+            OverlaySpec::new("Capibarapp chat", chat::window_size(chat::Insets::default(), 900.0), chat::view)
+                .options(OverlayOptions {
+                    display: DisplayTarget::UnderPointer,
+                    placement: Some(chat_edge()),
+                    // Below the capture overlay: a capture covers it as it covers the screen.
+                    level: OverlayLevel::Status,
+                    // Only the panel takes clicks; its shadow room passes them through.
+                    input: OverlayInput::Regions,
+                    keys: KeyPolicy::OnDemand,
+                    exclude_from_capture: true,
+                    prewarm: true,
+                    ..Default::default()
+                })
+                .on_key(chat::on_key)
+                .animate_reveal(),
+            Chat::new(Some(handle.clone())),
+        );
         let settings = Settings::open();
         let initial_shortcut = settings.shortcut();
         let capture_shortcut = CaptureShortcut::default();
@@ -532,6 +632,8 @@ fn main() {
             quick_open: false,
             quick_dock: 0.0,
             overlay_shown: 0,
+            chat: Some(chat),
+            chat_open: false,
             capture_shown: Arc::default(),
         });
         // Runs on the main thread at the loop's first turn: the status item needs a running NSApp,

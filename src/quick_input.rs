@@ -1,6 +1,7 @@
 //! The quick input: a floating text field that slides up from the bottom of the display under
 //! the pointer, above every other window. Ctrl+Option+Space or the menu opens it; Esc, a click
-//! elsewhere or Enter closes it, sliding back down. Submitting has no action yet: it logs.
+//! elsewhere or Enter closes it, sliding back down. Enter sends: the chat panel (chat.rs) slides
+//! in from the right with the message.
 //!
 //! While it's open, captures land in it as "Image" chips in the field row (hover one for its X),
 //! dragging out a capture area tucks it away, and once an area is picked it arrives beside that
@@ -273,11 +274,15 @@ impl QuickInput {
         }
     }
 
+    /// Sends what's typed and attached: the input slides down and the chat panel slides in with
+    /// it (the host does both).
     fn submit(&mut self) {
         if let Some((text, shots)) = self.take_submission() {
             let bytes: usize = shots.iter().map(|a| a.png.len()).sum();
             eprintln!("Capibarapp: quick input: {text:?} with {} capture(s), {bytes} bytes of PNG", shots.len());
-            self.dismiss();
+            if let Some(host) = &self.host {
+                host.update(move |host, _| host.send_from_quick_input(text, shots));
+            }
         }
     }
 
