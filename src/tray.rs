@@ -148,25 +148,32 @@ impl Tray {
     }
 }
 
-/// A 36x36 px template icon: four crop corners. tray-icon treats pixels as points (scaling down
-/// only past 22 pt), so it shows at 22 pt. Black with alpha; macOS tints it.
+/// The menu-bar icon's side in pixels: tray-icon treats pixels as points (scaling down only past
+/// 22 pt), so it shows at 22 pt.
+const SIZE: usize = 36;
+
+/// A template icon: the quick input's sparkle, black with alpha; macOS tints it.
 fn icon() -> Result<Icon, String> {
-    const SIZE: usize = 36;
-    const MARGIN: usize = 5;
-    const ARM: usize = 10;
-    const THICK: usize = 3;
-    let mut rgba = vec![0u8; SIZE * SIZE * 4];
-    let far = SIZE - MARGIN;
-    for y in 0..SIZE {
-        for x in 0..SIZE {
-            let near = |v: usize| (MARGIN..MARGIN + ARM).contains(&v);
-            let far_side = |v: usize| (far - ARM..far).contains(&v);
-            let edge = |v: usize| (MARGIN..MARGIN + THICK).contains(&v) || (far - THICK..far).contains(&v);
-            let in_corner = (near(x) || far_side(x)) && (near(y) || far_side(y));
-            if in_corner && (edge(x) || edge(y)) {
-                rgba[(y * SIZE + x) * 4 + 3] = 255;
-            }
-        }
+    Icon::from_rgba(icon_rgba(), SIZE as u32, SIZE as u32).map_err(|e| e.to_string())
+}
+
+/// The icon's pixels, RGBA.
+fn icon_rgba() -> Vec<u8> {
+    rune::text::icon_coverage(&rune_kit::glyphs::SPARKLE, SIZE as u32).into_iter().flat_map(|a| [0, 0, 0, a]).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_menu_bar_icon_is_the_inputs_sparkle() {
+        let rgba = icon_rgba();
+        let want = rune::text::icon_coverage(&rune_kit::glyphs::SPARKLE, SIZE as u32);
+        assert_eq!(rgba.len(), SIZE * SIZE * 4);
+        assert!(rgba.chunks_exact(4).all(|p| p[..3] == [0, 0, 0]), "black: a template icon");
+        let alpha: Vec<u8> = rgba.chunks_exact(4).map(|p| p[3]).collect();
+        assert_eq!(alpha, want);
+        assert!(want.iter().map(|&a| u32::from(a)).sum::<u32>() > 2000, "it has ink");
     }
-    Icon::from_rgba(rgba, SIZE as u32, SIZE as u32).map_err(|e| e.to_string())
 }

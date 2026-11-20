@@ -155,6 +155,9 @@ pub struct Overlay {
     display: u32,
     /// The picked area a new drag started over, back if that drag comes to nothing.
     kept: Option<Edit>,
+    /// Where the quick input's panel is over this display (points), while it's open: this
+    /// overlay leaves that rect to it, pointer and cursor alike.
+    input_at: Option<[f32; 4]>,
 }
 
 impl Overlay {
@@ -171,13 +174,21 @@ impl Overlay {
             last_id: 0,
             display: 0,
             kept: None,
+            input_at: None,
         }
+    }
+
+    /// The quick input opened this capture: its panel waits at the bottom, over a Dock `dock`
+    /// points tall.
+    pub fn input_at_bottom(&mut self, dock: f32) {
+        self.input_at = self.screen().map(|screen| crate::quick_input::bottom_panel(screen, dock));
     }
 
     /// Shows a new capture in `mode`; any previous selection and marks are dropped. `for_input`:
     /// the quick input is open.
     pub fn freeze(&mut self, shot: Shot, mode: Mode, for_input: bool) {
         self.for_input = for_input;
+        self.input_at = None;
         self.pixels.set(shot.width, shot.height, shot.rgba.clone());
         let frozen = Frozen { width: shot.width, height: shot.height, scale: shot.scale, rgba: shot.rgba };
         let full = [0.0, 0.0, frozen.width as f32 / frozen.scale, frozen.height as f32 / frozen.scale];
@@ -206,6 +217,7 @@ impl Overlay {
         }
         self.attach();
         let Some(screen) = self.screen() else { return };
+        self.input_at = Some(crate::quick_input::beside(sel, screen));
         let (id, display) = (self.last_id, self.display);
         self.host.update(move |host, _| host.place_quick_input_beside(id, display, sel, screen));
     }
@@ -305,6 +317,7 @@ impl Overlay {
         self.closing = false;
         self.for_input = false;
         self.kept = None;
+        self.input_at = None;
         self.pixels.set(1, 1, vec![0; 4]);
     }
 
@@ -396,7 +409,12 @@ pub fn view(s: &Overlay, cx: &mut Cx<Overlay>) -> El {
     let Some(f) = &s.frozen else { return el() };
     // The overlay covers the display's frame, so its size in points is the capture over its scale.
     let (sw, sh) = (f.width as f32 / f.scale, f.height as f32 / f.scale);
-    let root = el().w_full().h_full().pixels(&s.pixels).cursor(Cursor::Crosshair).on_drag(on_drag).on_pointer_move_local(on_pointer_move);
+    let mut root = el().w_full().h_full().pixels(&s.pixels).cursor(Cursor::Crosshair).on_drag(on_drag).on_pointer_move_local(on_pointer_move);
+    // What takes the pointer (and shows the crosshair): all of it but the quick input's panel,
+    // whose own cursor would otherwise flicker against this one. Behind everything else.
+    for (i, [x, y, w, h]) in hit_regions(s.input_at, [sw, sh]).into_iter().enumerate() {
+        root = root.child(el().key(format!("hit-{i}")).size(w, h).hit().pin(Some(x), Some(y), None, None));
+    }
     let hint = |t: &str| {
         el().padding(10.0).radius(8.0).fill(PANEL).pin(Some(24.0), Some(24.0), None, None).child(text(t.to_string()).color(EDGE))
     };
@@ -458,6 +476,16 @@ pub fn view(s: &Overlay, cx: &mut Cx<Overlay>) -> El {
             }
         }
     }
+}
+
+/// The overlay's input regions on a `screen`: all of it, or (`hole`, the quick input's panel)
+/// the bands above, below, left and right of the hole.
+fn hit_regions(hole: Option<[f32; 4]>, screen: [f32; 2]) -> Vec<[f32; 4]> {
+    let [sw, sh] = screen;
+    let Some([x, y, w, h]) = hole else { return vec![[0.0, 0.0, sw, sh]] };
+    let (top, bottom) = (y.clamp(0.0, sh), (y + h).clamp(0.0, sh));
+    let (left, right) = (x.clamp(0.0, sw), (x + w).clamp(0.0, sw));
+    vec![[0.0, 0.0, sw, top], [0.0, bottom, sw, sh - bottom], [0.0, top, left, bottom - top], [right, top, sw - right, bottom - top]]
 }
 
 /// Dims everything outside `sel`: above, below, left and right of it.
@@ -861,6 +889,23 @@ mod tests {
         assert_eq!(y, 790.0 - LABEL_GAP - LABEL.1, "near the bottom: above");
         let [x, _] = label_at([800.0, 100.0], screen, (250.0, 22.0));
         assert_eq!(x, 800.0 - LABEL_GAP - 250.0, "its measured width decides the flip");
+    }
+
+    #[test]
+    fn the_quick_inputs_panel_is_left_out_of_the_input_regions() {
+        let screen = [1000.0, 800.0];
+        assert_eq!(hit_regions(None, screen), vec![[0.0, 0.0, 1000.0, 800.0]]);
+        let hole = [200.0, 600.0, 500.0, 52.0];
+        let regions = hit_regions(Some(hole), screen);
+        let inside = |[x, y]: [f32; 2]| regions.iter().any(|&r| x >= r[0] && y >= r[1] && x < r[0] + r[2] && y < r[1] + r[3]);
+        assert!(!inside([450.0, 626.0]), "the panel's middle");
+        assert!(!inside([200.0, 600.0]) && !inside([699.0, 651.0]), "its corners");
+        for p in [[10.0, 10.0], [199.0, 626.0], [700.0, 626.0], [450.0, 599.0], [450.0, 652.0], [999.0, 799.0]] {
+            assert!(inside(p), "{p:?} around it");
+        }
+        assert!(regions.iter().all(|r| r[2] >= 0.0 && r[3] >= 0.0));
+        // A hole off the screen's edge leaves no negative bands.
+        assert!(hit_regions(Some([-20.0, 780.0, 100.0, 60.0]), screen).iter().all(|r| r[2] >= 0.0 && r[3] >= 0.0));
     }
 
     #[test]

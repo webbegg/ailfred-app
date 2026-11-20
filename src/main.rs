@@ -58,6 +58,8 @@ pub struct Host {
     /// The quick input panel, and whether it's open (or opening).
     quick: Option<OverlayHandle<QuickInput>>,
     quick_open: bool,
+    /// The Dock's height under the open input at the bottom (0 when there's none).
+    quick_dock: f32,
     /// The capture overlay is on screen (set by the capture thread as it shows it, cleared on
     /// hide): it takes the keys, which mustn't close the quick input.
     capture_shown: Arc<AtomicBool>,
@@ -73,17 +75,34 @@ impl Host {
     pub fn show_quick_input(&mut self) {
         let Some(quick) = self.quick.clone() else { return };
         self.quick_open = true;
-        // The state changes while hidden; `animate_reveal` plays the rise from the first frame.
-        quick.update(|s, tx| {
-            s.open();
-            tx.animated();
+        // Back at the bottom, wherever a capture area took it last time: the window reaches the
+        // screen's bottom edge (through a Dock there), the panel waits below it, out of view.
+        let dock = screens::dock_inset_under_pointer();
+        self.quick_dock = dock;
+        quick.update(move |s, tx| {
+            s.at_bottom(dock);
+            tx.instant();
         });
-        // Back at the bottom (above a Dock there), wherever a capture area took it last time.
-        quick.resize(quick_input::WINDOW);
-        quick.set_placement(Some(quick_bottom(screens::dock_inset_under_pointer())));
+        quick.resize(quick_input::window_at_bottom(dock));
+        quick.set_placement(Some(quick_bottom()));
         quick.set_display(DisplayTarget::UnderPointer);
         quick.show();
         quick.request_keys();
+        // Once the window is on screen, the panel rises from the bottom edge to its place (a
+        // rise started while hidden would play out before the first visible frame).
+        if let Some(handle) = self.handle.clone() {
+            std::thread::spawn(move || {
+                std::thread::sleep(quick_input::ARRIVAL_DELAY);
+                handle.update(|host, _| {
+                    if let (true, Some(quick)) = (host.quick_open, &host.quick) {
+                        quick.update(|s, tx| {
+                            s.open();
+                            tx.animated();
+                        });
+                    }
+                });
+            });
+        }
         if !self.capture_shown.load(Ordering::Acquire) {
             start_capture(self, Duration::ZERO, Mode::Area);
         }
@@ -334,6 +353,7 @@ fn host_init() -> Host {
         settings_ui: None,
         quick: None,
         quick_open: false,
+        quick_dock: 0.0,
         capture_shown: Arc::default(),
     }
 }
@@ -346,10 +366,10 @@ pub(crate) fn on_shortcut(host: &mut Host, _: &mut Tx) {
     start_capture(host, Duration::ZERO, Mode::Area);
 }
 
-/// The quick input's resting place: flush with the bottom edge, or the Dock's top (`dock`
-/// points up); the view keeps the gap, so a tucked panel slides out of view. Centred.
-fn quick_bottom(dock: f32) -> OverlayPlacement {
-    OverlayPlacement::Edge { edge: ScreenEdge::Bottom, margin: dock, align: Align::Center, inset: 0.0 }
+/// The quick input's resting place: flush with the bottom edge (the view keeps the gap, over a
+/// Dock too), so a closed or tucked panel waits out of the screen. Centred.
+fn quick_bottom() -> OverlayPlacement {
+    OverlayPlacement::Edge { edge: ScreenEdge::Bottom, margin: 0.0, align: Align::Center, inset: 0.0 }
 }
 
 /// Captures off the UI thread after `delay`, then shows the frozen display (starting in `mode`) on the display it came
@@ -358,6 +378,7 @@ fn quick_bottom(dock: f32) -> OverlayPlacement {
 /// attach to the input.
 fn start_capture(host: &mut Host, delay: Duration, mode: Mode) {
     let from_input = host.quick_open;
+    let dock = host.quick_dock;
     let Some(overlay) = host.overlay.clone() else { return };
     if host.capturing.swap(true, Ordering::AcqRel) {
         return;
@@ -378,7 +399,14 @@ fn start_capture(host: &mut Host, delay: Duration, mode: Mode) {
                 let display = shot.display_id;
                 // Queued in this order: state, placement, reveal. They may be applied over more than
                 // one event-loop turn; the update is queued before `show`, and show refreshes first.
-                overlay.update(move |s, _| s.freeze(shot, mode, from_input));
+                overlay.update(move |s, _| {
+                    s.freeze(shot, mode, from_input);
+                    if from_input {
+                        s.input_at_bottom(dock);
+                    }
+                });
+                // For the input, the overlay leaves its panel's rect to it (see `Overlay::input_at`).
+                overlay.set_input(if from_input { OverlayInput::Regions } else { OverlayInput::All });
                 overlay.set_display(DisplayTarget::Native(NativeDisplayId::MacOS(display)));
                 capture_shown.store(true, Ordering::Release);
                 overlay.show();
@@ -430,7 +458,7 @@ fn main() {
             OverlaySpec::new("Capibarapp quick input", quick_input::WINDOW, quick_input::view)
                 .options(OverlayOptions {
                     display: DisplayTarget::UnderPointer,
-                    placement: Some(quick_bottom(0.0)),
+                    placement: Some(quick_bottom()),
                     // Above the capture overlay, so it stays in view over a frozen screen.
                     level: OverlayLevel::AboveOverlays,
                     // Only the panel takes clicks; its shadow room passes them through.
@@ -468,6 +496,7 @@ fn main() {
             settings_ui: Some(settings_ui),
             quick: Some(quick),
             quick_open: false,
+            quick_dock: 0.0,
             capture_shown: Arc::default(),
         });
         // Runs on the main thread at the loop's first turn: the status item needs a running NSApp,

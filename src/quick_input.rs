@@ -39,6 +39,12 @@ pub const ARRIVE: f32 = 12.0;
 const ARRIVE_SCALE: f32 = 0.98;
 /// The overlay's own size at the bottom: the panel, its shadow room, the gap below.
 pub const WINDOW: (f32, f32) = (PANEL_W + 2.0 * PAD, PAD + PANEL_H + MARGIN);
+
+/// The overlay's size at the bottom over a Dock `dock` points tall: it still reaches the screen's
+/// bottom edge, so the panel rises from outside the screen, through the Dock, to rest above it.
+pub fn window_at_bottom(dock: f32) -> (f32, f32) {
+    (WINDOW.0, WINDOW.1 + dock.max(0.0))
+}
 /// The panel's gap to a capture area it sits beside, and to the screen's edges.
 const BESIDE_GAP: f32 = 16.0;
 const EDGE_GAP: f32 = 8.0;
@@ -74,6 +80,9 @@ pub struct QuickInput {
     beside: bool,
     /// Waiting out of view beside this area, about to rise there.
     arriving: Option<u64>,
+    /// At the bottom, the Dock's height under the panel's gap: a closed or tucked panel drops
+    /// past it too, out of the screen.
+    dock: f32,
     /// The capture's tools have the keys: the field shows it's waiting.
     editing: bool,
     shots: Vec<Attached>,
@@ -113,6 +122,7 @@ impl QuickInput {
             tucked: false,
             beside: false,
             arriving: None,
+            dock: 0.0,
             editing: false,
             shots: Vec::new(),
             area: None,
@@ -144,6 +154,22 @@ impl QuickInput {
     /// input (applied without motion).
     pub fn rest(&mut self) {
         self.beside = false;
+    }
+
+    /// Before opening: below the screen at the bottom (over a Dock `dock` points tall), whatever
+    /// it was doing before, so `open` rises from the screen's edge. Applied without motion.
+    pub fn at_bottom(&mut self, dock: f32) {
+        self.dock = dock.max(0.0);
+        self.beside = false;
+        self.tucked = false;
+        self.arriving = None;
+        self.query.focused = true;
+    }
+
+    /// Where the panel is now.
+    pub fn current_pose(&self) -> Pose {
+        let p = pose(self.open, self.tucked, self.beside);
+        if p.dy == TUCK { Pose { dy: TUCK + self.dock, ..p } } else { p }
     }
 
     /// Slides out of view (true) or back into place (false).
@@ -331,6 +357,12 @@ pub fn beside(sel: [f32; 4], screen: [f32; 2]) -> [f32; 4] {
     }
 }
 
+/// The panel's rect at rest at the bottom of a `screen` of that size, over a Dock `dock` points
+/// tall.
+pub fn bottom_panel(screen: [f32; 2], dock: f32) -> [f32; 4] {
+    [(screen[0] - PANEL_W) / 2.0, screen[1] - dock.max(0.0) - MARGIN - PANEL_H, PANEL_W, PANEL_H]
+}
+
 /// The overlay window's rect for a panel at `panel`: the shadow room around it, the bottom gap
 /// below (out of which a tucked panel drops).
 pub fn window_for(panel: [f32; 4]) -> [f32; 4] {
@@ -420,7 +452,7 @@ fn send_button(ready: bool, t: &tok::Theme) -> El {
 
 pub fn view(s: &QuickInput, _: &mut Cx<QuickInput>) -> El {
     let t = tok::theme(true);
-    let Pose { dy, alpha, scale } = pose(s.open, s.tucked, s.beside);
+    let Pose { dy, alpha, scale } = s.current_pose();
     let motion = Anim::from(if s.beside { SETTLE } else { GLIDE });
     let field = text_input(&s.query, TextStyle::new(15.0, 400.0).lh(22.0))
         .key("query")
@@ -768,6 +800,41 @@ mod tests {
         let [x, y, w, h] = window_for([100.0, 200.0, 500.0, PANEL_H]);
         assert_eq!([x, y, w, h], [100.0 - PAD, 200.0 - PAD, 500.0 + 2.0 * PAD, PAD + PANEL_H + MARGIN]);
         assert_eq!((WINDOW.0, WINDOW.1), (PANEL_W + 2.0 * PAD, PAD + PANEL_H + MARGIN));
+    }
+
+    #[test]
+    fn opening_rises_from_below_the_screen_even_right_after_closing_beside_an_area() {
+        let mut s = QuickInput::new(None);
+        s.open();
+        s.arrive(1);
+        s.arrived(1);
+        s.close();
+        // Reopened before the closed input went back to the bottom.
+        s.at_bottom(0.0);
+        assert_eq!(s.current_pose(), Pose { dy: TUCK, alpha: 1.0, scale: 1.0 }, "waits below the screen, opaque");
+        s.open();
+        assert_eq!(s.current_pose(), Pose { dy: 0.0, alpha: 1.0, scale: 1.0 });
+    }
+
+    #[test]
+    fn over_a_dock_it_still_rises_from_the_screens_edge() {
+        let mut s = QuickInput::new(None);
+        s.at_bottom(70.0);
+        assert_eq!(s.current_pose().dy, TUCK + 70.0, "below the screen, past the Dock");
+        assert_eq!(window_at_bottom(70.0), (WINDOW.0, WINDOW.1 + 70.0), "the window reaches the bottom edge");
+        assert_eq!(window_at_bottom(0.0), WINDOW);
+        s.open();
+        assert_eq!(s.current_pose().dy, 0.0, "rests above the Dock");
+        s.set_tucked(true);
+        assert_eq!(s.current_pose().dy, TUCK + 70.0, "tucks out of the screen too");
+        s.close();
+        assert_eq!(s.current_pose().dy, TUCK + 70.0);
+    }
+
+    #[test]
+    fn at_the_bottom_the_panel_is_centred_above_the_gap_and_dock() {
+        assert_eq!(bottom_panel([1920.0, 1080.0], 70.0), [650.0, 1080.0 - 70.0 - MARGIN - PANEL_H, PANEL_W, PANEL_H]);
+        assert_eq!(bottom_panel([1920.0, 1080.0], 0.0)[1], 1080.0 - MARGIN - PANEL_H);
     }
 
     #[test]
