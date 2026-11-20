@@ -2,6 +2,7 @@
 //! Enter or ⌘C copies and saves (export.rs); Esc cancels.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use rune::{AppHandle, Color, Cursor, Cx, Drag, El, Key, KeyEvent, LineCap, Phase, Pixels, Shadow, Shape, TextStyle, Tx, canvas, col, el, icon, row, text};
 
@@ -158,7 +159,15 @@ pub struct Overlay {
     /// Where the quick input's panel is over this display (points), while it's open: this
     /// overlay leaves that rect to it, pointer and cursor alike.
     input_at: Option<[f32; 4]>,
+    /// Counts the captures shown, so a clear queued by an earlier one's fade out leaves a newer
+    /// one alone.
+    shown: u64,
 }
+
+/// The capture fades in over this as it shows.
+pub const FADE_IN: Duration = Duration::from_millis(180);
+/// And out over this as it goes: the quick input's slide out, as they often leave together.
+pub const FADE_OUT: Duration = crate::quick_input::EXIT;
 
 impl Overlay {
     pub fn new(host: AppHandle<Host>) -> Self {
@@ -175,7 +184,27 @@ impl Overlay {
             display: 0,
             kept: None,
             input_at: None,
+            shown: 0,
         }
+    }
+
+    /// The overlay fades out: input is ignored now, and the frozen screen stays drawn through the
+    /// fade, then goes unless another capture showed meanwhile.
+    pub fn leave(&mut self) {
+        self.closing = true;
+        let (shown, host) = (self.shown, self.host.clone());
+        std::thread::spawn(move || {
+            std::thread::sleep(FADE_OUT + Duration::from_millis(60));
+            host.update(move |host, _| {
+                if let Some(overlay) = &host.overlay {
+                    overlay.update(move |s, _| {
+                        if s.shown == shown && s.closing {
+                            s.clear();
+                        }
+                    });
+                }
+            });
+        });
     }
 
     /// The quick input opened this capture: its panel waits at the bottom, over a Dock `dock`
@@ -189,6 +218,7 @@ impl Overlay {
     pub fn freeze(&mut self, shot: Shot, mode: Mode, for_input: bool) {
         self.for_input = for_input;
         self.input_at = None;
+        self.shown += 1;
         self.pixels.set(shot.width, shot.height, shot.rgba.clone());
         let frozen = Frozen { width: shot.width, height: shot.height, scale: shot.scale, rgba: shot.rgba };
         let full = [0.0, 0.0, frozen.width as f32 / frozen.scale, frozen.height as f32 / frozen.scale];
@@ -294,19 +324,11 @@ impl Overlay {
         Some([0.0, 0.0, f.width as f32 / f.scale, f.height as f32 / f.scale])
     }
 
-    /// Frees the capture and hides the overlay, in one host update on the main thread. The overlay
-    /// takes all pending requests in one `sync`, which applies updates before visibility, and a
-    /// hidden overlay draws nothing: the cleared state is never shown. The clear is queued first
-    /// so a capture thread pushing `freeze` + `show` in between always wins: [clear, freeze] then
-    /// show the new shot, never a shown overlay with nothing to draw.
+    /// Fades the overlay out (`Host::hide_overlay`), which then frees the capture (`leave`). A
+    /// capture shown meanwhile cancels the fade and is never cleared by it.
     fn dismiss(&mut self) {
         self.closing = true;
-        self.host.update(|host, _| {
-            if let Some(overlay) = &host.overlay {
-                overlay.update(|s, _| s.clear());
-            }
-            host.hide_overlay();
-        });
+        self.host.update(|host, _| host.hide_overlay());
     }
 
     /// Drops the frozen capture (the export thread keeps its own reference while it runs).

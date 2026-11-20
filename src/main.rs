@@ -171,9 +171,6 @@ impl Host {
 
     /// Ends a capture on screen without exporting.
     fn dismiss_capture(&self) {
-        if let Some(overlay) = &self.overlay {
-            overlay.update(|s, _| s.clear());
-        }
         self.hide_overlay();
     }
 
@@ -255,8 +252,10 @@ impl Host {
         if let (Some(quick), true) = (&self.quick, self.quick_open) {
             quick.request_keys();
         }
+        // It fades out with the frozen screen still drawn (cleared once it's out, see `leave`).
         if let Some(overlay) = &self.overlay {
-            overlay.hide();
+            overlay.update(|s, _| s.leave());
+            overlay.fade_out(shot::FADE_OUT);
         }
     }
 
@@ -414,7 +413,7 @@ fn start_capture(host: &mut Host, delay: Duration, mode: Mode) {
                 overlay.set_input(if from_input { OverlayInput::Regions } else { OverlayInput::All });
                 overlay.set_display(DisplayTarget::Native(NativeDisplayId::MacOS(display)));
                 capture_shown.store(true, Ordering::Release);
-                overlay.show();
+                overlay.fade_in(shot::FADE_IN);
                 if !from_input {
                     overlay.request_keys();
                 }
