@@ -249,6 +249,13 @@ impl Host {
         }
     }
 
+    /// Area `id` was picked on the screenshot behind the chat: Esc steps back over it first.
+    pub fn chat_area(&self, id: Option<u64>) {
+        if let (Some(quick), true) = (&self.quick, self.chat_open && !self.quick_open) {
+            quick.update(move |s, _| s.chat.set_area(id));
+        }
+    }
+
     /// A capture area's chip was removed: the area goes too if it's still on screen.
     pub fn forget_capture_area(&self, id: u64) {
         if let Some(overlay) = &self.overlay {

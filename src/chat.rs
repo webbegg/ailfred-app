@@ -14,7 +14,7 @@ use rune_kit::glyphs;
 
 use crate::Host;
 use crate::icons;
-use crate::quick_input::{self, ACCENT, Attached};
+use crate::quick_input::{self, ACCENT, Attached, Escape};
 
 /// The panel's width and its gap to the screen's edges, in points. Its corners are the input's
 /// (`quick_input::RADIUS`): it's the same panel.
@@ -155,6 +155,8 @@ pub struct Chat {
     draft: TextEdit,
     /// Captures dragged on the screenshot behind the panel, to go with the next message.
     shots: Vec<Attached>,
+    /// The capture area on the screenshot behind, while there is one.
+    area: Option<u64>,
     open: bool,
     insets: Insets,
     /// The display's size in points: the overlay covers it.
@@ -171,7 +173,7 @@ pub struct Chat {
 
 impl Chat {
     pub fn new(host: Option<AppHandle<Host>>) -> Self {
-        Chat { messages: Vec::new(), draft: TextEdit::new(""), shots: Vec::new(), open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host }
+        Chat { messages: Vec::new(), draft: TextEdit::new(""), shots: Vec::new(), area: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host }
     }
 
     pub fn is_open(&self) -> bool {
@@ -231,13 +233,41 @@ impl Chat {
 
     /// Slides out; the conversation and the draft stay. True if it was open.
     pub fn close(&mut self) -> bool {
+        self.area = None;
         std::mem::replace(&mut self.open, false)
+    }
+
+    /// Area `id` was picked on the screenshot behind (None: no area any more).
+    pub fn set_area(&mut self, id: Option<u64>) {
+        self.area = id;
+    }
+
+    /// Esc in the field, one step at a time: the capture area on screen goes first (its image
+    /// too), then the chat closes.
+    pub fn escape(&mut self) -> Escape {
+        match self.area.take() {
+            Some(id) => {
+                self.remove(id);
+                Escape::Area(id)
+            }
+            None => Escape::Close,
+        }
+    }
+
+    /// Backspace in an empty field removes the last capture; its id, if one went.
+    pub fn backspace_empty(&mut self) -> Option<u64> {
+        let id = self.shots.pop()?.id;
+        if self.area == Some(id) {
+            self.area = None;
+        }
+        Some(id)
     }
 
     /// Cmd+N: slides out, the conversation over (see `over`).
     pub fn start_over(&mut self) {
         self.open = false;
         self.over = true;
+        self.area = None;
     }
 
     /// Adds a message at the end of the conversation, the field focused for the next.
@@ -284,6 +314,7 @@ impl Chat {
         }
         let text = self.draft.text.trim().to_owned();
         self.draft.clear();
+        self.area = None;
         let pngs = std::mem::take(&mut self.shots).into_iter().map(|a| a.png).collect();
         let id = self.messages.last().map_or(0, |m| m.id + 1).max(LOCAL_IDS);
         self.push(Message { id, text, images: Vec::new() });
@@ -292,9 +323,16 @@ impl Chat {
 
     /// A chip's X: the capture goes, and its area too if it's still on screen.
     fn unattach(&mut self, id: u64) {
-        if self.remove(id)
-            && let Some(host) = &self.host
-        {
+        if self.area == Some(id) {
+            self.area = None;
+        }
+        if self.remove(id) {
+            self.forget_area(id);
+        }
+    }
+
+    fn forget_area(&self, id: u64) {
+        if let Some(host) = &self.host {
             host.update(move |host, _| host.forget_capture_area(id));
         }
     }
@@ -305,11 +343,24 @@ impl Chat {
         }
     }
 
-    /// Esc slides the panel out; Cmd+N starts a new chat (`Host::new_chat`).
+    /// Esc steps back (`escape`), then slides the panel out; Backspace in an empty field drops
+    /// the last capture; Cmd+N starts a new chat (`Host::new_chat`).
     fn field_key(&mut self, ev: &KeyEvent) -> bool {
         if ev.key == Key::Escape {
-            self.dismiss();
+            match self.escape() {
+                Escape::Area(id) => self.forget_area(id),
+                Escape::Close => self.dismiss(),
+            }
             return true;
+        }
+        if ev.key == Key::Backspace && self.draft.text.is_empty() {
+            return match self.backspace_empty() {
+                Some(id) => {
+                    self.forget_area(id);
+                    true
+                }
+                None => false,
+            };
         }
         if ev.is_command('n') {
             if let Some(host) = &self.host {
@@ -355,7 +406,12 @@ fn send_button<S: 'static>(ready: bool, t: &tok::Theme, lens: fn(&mut S) -> &mut
 /// Enter or the send button: the draft and its captures join the conversation; the captures
 /// are decoded off the main thread and show when ready.
 fn send(s: &mut Chat, tx: &mut Tx) {
+    let area = s.area;
     let Some((id, pngs)) = s.send() else { return };
+    // The area sent leaves the screenshot, clear for the next.
+    if let Some(area) = area {
+        s.forget_area(area);
+    }
     tx.scroll_to_bottom("messages");
     if !pngs.is_empty()
         && let Some(host) = &s.host
@@ -593,6 +649,38 @@ mod tests {
         assert_eq!(pngs, vec![vec![9]]);
         assert!(c.shot_ids().is_empty());
         assert_eq!(c.messages.last().map(|m| (m.id, m.text.as_str())), Some((id, "")));
+    }
+
+    #[test]
+    fn esc_discards_the_area_on_screen_first_then_closes() {
+        let mut c = Chat::new(None);
+        c.attach(1, vec![1]);
+        c.attach(2, vec![2]);
+        c.set_area(Some(2));
+        assert_eq!(c.escape(), Escape::Area(2), "the area on screen goes");
+        assert_eq!(c.shot_ids(), vec![1], "its image too");
+        assert_eq!(c.escape(), Escape::Close, "then the chat closes");
+    }
+
+    #[test]
+    fn backspace_in_an_empty_field_removes_the_last_capture_and_its_area() {
+        let mut c = Chat::new(None);
+        c.attach(1, vec![1]);
+        c.attach(2, vec![2]);
+        c.set_area(Some(2));
+        assert_eq!(c.backspace_empty(), Some(2));
+        assert_eq!(c.escape(), Escape::Close, "its area went with it");
+        assert_eq!(c.backspace_empty(), Some(1));
+        assert_eq!(c.backspace_empty(), None);
+    }
+
+    #[test]
+    fn sending_ends_the_area_on_screen() {
+        let mut c = Chat::new(None);
+        c.attach(1, vec![1]);
+        c.set_area(Some(1));
+        c.send().expect("sent");
+        assert_eq!(c.escape(), Escape::Close, "its image went with the message");
     }
 
     #[test]

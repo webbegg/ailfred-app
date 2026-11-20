@@ -257,6 +257,8 @@ impl Overlay {
         }
         self.attach();
         if self.for_chat {
+            let id = self.last_id;
+            self.host.update(move |host, _| host.chat_area(Some(id)));
             return;
         }
         let Some(screen) = self.screen() else { return };
