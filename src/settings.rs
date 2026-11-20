@@ -2,6 +2,7 @@
 //! `~/Library/Application Support/com.capibarapp/prefs.json`, and the capture shortcut's registration.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use rune::prefs::Prefs;
@@ -13,6 +14,10 @@ pub const APP_ID: &str = "com.capibarapp";
 pub const DEFAULT_SHORTCUT: &str = "cmd+shift+space";
 const SHORTCUT: &str = "shortcut";
 const FOLDER: &str = "folder";
+const IGNORE_REDUCE_MOTION: &str = "ignore_reduce_motion";
+
+/// Whether the views animate even under the system's Reduce Motion, as last set (any thread).
+static IGNORE_REDUCE_MOTION_NOW: AtomicBool = AtomicBool::new(true);
 
 /// The save folder as last set, for the export thread.
 static FOLDER_NOW: RwLock<Option<PathBuf>> = RwLock::new(None);
@@ -26,6 +31,7 @@ impl Settings {
     pub fn open() -> Settings {
         let settings = Settings::with(Prefs::open(APP_ID));
         *FOLDER_NOW.write().unwrap_or_else(|e| e.into_inner()) = Some(settings.folder());
+        IGNORE_REDUCE_MOTION_NOW.store(settings.ignore_reduce_motion(), Ordering::Relaxed);
         settings
     }
 
@@ -60,6 +66,32 @@ impl Settings {
             eprintln!("Capibarapp: saving the folder failed: {e}");
         }
         *FOLDER_NOW.write().unwrap_or_else(|e| e.into_inner()) = Some(folder.to_path_buf());
+    }
+}
+
+impl Settings {
+    /// Show every animation even with Reduce Motion on in the system: on until turned off.
+    pub fn ignore_reduce_motion(&self) -> bool {
+        self.prefs.get::<bool>(IGNORE_REDUCE_MOTION).unwrap_or(true)
+    }
+
+    pub fn set_ignore_reduce_motion(&mut self, ignore: bool) {
+        if let Err(e) = self.prefs.set(IGNORE_REDUCE_MOTION, &ignore) {
+            eprintln!("Capibarapp: saving the motion setting failed: {e}");
+        }
+        IGNORE_REDUCE_MOTION_NOW.store(ignore, Ordering::Relaxed);
+    }
+}
+
+/// Whether views should animate under the system's Reduce Motion now (any thread).
+pub fn ignore_reduce_motion_now() -> bool {
+    IGNORE_REDUCE_MOTION_NOW.load(Ordering::Relaxed)
+}
+
+/// At the top of a view: animate in full when the setting says to ignore Reduce Motion.
+pub fn apply_motion<S>(cx: &mut rune::Cx<S>) {
+    if ignore_reduce_motion_now() {
+        cx.reduced_motion(false);
     }
 }
 
@@ -114,6 +146,18 @@ mod tests {
         let chord: Shortcut = "ctrl+alt+k".parse().unwrap();
         s.set_shortcut(Some(&chord));
         assert_eq!(s.shortcut(), Some(chord));
+    }
+
+    #[test]
+    fn animations_ignore_reduce_motion_until_turned_off() {
+        let mut s = Settings::with(Prefs::memory());
+        assert!(s.ignore_reduce_motion(), "on by default");
+        s.set_ignore_reduce_motion(false);
+        assert!(!s.ignore_reduce_motion());
+        assert!(!ignore_reduce_motion_now(), "the views see it at once");
+        s.set_ignore_reduce_motion(true);
+        assert!(s.ignore_reduce_motion());
+        assert!(ignore_reduce_motion_now());
     }
 
     #[test]

@@ -406,6 +406,7 @@ fn pixelate_region(f: &Frozen, sel: [f32; 4], rect: [f32; 4]) -> Option<(u32, u3
 }
 
 pub fn view(s: &Overlay, cx: &mut Cx<Overlay>) -> El {
+    crate::settings::apply_motion(cx);
     let Some(f) = &s.frozen else { return el() };
     // The overlay covers the display's frame, so its size in points is the capture over its scale.
     let (sw, sh) = (f.width as f32 / f.scale, f.height as f32 / f.scale);

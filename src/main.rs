@@ -136,6 +136,8 @@ impl Host {
                 s.arrived(id);
                 tx.animated();
             });
+            // The drag's click went to the capture: the field takes the keys back, to type at once.
+            quick.request_keys();
         });
     }
 
@@ -220,6 +222,9 @@ impl Host {
                 s.set_tucked(tucked);
                 tx.animated();
             });
+            if !tucked {
+                quick.request_keys();
+            }
         }
     }
 

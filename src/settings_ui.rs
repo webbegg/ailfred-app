@@ -1,10 +1,11 @@
-//! The Settings window: the capture shortcut (rune-kit's recorder) and the save folder.
+//! The Settings window: the capture shortcut (rune-kit's recorder), the save folder, and whether
+//! animations play under the system's Reduce Motion.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use rune::{AppHandle, Cx, El, FileDialogOptions, Shortcut, ShortcutError, Tx, col, row, text};
-use rune_kit::{Button, Kit, ShortcutRecorder, ShortcutRecorderState};
+use rune_kit::{Button, Checkbox, Kit, ShortcutRecorder, ShortcutRecorderState};
 
 use crate::Host;
 use crate::settings::{CaptureShortcut, Settings};
@@ -13,6 +14,7 @@ pub struct SettingsUi {
     settings: Settings,
     recorder: ShortcutRecorderState,
     folder: PathBuf,
+    ignore_reduce_motion: bool,
     /// None only in the placeholder `init` Rune requires; the real state is supplied.
     host: Option<AppHandle<Host>>,
     capture: CaptureShortcut,
@@ -23,7 +25,8 @@ impl SettingsUi {
     pub fn new(settings: Settings, host: AppHandle<Host>, capture: CaptureShortcut) -> SettingsUi {
         let recorder = ShortcutRecorderState::new(settings.shortcut());
         let folder = settings.folder();
-        SettingsUi { settings, recorder, folder, host: Some(host), capture, error: None }
+        let ignore_reduce_motion = settings.ignore_reduce_motion();
+        SettingsUi { settings, recorder, folder, ignore_reduce_motion, host: Some(host), capture, error: None }
     }
 
     /// The saved shortcut couldn't be registered at startup: say so, and let recording the same
@@ -33,12 +36,25 @@ impl SettingsUi {
         self.error = Some(error);
     }
 
+    fn toggle_reduce_motion(&mut self) {
+        self.ignore_reduce_motion = !self.ignore_reduce_motion;
+        self.settings.set_ignore_reduce_motion(self.ignore_reduce_motion);
+    }
+
     /// The window is built with its state supplied (`WindowSpec::state`); `AppSpec` still wants an
     /// `init`, which gets a detached copy that changes nothing.
     pub fn placeholder() -> SettingsUi {
         let settings = Settings::with(rune::prefs::Prefs::memory());
         let recorder = ShortcutRecorderState::new(settings.shortcut());
-        SettingsUi { folder: settings.folder(), settings, recorder, host: None, capture: CaptureShortcut::default(), error: None }
+        SettingsUi {
+            folder: settings.folder(),
+            ignore_reduce_motion: settings.ignore_reduce_motion(),
+            settings,
+            recorder,
+            host: None,
+            capture: CaptureShortcut::default(),
+            error: None,
+        }
     }
 }
 
@@ -49,6 +65,7 @@ fn kit(dark: bool) -> &'static Kit {
 }
 
 pub fn view(s: &SettingsUi, cx: &mut Cx<SettingsUi>) -> El {
+    crate::settings::apply_motion(cx);
     let k = kit(cx.system_dark());
     let label = |t: &str| text(t).font(k.ty.ui_medium).color(k.c.text_strong);
     let recorder = ShortcutRecorder::new("capture-shortcut", &s.recorder, |s: &mut SettingsUi| &mut s.recorder)
@@ -66,7 +83,14 @@ pub fn view(s: &SettingsUi, cx: &mut Cx<SettingsUi>) -> El {
         .gap(18.0)
         .fill(k.c.page)
         .child(col().gap(8.0).child(label("Capture shortcut")).child(recorder))
-        .child(col().gap(8.0).child(label("Save screenshots to")).child(folder));
+        .child(col().gap(8.0).child(label("Save screenshots to")).child(folder))
+        .child(
+            Checkbox::new(s.ignore_reduce_motion)
+                .label("Show animations even with Reduce Motion on")
+                .description("Ignores the Reduce Motion setting in System Settings › Accessibility › Display.")
+                .on_toggle(|s: &mut SettingsUi| s.toggle_reduce_motion())
+                .build(k),
+        );
     if let Some(error) = &s.error {
         page = page.child(text(error.clone()).font(k.ty.small).color(k.c.text_weak));
     }

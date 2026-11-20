@@ -176,6 +176,9 @@ impl QuickInput {
     pub fn set_tucked(&mut self, tucked: bool) {
         self.tucked = tucked;
         self.arriving = None;
+        if !tucked {
+            self.query.focused = true;
+        }
     }
 
     /// About to arrive beside capture area `id`: waits there, out of view, until `arrived`.
@@ -191,6 +194,7 @@ impl QuickInput {
         if self.arriving == Some(id) && self.open {
             self.tucked = false;
             self.arriving = None;
+            self.query.focused = true;
         }
     }
 
@@ -450,7 +454,8 @@ fn send_button(ready: bool, t: &tok::Theme) -> El {
     }
 }
 
-pub fn view(s: &QuickInput, _: &mut Cx<QuickInput>) -> El {
+pub fn view(s: &QuickInput, cx: &mut Cx<QuickInput>) -> El {
+    crate::settings::apply_motion(cx);
     let t = tok::theme(true);
     let Pose { dy, alpha, scale } = s.current_pose();
     let motion = Anim::from(if s.beside { SETTLE } else { GLIDE });
@@ -575,8 +580,10 @@ mod tests {
         s.open();
         s.arrive(7);
         assert!(s.tucked && s.beside);
+        s.query.focused = false;
         s.arrived(7);
         assert_eq!(pose(s.open, s.tucked, s.beside).dy, 0.0, "risen");
+        assert!(s.query.focused, "ready to type at once");
         s.arrive(8);
         s.set_tucked(true);
         s.arrived(8);
