@@ -263,6 +263,13 @@ impl QuickInput {
         if p.dy == TUCK { Pose { dy: TUCK + self.dock + strip_h(self.shots.len()), ..p } } else { p }
     }
 
+    /// The panel's left and bottom edges' distances from the window's (points): pinned by its
+    /// bottom edge, it rests and hides relative to the window whatever screen it was last placed
+    /// for, or none yet (launch).
+    pub fn pins(&self) -> [f32; 2] {
+        [self.rect[0], self.dock + MARGIN]
+    }
+
     /// The panel's rect now: its rest, grown upward by the chip strip (the field row stays put).
     pub fn panel_rect(&self) -> [f32; 4] {
         grown(self.rect, self.shots.len())
@@ -612,13 +619,16 @@ pub fn view(s: &QuickInput, cx: &mut Cx<QuickInput>) -> El {
     let t = tok::theme(true);
     let Pose { dy, alpha, scale } = s.current_pose();
     let motion = Anim::from(GLIDE);
-    let [x, y, w, h] = s.panel_rect();
+    let [.., w, h] = s.panel_rect();
+    let [x, bottom] = s.pins();
     // Just sent: the row is in the chat's panel, fading; the input's new panel waits empty, out
     // of view, landing at once (its element was the chat's, maybe mid-slide).
     let layers = if s.morphing { Vec::new() } else { vec![input_row(s, &t)] };
     let mut input = surface(s.input_key(), s.open, layers)
         .size(w, h)
-        .pin(Some(x), Some(y), None, None)
+        // By its bottom edge: placed for another screen, or none yet at launch, closed it still
+        // waits below the window's edge, never on screen.
+        .pin(Some(x), None, None, Some(bottom))
         .offset(0.0, dy)
         .offset_motion(motion.clone())
         .opacity(alpha)
@@ -994,6 +1004,32 @@ mod tests {
             s.attach(id, vec![1, 2, 3], tiny());
         }
         s
+    }
+
+    #[test]
+    fn closed_it_hides_past_the_windows_bottom_whatever_screen_it_was_placed_for() {
+        let top = |s: &QuickInput, window_h: f32| {
+            let [_, bottom] = s.pins();
+            window_h - bottom - s.panel_rect()[3] + s.current_pose().dy
+        };
+        // Never placed (launch), or placed for a smaller display than it shows on.
+        let fresh = QuickInput::new(None);
+        let mut small = QuickInput::new(None);
+        small.at_bottom(70.0);
+        small.set_rect(bottom_panel([1440.0, 900.0], 70.0));
+        small.attach(1, vec![1], tiny());
+        for s in [&fresh, &small] {
+            for window_h in [900.0, 1080.0, 1440.0] {
+                assert!(top(s, window_h) >= window_h + PAD, "closed: below a {window_h}-tall window");
+            }
+        }
+        // Open, it's at its rect.
+        let mut s = QuickInput::new(None);
+        s.at_bottom(70.0);
+        s.set_rect(bottom_panel([1920.0, 1080.0], 70.0));
+        s.attach(1, vec![1], tiny());
+        s.open();
+        assert_eq!([s.pins()[0], top(&s, 1080.0)], [s.panel_rect()[0], s.panel_rect()[1]]);
     }
 
     #[test]
