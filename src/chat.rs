@@ -58,6 +58,12 @@ pub fn side_rect(screen: [f32; 2], insets: Insets) -> [f32; 4] {
     [sw - GAP - insets.right - CHAT_W, insets.top + GAP, CHAT_W, (sh - insets.top - insets.bottom - 2.0 * GAP).max(0.0)]
 }
 
+/// The panel's top and right edges' distances from the window's (points): pinned by its right
+/// edge, it rests and hides relative to the window whatever screen size it was last told.
+pub fn side_pins(insets: Insets) -> [f32; 2] {
+    [insets.top + GAP, GAP + insets.right]
+}
+
 /// The panel's horizontal offset from its rest: open, there; closed, past the screen's right
 /// edge, shadow included.
 pub fn offset(open: bool, insets: Insets) -> f32 {
@@ -646,7 +652,8 @@ pub fn panel<S: 'static>(s: &Chat, key: &str, lens: fn(&mut S) -> &mut Chat, inp
         composer = composer.child(chips);
     }
     let composer = composer.child(typing);
-    let [x, y, w, h] = side_rect(s.screen, s.insets);
+    let [.., w, h] = side_rect(s.screen, s.insets);
+    let [top, right] = side_pins(s.insets);
     // At its landed size from the start, pinned to the panel's top left: the panel reveals it as
     // it grows. Hidden while the input's panel reshapes, then faded in.
     let content = col()
@@ -665,7 +672,9 @@ pub fn panel<S: 'static>(s: &Chat, key: &str, lens: fn(&mut S) -> &mut Chat, inp
     };
     quick_input::surface(key, s.open, layers)
         .size(w, h)
-        .pin(Some(x), Some(y), None, None)
+        // By its right edge: told the wrong screen (none yet at launch, or another display's),
+        // closed it still waits past the window's edge, never on screen.
+        .pin(None, Some(top), Some(right), None)
         .offset(offset(s.open, s.insets), 0.0)
         .offset_motion(Anim::from(GLIDE))
         // The input's panel arrives pressed in (sending) and springs back to full size.
@@ -682,6 +691,20 @@ pub fn on_key(s: &mut Chat, event: &KeyEvent) -> bool {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn closed_it_hides_past_the_windows_edge_whatever_screen_it_was_told() {
+        // Never placed yet (launch): told 1440 × 900, shown on a wider display.
+        for insets in [Insets::default(), Insets { top: 33.0, bottom: 70.0, right: 72.0 }] {
+            let [top, right] = side_pins(insets);
+            for window in [1440.0, 1512.0, 1920.0, 2560.0] {
+                let left = window - right - CHAT_W;
+                assert!(left + offset(false, insets) >= window + PAD, "closed: past a {window}-wide window");
+                let [x, y, ..] = side_rect([window, 900.0], insets);
+                assert_eq!([left, top], [x, y], "open: at its rect");
+            }
+        }
+    }
 
     #[test]
     fn insets_leave_the_menu_bar_and_the_dock() {
