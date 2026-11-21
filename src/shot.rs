@@ -150,6 +150,8 @@ pub struct Overlay {
     /// Where the quick input's or the chat's panel is over this display (points), while it's on
     /// screen: this overlay leaves that rect to it, pointer and cursor alike.
     input_at: Option<[f32; 4]>,
+    /// For the quick input: the Dock under it, so its hole follows its strip of images.
+    input_dock: Option<f32>,
     /// Fading out (`leave`): everything drawn goes to transparent, so the window's last frame
     /// before it hides is empty and never shows again on the next reveal.
     leaving: bool,
@@ -186,6 +188,7 @@ impl Overlay {
             for_input: false,
             for_chat: false,
             input_at: None,
+            input_dock: None,
             leaving: false,
         }
     }
@@ -205,6 +208,10 @@ impl Overlay {
         let full = [0.0, 0.0, frozen.width as f32 / frozen.scale, frozen.height as f32 / frozen.scale];
         self.frozen = Some(Arc::new(frozen));
         (self.for_input, self.for_chat, self.input_at) = served(target, self.screen());
+        self.input_dock = match target {
+            For::Input { dock, .. } => Some(dock),
+            _ => None,
+        };
         self.windows = shot.windows;
         self.pointer = shot.pointer;
         self.closing = false;
@@ -224,6 +231,14 @@ impl Overlay {
         if self.for_input && !self.for_chat {
             self.host.update(|host, _| host.tuck_quick_input(true));
         }
+    }
+
+    /// The quick input holds `chips` images now (one removed or pasted during the capture): its
+    /// hole follows, while it's on screen.
+    pub fn input_chips(&mut self, chips: usize) -> bool {
+        let selecting = matches!(self.stage, Stage::Selecting(_)) && !self.closing;
+        let Some(at) = chips_hole(self.input_dock, selecting, self.screen(), chips) else { return false };
+        self.input_at.replace(at) != Some(at)
     }
 
     /// The frozen display's size in points.
@@ -254,6 +269,7 @@ impl Overlay {
         self.for_input = false;
         self.for_chat = false;
         self.input_at = None;
+        self.input_dock = None;
         self.leaving = false;
         self.pixels.set(1, 1, vec![0; 4]);
     }
@@ -557,6 +573,13 @@ fn served(target: For, screen: Option<[f32; 2]>) -> (bool, bool, Option<[f32; 4]
     }
 }
 
+/// The input's hole once its strip holds `chips` images, during a capture for it (`dock`) on a
+/// `screen` of that size, still `selecting` (after a pick it's tucked away). None: unchanged.
+fn chips_hole(dock: Option<f32>, selecting: bool, screen: Option<[f32; 2]>, chips: usize) -> Option<[f32; 4]> {
+    let (dock, screen) = (dock?, screen?);
+    selecting.then(|| crate::quick_input::input_panel(screen, dock, chips))
+}
+
 /// A picked area's toolbar and pointer: the chat keeps its panel's rect (`at`), the input tucks
 /// away and leaves it to the capture.
 fn hole_on_pick(for_chat: bool, at: Option<[f32; 4]>) -> Option<[f32; 4]> {
@@ -837,6 +860,17 @@ mod tests {
         assert!(regions.iter().all(|r| r[2] >= 0.0 && r[3] >= 0.0));
         // A hole off the screen's edge leaves no negative bands.
         assert!(hit_regions(Some([-20.0, 780.0, 100.0, 60.0]), screen).iter().all(|r| r[2] >= 0.0 && r[3] >= 0.0));
+    }
+
+    #[test]
+    fn the_inputs_strip_changing_during_a_capture_moves_its_hole_too() {
+        use crate::quick_input::input_panel;
+        let screen = [1920.0, 1080.0];
+        assert_eq!(chips_hole(Some(70.0), true, Some(screen), 0), Some(input_panel(screen, 70.0, 0)), "its X used: the strip goes");
+        assert_eq!(chips_hole(Some(70.0), true, Some(screen), 7), Some(input_panel(screen, 70.0, 7)));
+        assert_eq!(chips_hole(Some(70.0), false, Some(screen), 1), None, "picked: the input is tucked away");
+        assert_eq!(chips_hole(None, true, Some(screen), 1), None, "not for the input");
+        assert_eq!(chips_hole(Some(70.0), true, None, 1), None, "no capture");
     }
 
     #[test]

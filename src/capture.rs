@@ -126,12 +126,18 @@ fn rgba(image: &CGImage) -> Result<(Vec<u8>, u32, u32), String> {
     Ok((pixels, w as u32, h as u32))
 }
 
-/// A JPEG's pixels as straight RGBA in sRGB (opaque), its width and height.
-pub fn jpeg_rgba(jpeg: &[u8]) -> Option<(Vec<u8>, u32, u32)> {
+/// A JPEG's pixels as straight RGBA in sRGB (opaque), its width and height; None if it isn't
+/// one, or its size (width, height) doesn't `fit`, checked before its pixels are drawn.
+pub fn jpeg_rgba(jpeg: &[u8], fits: &dyn Fn(u32, u32) -> bool) -> Option<(Vec<u8>, u32, u32)> {
     let data = CFData::from_bytes(jpeg);
     let provider = CGDataProvider::with_cf_data(Some(&data))?;
     // SAFETY: a null decode array is allowed (no remapping).
     let image = unsafe { CGImage::with_jpeg_data_provider(Some(&provider), std::ptr::null(), true, CGColorRenderingIntent::RenderingIntentDefault) }?;
+    let (w, h) = (CGImage::width(Some(&image)), CGImage::height(Some(&image)));
+    let size = (u32::try_from(w).ok()?, u32::try_from(h).ok()?);
+    if !fits(size.0, size.1) {
+        return None;
+    }
     rgba(&image).ok()
 }
 

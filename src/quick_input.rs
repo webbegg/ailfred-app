@@ -89,6 +89,10 @@ pub struct QuickInput {
     next_shot: u64,
     /// Enter or the send button: the panel is pressed in, sending once it's down (`release`).
     pressed: bool,
+    /// Presses so far: a release goes with its own press only.
+    presses: u64,
+    /// Pasted images still decoding, by id: they join only while the input is the same one.
+    pending: Vec<u64>,
     /// The capture shortcut's symbols, shown in the empty field's hint.
     capture_chord: Option<String>,
 }
@@ -139,6 +143,8 @@ impl QuickInput {
             next_message: 0,
             next_shot: 0,
             pressed: false,
+            presses: 0,
+            pending: Vec::new(),
             capture_chord: None,
         }
     }
@@ -172,6 +178,7 @@ impl QuickInput {
         let pngs: Vec<Vec<u8>> = self.shots.iter_mut().map(|a| std::mem::take(&mut a.png)).collect();
         let message = chat::Message { id, text: text.clone(), images: Vec::new() };
         self.query.focused = false;
+        self.pending.clear();
         if self.chat.is_open() {
             self.close();
             self.query.clear();
@@ -190,11 +197,7 @@ impl QuickInput {
     /// The panel is the chat's now: the input's row goes (the next input starts empty) and the
     /// chat's content fades in.
     pub fn land(&mut self) {
-        if std::mem::replace(&mut self.morphing, false) {
-            self.query.clear();
-            self.shots.clear();
-            self.tell_chips();
-        }
+        self.end_morph();
         self.chat.land();
         // Cmd+N meanwhile: the new input keeps the keys.
         if self.open {
@@ -206,8 +209,19 @@ impl QuickInput {
         self.open
     }
 
+    /// The sent row is done with: the next input starts empty. At the landing, or sooner when a
+    /// new input opens before it (Cmd+N), whose own text and images the landing then keeps.
+    fn end_morph(&mut self) {
+        if std::mem::replace(&mut self.morphing, false) {
+            self.query.clear();
+            self.shots.clear();
+            self.tell_chips();
+        }
+    }
+
     /// Rises into place with the field focused.
     pub fn open(&mut self) {
+        self.end_morph();
         self.open = true;
         self.tucked = false;
         self.query.focused = true;
@@ -224,6 +238,7 @@ impl QuickInput {
     pub fn close(&mut self) -> bool {
         self.tucked = false;
         self.pressed = false;
+        self.pending.clear();
         self.shots.clear();
         self.tell_chips();
         self.preview = None;
@@ -233,6 +248,7 @@ impl QuickInput {
     /// Before opening: below the screen at the bottom (over a Dock `dock` points tall), whatever
     /// it was doing before, so `open` rises from the screen's edge. Applied without motion.
     pub fn at_bottom(&mut self, dock: f32) {
+        self.end_morph();
         self.dock = dock.max(0.0);
         self.tucked = false;
         self.query.focused = true;
@@ -310,7 +326,17 @@ impl QuickInput {
     }
 
     fn take_paste(&mut self, content: &rune::ClipboardContent) -> Vec<(u64, chat::Pasted)> {
-        chat::take_ids(&mut self.next_shot, chat::pasted_images(content))
+        let taken = chat::take_ids(&mut self.next_shot, chat::pasted_images(content));
+        self.pending.extend(taken.iter().map(|(id, _)| *id));
+        taken
+    }
+
+    /// Pasted image `id`, decoded: it joins unless the input closed or sent since the paste.
+    pub fn pasted(&mut self, id: u64, png: Vec<u8>, preview: chat::Image) {
+        if let Some(at) = self.pending.iter().position(|&p| p == id) {
+            self.pending.remove(at);
+            self.attach(id, png, preview);
+        }
     }
 
     /// The capture shortcut, as its symbols (`chord_symbols`), for the hint; None when unset.
@@ -369,36 +395,40 @@ impl QuickInput {
 
     /// Enter or the send button, with something to send: the panel presses in (true), and the
     /// host sends it once it's down (`release`). Again meanwhile, or nothing to send: false.
-    pub fn press(&mut self) -> bool {
+    pub fn press(&mut self) -> Option<u64> {
         if !self.open || self.pressed || !self.send_ready() {
-            return false;
+            return None;
         }
         self.pressed = true;
-        true
+        self.presses += 1;
+        Some(self.presses)
     }
 
-    /// The press is down: what's typed and attached goes (`send`), unless the input closed
+    /// Press `press` is down: what's typed and attached goes (`send`), unless the input closed
     /// meanwhile.
-    pub fn release(&mut self) {
-        if std::mem::replace(&mut self.pressed, false) && self.open {
+    pub fn release(&mut self, press: u64) {
+        if !self.pressed || press != self.presses {
+            return;
+        }
+        self.pressed = false;
+        if self.open {
             self.send_now();
         }
     }
 
     /// Presses the panel in, the host sending once it's down.
     fn submit(&mut self) {
-        if self.press()
+        if let Some(press) = self.press()
             && let Some(host) = &self.host
         {
-            host.update(|host, _| host.send_after_press());
+            host.update(move |host, _| host.send_after_press(press));
         }
     }
 
     /// Sends what's typed and attached (`send`); the host keeps up and decodes the captures.
     fn send_now(&mut self) {
         if let Some((id, text, pngs)) = self.send() {
-            let bytes: usize = pngs.iter().map(Vec::len).sum();
-            eprintln!("Capibarapp: quick input: {text:?} with {} capture(s), {bytes} bytes of PNG", pngs.len());
+            eprintln!("{}", sent_log(&text, &pngs));
             if let Some(host) = &self.host {
                 host.update(move |host, _| host.sent_from_quick_input(id, pngs));
             }
@@ -446,19 +476,15 @@ pub fn hint(shots: usize, chord: Option<&str>) -> String {
     }
 }
 
-/// A shortcut as written (`shift+super+space`) in the Mac's symbols, in its order: `⇧⌘Space`.
-pub fn chord_symbols(shortcut: &str) -> String {
-    const ORDER: [(&[&str], &str); 4] =
-        [(&["ctrl", "control"], "⌃"), (&["alt", "option", "opt"], "⌥"), (&["shift"], "⇧"), (&["super", "cmd", "command", "meta"], "⌘")];
-    let parts: Vec<String> = shortcut.split('+').map(|p| p.trim().to_ascii_lowercase()).collect();
-    let mut out: String = ORDER.iter().filter(|(names, _)| parts.iter().any(|p| names.contains(&p.as_str()))).map(|(_, s)| *s).collect();
-    let modifier = |p: &String| ORDER.iter().any(|(names, _)| names.contains(&p.as_str()));
-    if let Some(key) = parts.iter().rfind(|p| !modifier(p)) {
-        let mut chars = key.chars();
-        out.extend(chars.next().map(|c| c.to_ascii_uppercase()));
-        out.push_str(chars.as_str());
-    }
-    out
+/// What the log says of a message sent: its size, never its text (the log is a file on disk).
+pub fn sent_log(text: &str, pngs: &[Vec<u8>]) -> String {
+    let bytes: usize = pngs.iter().map(Vec::len).sum();
+    format!("Capibarapp: quick input: {} chars with {} capture(s), {bytes} bytes of PNG", text.chars().count(), pngs.len())
+}
+
+/// A shortcut's keycaps (`Shortcut::keycaps`, as Settings shows them) as one label: `⇧⌘Space`.
+pub fn chord_symbols(keycaps: &[String]) -> String {
+    keycaps.concat()
 }
 
 fn placeholder(shots: usize) -> &'static str {
@@ -895,11 +921,12 @@ mod tests {
     }
 
     #[test]
-    fn a_shortcut_reads_in_the_macs_symbols() {
-        assert_eq!(chord_symbols("shift+super+space"), "⇧⌘Space");
-        assert_eq!(chord_symbols("super+shift+4"), "⇧⌘4", "in the Mac's order");
-        assert_eq!(chord_symbols("ctrl+alt+cmd+shift+k"), "⌃⌥⇧⌘K");
-        assert_eq!(chord_symbols("Option+F5"), "⌥F5");
+    fn a_shortcut_reads_as_settings_shows_it() {
+        let caps = |s: &str| s.parse::<rune::Shortcut>().unwrap().keycaps();
+        assert_eq!(chord_symbols(&caps("shift+super+space")), "⇧⌘Space");
+        assert_eq!(chord_symbols(&caps("super+shift+4")), "⇧⌘4", "in the Mac's order");
+        assert_eq!(chord_symbols(&caps("super+slash")), "⌘/");
+        assert_eq!(chord_symbols(&caps("alt+f5")), "⌥F5");
     }
 
     #[test]
@@ -972,21 +999,78 @@ mod tests {
     #[test]
     fn sending_presses_the_whole_panel_in_then_goes_once_its_down() {
         let mut s = sent("what is this?", None);
-        assert!(s.press());
+        let press = s.press().unwrap();
         assert_eq!(s.current_pose().scale, PRESSED_SCALE, "pressed in");
         assert!(!s.morphing && s.is_open(), "not sent yet");
-        assert!(!s.press(), "Enter again meanwhile sends nothing more");
-        s.release();
+        assert_eq!(s.press(), None, "Enter again meanwhile sends nothing more");
+        s.release(press);
         assert!(s.morphing && s.chat.is_open(), "sent: it becomes the chat");
         assert_eq!(s.current_pose().scale, 1.0);
-        assert!(!s.press(), "nothing left to send");
+        assert_eq!(s.press(), None, "nothing left to send");
         // Closed while pressed: nothing goes.
         let mut s = sent("draft", None);
-        assert!(s.press());
+        let press = s.press().unwrap();
         s.close();
-        s.release();
+        s.release(press);
         assert!(!s.morphing && !s.chat.is_open());
-        assert!(!QuickInput::new(None).press(), "empty: no press");
+        assert_eq!(QuickInput::new(None).press(), None, "empty: no press");
+    }
+
+    #[test]
+    fn a_release_goes_with_its_own_press_only() {
+        let mut s = sent("a", None);
+        let first = s.press().unwrap();
+        s.close();
+        s.open();
+        let second = s.press().unwrap();
+        s.release(first);
+        assert!(!s.morphing && s.is_open(), "the first press's timer doesn't send the second early");
+        assert_eq!(s.current_pose().scale, PRESSED_SCALE, "still pressed");
+        s.release(second);
+        assert!(s.morphing);
+    }
+
+    #[test]
+    fn cmd_n_before_the_chat_lands_keeps_what_goes_into_the_new_input() {
+        let mut s = sent("hi", Some(1));
+        s.send();
+        s.at_bottom(0.0);
+        s.open();
+        assert!(s.query.text.is_empty() && s.ids().is_empty(), "the new input starts empty");
+        assert_eq!(s.panel_rect()[3], PANEL_H, "not grown by the sent images");
+        s.query = TextEdit::new("next");
+        s.attach(99, vec![9], tiny());
+        s.land();
+        assert_eq!((s.query.text.as_str(), s.ids()), ("next", vec![99]), "the landing doesn't clear it");
+    }
+
+    #[test]
+    fn an_image_still_decoding_when_the_input_closes_or_sends_is_dropped() {
+        use crate::chat::tests::{a_png, clip};
+        let mut s = QuickInput::new(None);
+        s.open();
+        let id = s.take_paste(&clip("", Some(a_png())))[0].0;
+        s.close();
+        s.open();
+        s.pasted(id, vec![1], tiny());
+        assert!(s.ids().is_empty(), "not into the next input");
+        let id = s.take_paste(&clip("", Some(a_png())))[0].0;
+        s.pasted(id, vec![1], tiny());
+        assert_eq!(s.ids(), vec![id], "the same input: it joins");
+        let late = s.take_paste(&clip("", Some(a_png())))[0].0;
+        s.query = TextEdit::new("go");
+        s.send();
+        s.land();
+        s.open();
+        s.pasted(late, vec![1], tiny());
+        assert!(s.ids().is_empty(), "not after it sent");
+    }
+
+    #[test]
+    fn the_log_never_holds_what_was_typed() {
+        let line = sent_log("my secret question", &[vec![1, 2, 3]]);
+        assert!(!line.contains("secret"), "{line}");
+        assert!(line.contains("18 chars") && line.contains("1 capture") && line.contains("3 bytes"), "{line}");
     }
 
     #[test]

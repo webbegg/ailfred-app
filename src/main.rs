@@ -243,12 +243,12 @@ impl Host {
     }
 
     /// Enter or the send button pressed the input's panel in: once it's down, what's in it goes.
-    pub fn send_after_press(&self) {
+    pub fn send_after_press(&self, press: u64) {
         let Some(quick) = self.quick.clone() else { return };
         std::thread::spawn(move || {
             std::thread::sleep(quick_input::PRESS);
-            quick.update(|s, tx| {
-                s.release();
+            quick.update(move |s, tx| {
+                s.release(press);
                 tx.animated();
             });
         });
@@ -331,7 +331,7 @@ impl Host {
         }
         quick.update(move |s, tx| {
             match field {
-                chat::Field::Input => s.attach(id, png, preview),
+                chat::Field::Input => s.pasted(id, png, preview),
                 chat::Field::Chat => s.chat.attach(id, png, preview),
             }
             tx.animated();
@@ -341,6 +341,10 @@ impl Host {
     /// The input holds `n` images now.
     pub fn set_quick_chips(&mut self, n: usize) {
         self.quick_chips = n;
+        // A capture for it on screen leaves the input's panel, now this tall, alone.
+        if let Some(overlay) = &self.overlay {
+            overlay.update_if(move |o, _| o.input_chips(n));
+        }
     }
 
     /// Who a capture is for: the open input, else the open chat, else itself.
@@ -441,7 +445,7 @@ impl Host {
             tray.show_capture_shortcut(shortcut);
         }
         if let Some(quick) = &self.quick {
-            let chord = shortcut.map(|s| quick_input::chord_symbols(&s.to_string()));
+            let chord = shortcut.map(|s| quick_input::chord_symbols(&s.keycaps()));
             quick.update(move |s, _| s.set_capture_chord(chord));
         }
     }

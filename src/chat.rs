@@ -141,14 +141,37 @@ pub fn take_ids(next: &mut u64, pasted: Vec<Pasted>) -> Vec<(u64, Pasted)> {
         .collect()
 }
 
+/// Pasted files larger than this, or images with more pixels, aren't read: decoding one takes
+/// 4 bytes a pixel, twice over.
+const MAX_FILE_BYTES: u64 = 64 << 20;
+const MAX_PIXELS: u64 = 100_000_000;
+
 /// The image in the file at `path` as a PNG: a PNG as it is, a JPEG converted. Else None.
 pub fn image_file_png(path: &std::path::Path) -> Option<Vec<u8>> {
-    let bytes = std::fs::read(path).ok()?;
-    if decode_png(&bytes).is_some() {
-        return Some(bytes);
+    image_file_png_within(path, MAX_FILE_BYTES, MAX_PIXELS)
+}
+
+/// `image_file_png`, for a file of at most `max_bytes` and an image of at most `max_pixels`.
+fn image_file_png_within(path: &std::path::Path, max_bytes: u64, max_pixels: u64) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path).ok()?.take(max_bytes + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > max_bytes {
+        return None;
     }
-    let (rgba, w, h) = crate::capture::jpeg_rgba(&bytes)?;
+    let fits = |(w, h): (u32, u32)| u64::from(w) * u64::from(h) <= max_pixels;
+    if let Some(size) = png_size(&bytes) {
+        return (fits(size) && decode_png(&bytes).is_some()).then_some(bytes);
+    }
+    let (rgba, w, h) = crate::capture::jpeg_rgba(&bytes, &|w, h| fits((w, h)))?;
     crate::export::encode_png(w, h, 1.0, &rgba).ok()
+}
+
+/// A PNG's width and height, from its header alone.
+fn png_size(png: &[u8]) -> Option<(u32, u32)> {
+    let reader = png::Decoder::new(std::io::Cursor::new(png)).read_info().ok()?;
+    let info = reader.info();
+    Some((info.width, info.height))
 }
 
 /// Decodes pasted image `id` off the main thread (reading it first, if a file), then hands it to
@@ -814,6 +837,23 @@ pub(crate) mod tests {
         assert_eq!(pasted_images(&clip("text", None)), vec![]);
         let mut next = 0;
         assert_eq!(take_ids(&mut next, vec![file("/a"), file("/b")]), vec![(1, file("/a")), (2, file("/b"))], "one chip each");
+    }
+
+    #[test]
+    fn too_large_an_image_file_is_not_read() {
+        let dir = std::env::temp_dir().join(format!("capibarapp-large-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("a.png");
+        std::fs::write(&png, a_png()).unwrap();
+        let len = a_png().len() as u64;
+        assert_eq!(image_file_png_within(&png, len - 1, 100), None, "too many bytes");
+        assert_eq!(image_file_png_within(&png, len, 1), None, "too many pixels (2)");
+        assert!(image_file_png_within(&png, len, 2).is_some());
+        let jpeg = dir.join("a.jpg");
+        std::fs::write(&jpeg, include_bytes!("testdata/tiny.jpg")).unwrap();
+        assert_eq!(image_file_png_within(&jpeg, 1 << 20, 11), None, "too many pixels (4x3)");
+        assert!(image_file_png_within(&jpeg, 1 << 20, 12).is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
