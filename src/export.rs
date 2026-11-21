@@ -51,6 +51,22 @@ pub fn export(frozen: Arc<Frozen>, sel: [f32; 4], marks: Vec<Mark>, host: AppHan
     }
 }
 
+/// For the quick input: crops, applies the marks and encodes, then attaches the image as capture
+/// area `id` (replacing that area's earlier one). Not copied, not saved.
+pub fn attach(frozen: Arc<Frozen>, sel: [f32; 4], marks: Vec<Mark>, id: u64, host: AppHandle<Host>) {
+    let (mut rgba, width, height) = match crop(&frozen, sel) {
+        Ok(out) => out,
+        Err(e) => return eprintln!("Capibarapp: crop failed: {e}"),
+    };
+    if let Err(e) = apply(&mut rgba, width, height, frozen.scale, &marks) {
+        eprintln!("Capibarapp: drawing the marks failed: {e}");
+    }
+    match encode_png(width, height, frozen.scale, &rgba) {
+        Ok(png) => host.update(move |host, _| host.attach_to_quick_input(id, png)),
+        Err(e) => eprintln!("Capibarapp: encoding failed: {e}"),
+    }
+}
+
 /// Copies the selection (points) out of the frozen capture at native pixels.
 fn crop(f: &Frozen, [x, y, w, h]: [f32; 4]) -> Result<(Vec<u8>, u32, u32), String> {
     let px = |v: f32, max: u32| ((v * f.scale).round().max(0.0) as u32).min(max);

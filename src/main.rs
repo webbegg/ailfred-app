@@ -13,6 +13,9 @@ mod export;
 mod login;
 mod marks;
 mod output;
+mod icons;
+mod quick_input;
+mod screens;
 mod settings;
 mod settings_ui;
 mod shot;
@@ -23,9 +26,12 @@ use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rune::{
-    App, AppSpec, Cx, DisplayTarget, El, KeyPolicy, NativeDisplayId, OverlayHandle, OverlayInput, OverlayLevel,
-    AppHandle, OverlayOptions, WindowHandle, WindowOptions, OverlayPlacement, OverlaySpec, RunOptions, Tx, WindowSpec, el,
+    Align, App, AppSpec, Cx, DisplayTarget, El, KeyPolicy, NativeDisplayId, OverlayHandle, OverlayInput, OverlayLevel,
+    AppHandle, OverlayOptions, WindowHandle, WindowOptions, OverlayPlacement, OverlaySpec, RunOptions, ScreenEdge, Tx,
+    WindowSpec, el,
 };
+
+use crate::quick_input::QuickInput;
 
 use crate::shot::{Mode, Overlay};
 use crate::settings::{CaptureShortcut, Settings};
@@ -49,13 +55,225 @@ pub struct Host {
     initial_shortcut: Option<rune::Shortcut>,
     settings_window: Option<WindowHandle>,
     settings_ui: Option<AppHandle<SettingsUi>>,
+    /// The quick input panel, and whether it's open (or opening).
+    quick: Option<OverlayHandle<QuickInput>>,
+    quick_open: bool,
+    /// The Dock's height under the open input at the bottom (0 when there's none).
+    quick_dock: f32,
+    /// Counts the captures shown (main thread), so an earlier one's fade out doesn't hide a newer.
+    overlay_shown: u64,
+    /// The capture overlay is on screen (set by the capture thread as it shows it, cleared on
+    /// hide): it takes the keys, which mustn't close the quick input.
+    capture_shown: Arc<AtomicBool>,
 }
 
 impl Host {
-    pub fn hide_overlay(&self) {
-        if let Some(overlay) = &self.overlay {
-            overlay.hide();
+    pub fn toggle_quick_input(&mut self) {
+        if self.quick_open { self.hide_quick_input() } else { self.show_quick_input() }
+    }
+
+    /// Slides the quick input up on the display under the pointer and gives it the keys, and
+    /// starts an area capture there: dragging takes a screenshot that lands in the input.
+    pub fn show_quick_input(&mut self) {
+        let Some(quick) = self.quick.clone() else { return };
+        self.quick_open = true;
+        // Back at the bottom, wherever a capture area took it last time: the window reaches the
+        // screen's bottom edge (through a Dock there), the panel waits below it, out of view.
+        let dock = screens::dock_inset_under_pointer();
+        self.quick_dock = dock;
+        quick.update(move |s, tx| {
+            s.at_bottom(dock);
+            tx.instant();
+        });
+        quick.resize(quick_input::window_at_bottom(dock));
+        quick.set_placement(Some(quick_bottom()));
+        quick.set_display(DisplayTarget::UnderPointer);
+        quick.show();
+        quick.request_keys();
+        // Once the window is on screen, the panel rises from the bottom edge to its place (a
+        // rise started while hidden would play out before the first visible frame).
+        if let Some(handle) = self.handle.clone() {
+            std::thread::spawn(move || {
+                std::thread::sleep(quick_input::ARRIVAL_DELAY);
+                handle.update(|host, _| {
+                    if let (true, Some(quick)) = (host.quick_open, &host.quick) {
+                        quick.update(|s, tx| {
+                            s.open();
+                            tx.animated();
+                        });
+                    }
+                });
+            });
         }
+        if !self.capture_shown.load(Ordering::Acquire) {
+            start_capture(self, Duration::ZERO, Mode::Area);
+        }
+    }
+
+    /// Gives the quick input the keys back (the capture's tools are done).
+    pub fn input_keys(&self) {
+        if let (Some(quick), true) = (&self.quick, self.quick_open) {
+            quick.request_keys();
+        }
+    }
+
+    /// Moves the open input beside capture area `id` (`sel`, points on `display`, a `screen` of
+    /// that size) and lets it arrive there: it waits there out of view (at once), then, a frame
+    /// or two later, rises into place.
+    pub fn place_quick_input_beside(&self, id: u64, display: u32, sel: [f32; 4], screen: [f32; 2]) {
+        let Some(quick) = self.quick.clone() else { return };
+        if !self.quick_open {
+            return;
+        }
+        quick.update(move |s, tx| {
+            s.arrive(id);
+            tx.instant();
+        });
+        let [x, y, width, height] = quick_input::window_for(quick_input::beside(sel, screen));
+        quick.set_display(DisplayTarget::Native(NativeDisplayId::MacOS(display)));
+        quick.set_placement(Some(OverlayPlacement::Rect { x, y, width, height }));
+        std::thread::spawn(move || {
+            std::thread::sleep(quick_input::ARRIVAL_DELAY);
+            quick.update(move |s, tx| {
+                s.arrived(id);
+                tx.animated();
+            });
+            // The drag's click went to the capture: the field takes the keys back, to type at once.
+            quick.request_keys();
+        });
+    }
+
+    /// The capture's tools took the keys (true) or gave them back: the input shows it.
+    pub fn quick_editing(&self, editing: bool) {
+        if let Some(quick) = &self.quick {
+            quick.update(move |s, _| s.set_editing(editing));
+        }
+    }
+
+    /// ⌘E in the input: the capture area's tools open or close.
+    pub fn toggle_capture_tools(&self) {
+        if let Some(overlay) = &self.overlay {
+            overlay.update(|s, _| s.toggle_tools());
+        }
+    }
+
+    /// A capture area's chip was removed: the area goes too if it's still on screen.
+    pub fn forget_capture_area(&self, id: u64) {
+        if let Some(overlay) = &self.overlay {
+            overlay.update(move |s, _| s.forget(id));
+        }
+    }
+
+    /// Gives the capture overlay the keys (the quick input holds them while selecting).
+    pub fn capture_keys(&self) {
+        if let Some(overlay) = &self.overlay {
+            overlay.request_keys();
+        }
+    }
+
+    /// Ends a capture on screen without exporting.
+    fn dismiss_capture(&self) {
+        self.hide_overlay();
+    }
+
+    /// Slides the quick input down; the window fades out over the slide, then hides.
+    pub fn hide_quick_input(&mut self) {
+        let Some(quick) = &self.quick else { return };
+        if !self.quick_open {
+            return;
+        }
+        self.quick_open = false;
+        quick.update(|s, tx| {
+            s.close();
+            tx.animated();
+        });
+        quick.fade_out(quick_input::EXIT);
+        // Once out of view, back to the bottom: the next opening slides in from the screen edge.
+        let rest = quick.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(quick_input::EXIT + Duration::from_millis(60));
+            rest.update(|s, tx| {
+                if !s.is_open() {
+                    s.rest();
+                    tx.instant();
+                }
+            });
+        });
+        // Closing the input ends the capture it started (or one still on screen).
+        if self.capture_shown.load(Ordering::Acquire) {
+            self.dismiss_capture();
+        }
+    }
+
+    /// The quick input lost the keys: a click elsewhere closes it, a capture taking them doesn't.
+    pub fn quick_input_blurred(&mut self) {
+        if !self.capture_shown.load(Ordering::Acquire) {
+            self.hide_quick_input();
+        }
+    }
+
+    /// A capture area drag started (true) or ended (false): the open input slides out of the
+    /// screen and back.
+    pub fn tuck_quick_input(&self, tucked: bool) {
+        let Some(quick) = &self.quick else { return };
+        if self.quick_open {
+            quick.update(move |s, tx| {
+                s.set_tucked(tucked);
+                tx.animated();
+            });
+            if !tucked {
+                quick.request_keys();
+            }
+        }
+    }
+
+    /// A capture area's image (PNG): attached if the input is open, else dropped.
+    pub fn attach_to_quick_input(&self, id: u64, png: Vec<u8>) {
+        let Some(quick) = &self.quick else { return };
+        if self.quick_open {
+            quick.update(move |s, tx| {
+                s.attach(id, png);
+                tx.animated();
+            });
+        }
+    }
+
+    /// Registers the quick input's fixed chord. Main thread, loop running.
+    fn register_quick_shortcut(&mut self) {
+        let Some(handle) = self.handle.clone() else { return };
+        let Ok(shortcut) = quick_input::SHORTCUT.parse::<rune::Shortcut>() else { return };
+        if let Err(e) = handle.register_shortcut(shortcut, |host: &mut Host, _| host.toggle_quick_input()) {
+            eprintln!("Capibarapp: the quick input shortcut {} couldn't be registered: {e}", quick_input::SHORTCUT);
+        }
+    }
+
+    pub fn hide_overlay(&self) {
+        self.capture_shown.store(false, Ordering::Release);
+        // A capture cancelled mid-drag leaves the input tucked; it comes back and takes the keys.
+        self.tuck_quick_input(false);
+        if let (Some(quick), true) = (&self.quick, self.quick_open) {
+            quick.request_keys();
+        }
+        // Its content fades to transparent with the window still up, then the window hides and
+        // the capture is freed, unless another capture showed meanwhile. The window's last frame
+        // is then an empty one: the next reveal can't flash the old capture.
+        let Some(overlay) = self.overlay.clone() else { return };
+        overlay.set_input(OverlayInput::None);
+        overlay.update(|s, tx| {
+            s.leave();
+            tx.animated();
+        });
+        let (shown, handle) = (self.overlay_shown, self.handle.clone());
+        std::thread::spawn(move || {
+            std::thread::sleep(shot::FADE_OUT + Duration::from_millis(60));
+            let Some(handle) = handle else { return };
+            handle.update(move |host, _| {
+                if host.overlay_shown == shown && !host.capture_shown.load(Ordering::Acquire) {
+                    overlay.update(|s, _| s.clear());
+                    overlay.hide();
+                }
+            });
+        });
     }
 
     /// Creates the menu-bar icon. Main thread, event loop running: called from a queued update.
@@ -107,6 +325,7 @@ impl Host {
             Action::Capture => start_capture(self, Duration::from_millis(200), Mode::Area),
             Action::CaptureWindow => start_capture(self, Duration::from_millis(200), Mode::Window),
             Action::CaptureFullScreen => start_capture(self, Duration::from_millis(200), Mode::FullScreen),
+            Action::QuickInput => self.show_quick_input(),
             Action::OpenFolder => open(&app_env::screenshots_dir()),
             Action::OpenPermissionSettings => open("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"),
             Action::ToggleLogin => {
@@ -153,6 +372,11 @@ fn host_init() -> Host {
         initial_shortcut: None,
         settings_window: None,
         settings_ui: None,
+        quick: None,
+        quick_open: false,
+        quick_dock: 0.0,
+        overlay_shown: 0,
+        capture_shown: Arc::default(),
     }
 }
 
@@ -164,14 +388,25 @@ pub(crate) fn on_shortcut(host: &mut Host, _: &mut Tx) {
     start_capture(host, Duration::ZERO, Mode::Area);
 }
 
+/// The quick input's resting place: flush with the bottom edge (the view keeps the gap, over a
+/// Dock too), so a closed or tucked panel waits out of the screen. Centred.
+fn quick_bottom() -> OverlayPlacement {
+    OverlayPlacement::Edge { edge: ScreenEdge::Bottom, margin: 0.0, align: Align::Center, inset: 0.0 }
+}
+
 /// Captures off the UI thread after `delay`, then shows the frozen display (starting in `mode`) on the display it came
-/// from. A missing Screen Recording permission shows in the menu.
+/// from. A missing Screen Recording permission shows in the menu. With the quick input open, the
+/// capture is for it: the input keeps the keys, a label follows the pointer, and picked areas
+/// attach to the input.
 fn start_capture(host: &mut Host, delay: Duration, mode: Mode) {
+    let from_input = host.quick_open;
+    let dock = host.quick_dock;
     let Some(overlay) = host.overlay.clone() else { return };
     if host.capturing.swap(true, Ordering::AcqRel) {
         return;
     }
     let capturing = Busy(host.capturing.clone());
+    let capture_shown = host.capture_shown.clone();
     let handle = host.handle.clone();
     std::thread::spawn(move || {
         let _capturing = capturing; // cleared on drop, even if the capture panics
@@ -182,18 +417,40 @@ fn start_capture(host: &mut Host, delay: Duration, mode: Mode) {
             handle.update(move |host, _| host.set_permission(allowed));
         }
         match result {
-            Ok(shot) => {
-                let display = shot.display_id;
-                // Queued in this order: state, placement, reveal. They may be applied over more than
-                // one event-loop turn; the update is queued before `show`, and show refreshes first.
-                overlay.update(move |s, _| s.freeze(shot, mode));
-                overlay.set_display(DisplayTarget::Native(NativeDisplayId::MacOS(display)));
-                overlay.show();
-                overlay.request_keys();
-            }
+            // Shown from the main thread, so it's ordered with a fade out's hide (`hide_overlay`).
+            Ok(shot) => match &handle {
+                Some(handle) => handle.update(move |host, _| {
+                    host.overlay_shown += 1;
+                    show_capture(&overlay, &capture_shown, shot, mode, from_input, dock);
+                }),
+                None => show_capture(&overlay, &capture_shown, shot, mode, from_input, dock),
+            },
             Err(e) => eprintln!("Capibarapp: {e}"),
         }
     });
+}
+
+/// Puts `shot` on screen in `mode`, fading in.
+fn show_capture(overlay: &OverlayHandle<Overlay>, shown: &AtomicBool, shot: capture::Shot, mode: Mode, from_input: bool, dock: f32) {
+    let display = shot.display_id;
+    // Queued in this order: state, placement, reveal. They may be applied over more than one
+    // event-loop turn; the update is queued before the reveal, and a reveal refreshes first.
+    overlay.update(move |s, tx| {
+        s.freeze(shot, mode, from_input);
+        if from_input {
+            s.input_at_bottom(dock);
+        }
+        // Back from a fade out cut short, the content fades in again rather than jump.
+        tx.animated();
+    });
+    // For the input, the overlay leaves its panel's rect to it (see `Overlay::input_at`).
+    overlay.set_input(if from_input { OverlayInput::Regions } else { OverlayInput::All });
+    overlay.set_display(DisplayTarget::Native(NativeDisplayId::MacOS(display)));
+    shown.store(true, Ordering::Release);
+    overlay.fade_in(shot::FADE_IN);
+    if !from_input {
+        overlay.request_keys();
+    }
 }
 
 /// Clears the "capture running" flag when dropped.
@@ -231,6 +488,25 @@ fn main() {
                 .on_key(shot::on_key),
             Overlay::new(handle.clone()),
         );
+        let quick = app.overlay(
+            OverlaySpec::new("Capibarapp quick input", quick_input::WINDOW, quick_input::view)
+                .options(OverlayOptions {
+                    display: DisplayTarget::UnderPointer,
+                    placement: Some(quick_bottom()),
+                    // Above the capture overlay, so it stays in view over a frozen screen.
+                    level: OverlayLevel::AboveOverlays,
+                    // Only the panel takes clicks; its shadow room passes them through.
+                    input: OverlayInput::Regions,
+                    keys: KeyPolicy::OnDemand,
+                    exclude_from_capture: true,
+                    prewarm: true,
+                    ..Default::default()
+                })
+                .on_key(quick_input::on_key)
+                .on_focus(quick_input::on_focus)
+                .animate_reveal(),
+            QuickInput::new(Some(handle.clone())),
+        );
         let settings = Settings::open();
         let initial_shortcut = settings.shortcut();
         let capture_shortcut = CaptureShortcut::default();
@@ -252,12 +528,18 @@ fn main() {
             initial_shortcut,
             settings_window: Some(settings_window),
             settings_ui: Some(settings_ui),
+            quick: Some(quick),
+            quick_open: false,
+            quick_dock: 0.0,
+            overlay_shown: 0,
+            capture_shown: Arc::default(),
         });
         // Runs on the main thread at the loop's first turn: the status item needs a running NSApp,
         // and runtime shortcut registration needs the host started.
         handle.update(|host, _| {
             host.add_tray();
             host.register_saved_shortcut();
+            host.register_quick_shortcut();
         });
         // Off the UI thread: both talk to system services.
         std::thread::spawn(move || {
