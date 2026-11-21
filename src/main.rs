@@ -9,6 +9,7 @@
 
 mod app_env;
 mod capture;
+mod chat;
 mod export;
 mod login;
 mod marks;
@@ -26,8 +27,8 @@ use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rune::{
-    Align, App, AppSpec, Cx, DisplayTarget, El, KeyPolicy, NativeDisplayId, OverlayHandle, OverlayInput, OverlayLevel,
-    AppHandle, OverlayOptions, WindowHandle, WindowOptions, OverlayPlacement, OverlaySpec, RunOptions, ScreenEdge, Tx,
+    App, AppSpec, Cx, DisplayTarget, El, KeyPolicy, NativeDisplayId, OverlayHandle, OverlayInput, OverlayLevel,
+    AppHandle, OverlayOptions, WindowHandle, WindowOptions, OverlayPlacement, OverlaySpec, RunOptions, Tx,
     WindowSpec, el,
 };
 
@@ -55,21 +56,109 @@ pub struct Host {
     initial_shortcut: Option<rune::Shortcut>,
     settings_window: Option<WindowHandle>,
     settings_ui: Option<AppHandle<SettingsUi>>,
-    /// The quick input panel, and whether it's open (or opening).
+    /// The quick input's and the chat's window (it covers the display), and whether the input is
+    /// open (or opening).
     quick: Option<OverlayHandle<QuickInput>>,
     quick_open: bool,
+    /// The window shows (or is about to hide) over this display; counts its showings, so a
+    /// pending hide doesn't hide a newer one.
+    shown: Option<screens::Screen>,
+    shown_count: u64,
     /// The Dock's height under the open input at the bottom (0 when there's none).
     quick_dock: f32,
+    /// How many images the input holds (it tells us), for the capture to leave its strip alone.
+    quick_chips: usize,
     /// Counts the captures shown (main thread), so an earlier one's fade out doesn't hide a newer.
     overlay_shown: u64,
+    /// The chat side panel (in the input's window) is open (or opening).
+    chat_open: bool,
+    /// A conversation is going (sent to, not ended by Cmd+N): the input's shortcut shows it.
+    chat_started: bool,
     /// The capture overlay is on screen (set by the capture thread as it shows it, cleared on
     /// hide): it takes the keys, which mustn't close the quick input.
     capture_shown: Arc<AtomicBool>,
 }
 
 impl Host {
+    /// The input's shortcut: a started chat comes back (or goes) instead of a new input.
     pub fn toggle_quick_input(&mut self) {
-        if self.quick_open { self.hide_quick_input() } else { self.show_quick_input() }
+        match chat::toggle(self.quick_open, self.chat_started, self.chat_open) {
+            chat::Toggle::ShowInput => self.show_quick_input(),
+            chat::Toggle::HideInput => self.hide_quick_input(),
+            chat::Toggle::ShowChat => self.show_chat(),
+            chat::Toggle::HideChat => self.hide_chat(),
+        }
+    }
+
+    /// The menu's item: the started chat, else the input.
+    fn show_input_or_chat(&mut self) {
+        if self.chat_started { self.show_chat() } else { self.show_quick_input() }
+    }
+
+    /// Cmd+N in the chat: it slides out past the right edge, over, and a new input rises.
+    pub fn new_chat(&mut self) {
+        self.chat_started = false;
+        if let (Some(quick), true) = (&self.quick, std::mem::replace(&mut self.chat_open, false)) {
+            quick.update(|s, tx| {
+                s.chat.start_over();
+                tx.animated();
+            });
+        }
+        if !self.quick_open {
+            self.show_quick_input();
+        }
+    }
+
+    /// The display the window covers: the one it shows on, else the one under the pointer.
+    fn window_screen(&self) -> screens::Screen {
+        self.shown.or_else(screens::under_pointer).unwrap_or(screens::Screen::FALLBACK)
+    }
+
+    /// Shows the window over `screen` (moving it there if it shows elsewhere); a pending hide
+    /// is off.
+    fn reveal(&mut self, screen: screens::Screen) {
+        let Some(quick) = &self.quick else { return };
+        self.shown_count += 1;
+        if self.shown.map(|s| s.id) != Some(screen.id) {
+            quick.set_display(match screen.id {
+                0 => DisplayTarget::UnderPointer,
+                id => DisplayTarget::Native(NativeDisplayId::MacOS(id)),
+            });
+        }
+        self.shown = Some(screen);
+        quick.show();
+    }
+
+    /// With the input and the chat both gone, the window hides once their slides are over.
+    fn release(&mut self) {
+        let Some(handle) = self.handle.clone() else { return };
+        if self.quick_open || self.chat_open {
+            return;
+        }
+        let count = self.shown_count;
+        std::thread::spawn(move || {
+            std::thread::sleep(quick_input::EXIT + Duration::from_millis(60));
+            handle.update(move |host, _| {
+                if host.shown_count == count && !host.quick_open && !host.chat_open {
+                    host.shown = None;
+                    if let Some(quick) = &host.quick {
+                        quick.hide();
+                    }
+                }
+            });
+        });
+    }
+
+    /// Places the closed chat on `screen` (where it slides in from, or the input reshapes into).
+    fn place_chat(quick: &OverlayHandle<QuickInput>, screen: screens::Screen) {
+        let (insets, size) = (chat::insets(screen.frame, screen.visible), screen.size());
+        quick.update(move |s, tx| {
+            if !s.chat.is_open() {
+                s.chat.place(insets, size);
+                tx.scroll_to_bottom_instant("messages");
+            }
+            tx.instant();
+        });
     }
 
     /// Slides the quick input up on the display under the pointer and gives it the keys, and
@@ -77,18 +166,19 @@ impl Host {
     pub fn show_quick_input(&mut self) {
         let Some(quick) = self.quick.clone() else { return };
         self.quick_open = true;
-        // Back at the bottom, wherever a capture area took it last time: the window reaches the
-        // screen's bottom edge (through a Dock there), the panel waits below it, out of view.
-        let dock = screens::dock_inset_under_pointer();
+        // Back at the bottom, wherever a capture area took it last time: the panel waits below
+        // the screen's bottom edge (past a Dock there), out of view.
+        let screen = self.window_screen();
+        let dock = quick_input::dock_inset(screen.frame, screen.visible);
         self.quick_dock = dock;
+        let rect = quick_input::bottom_panel(screen.size(), dock);
         quick.update(move |s, tx| {
             s.at_bottom(dock);
+            s.set_rect(rect);
             tx.instant();
         });
-        quick.resize(quick_input::window_at_bottom(dock));
-        quick.set_placement(Some(quick_bottom()));
-        quick.set_display(DisplayTarget::UnderPointer);
-        quick.show();
+        Host::place_chat(&quick, screen);
+        self.reveal(screen);
         quick.request_keys();
         // Once the window is on screen, the panel rises from the bottom edge to its place (a
         // rise started while hidden would play out before the first visible frame).
@@ -104,70 +194,6 @@ impl Host {
                     }
                 });
             });
-        }
-        if !self.capture_shown.load(Ordering::Acquire) {
-            start_capture(self, Duration::ZERO, Mode::Area);
-        }
-    }
-
-    /// Gives the quick input the keys back (the capture's tools are done).
-    pub fn input_keys(&self) {
-        if let (Some(quick), true) = (&self.quick, self.quick_open) {
-            quick.request_keys();
-        }
-    }
-
-    /// Moves the open input beside capture area `id` (`sel`, points on `display`, a `screen` of
-    /// that size) and lets it arrive there: it waits there out of view (at once), then, a frame
-    /// or two later, rises into place.
-    pub fn place_quick_input_beside(&self, id: u64, display: u32, sel: [f32; 4], screen: [f32; 2]) {
-        let Some(quick) = self.quick.clone() else { return };
-        if !self.quick_open {
-            return;
-        }
-        quick.update(move |s, tx| {
-            s.arrive(id);
-            tx.instant();
-        });
-        let [x, y, width, height] = quick_input::window_for(quick_input::beside(sel, screen));
-        quick.set_display(DisplayTarget::Native(NativeDisplayId::MacOS(display)));
-        quick.set_placement(Some(OverlayPlacement::Rect { x, y, width, height }));
-        std::thread::spawn(move || {
-            std::thread::sleep(quick_input::ARRIVAL_DELAY);
-            quick.update(move |s, tx| {
-                s.arrived(id);
-                tx.animated();
-            });
-            // The drag's click went to the capture: the field takes the keys back, to type at once.
-            quick.request_keys();
-        });
-    }
-
-    /// The capture's tools took the keys (true) or gave them back: the input shows it.
-    pub fn quick_editing(&self, editing: bool) {
-        if let Some(quick) = &self.quick {
-            quick.update(move |s, _| s.set_editing(editing));
-        }
-    }
-
-    /// ⌘E in the input: the capture area's tools open or close.
-    pub fn toggle_capture_tools(&self) {
-        if let Some(overlay) = &self.overlay {
-            overlay.update(|s, _| s.toggle_tools());
-        }
-    }
-
-    /// A capture area's chip was removed: the area goes too if it's still on screen.
-    pub fn forget_capture_area(&self, id: u64) {
-        if let Some(overlay) = &self.overlay {
-            overlay.update(move |s, _| s.forget(id));
-        }
-    }
-
-    /// Gives the capture overlay the keys (the quick input holds them while selecting).
-    pub fn capture_keys(&self) {
-        if let Some(overlay) = &self.overlay {
-            overlay.request_keys();
         }
     }
 
@@ -187,22 +213,11 @@ impl Host {
             s.close();
             tx.animated();
         });
-        quick.fade_out(quick_input::EXIT);
-        // Once out of view, back to the bottom: the next opening slides in from the screen edge.
-        let rest = quick.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(quick_input::EXIT + Duration::from_millis(60));
-            rest.update(|s, tx| {
-                if !s.is_open() {
-                    s.rest();
-                    tx.instant();
-                }
-            });
-        });
         // Closing the input ends the capture it started (or one still on screen).
         if self.capture_shown.load(Ordering::Acquire) {
             self.dismiss_capture();
         }
+        self.release();
     }
 
     /// The quick input lost the keys: a click elsewhere closes it, a capture taking them doesn't.
@@ -227,15 +242,133 @@ impl Host {
         }
     }
 
-    /// A capture area's image (PNG): attached if the input is open, else dropped.
-    pub fn attach_to_quick_input(&self, id: u64, png: Vec<u8>) {
-        let Some(quick) = &self.quick else { return };
-        if self.quick_open {
+    /// Enter or the send button pressed the input's panel in: once it's down, what's in it goes.
+    pub fn send_after_press(&self, press: u64) {
+        let Some(quick) = self.quick.clone() else { return };
+        std::thread::spawn(move || {
+            std::thread::sleep(quick_input::PRESS);
             quick.update(move |s, tx| {
-                s.attach(id, png);
+                s.release(press);
                 tx.animated();
             });
+        });
+    }
+
+    /// Enter in the quick input sent message `id` (`QuickInput::send`): the input's panel is
+    /// the chat's now, springing to the side; its content fades in after `chat::LANDING`. The
+    /// message's captures (`pngs`) are decoded off the main thread and join it when ready.
+    pub fn sent_from_quick_input(&mut self, id: u64, pngs: Vec<Vec<u8>>) {
+        let Some(quick) = self.quick.clone() else { return };
+        self.quick_open = false;
+        self.chat_open = true;
+        self.chat_started = true;
+        quick.request_keys();
+        let lander = quick.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(chat::LANDING);
+            lander.update(|s, tx| {
+                s.land();
+                tx.animated();
+            });
+        });
+        if !pngs.is_empty() {
+            self.decode_into_chat(id, pngs);
         }
+    }
+
+    /// Brings the started chat back, its field given the keys: it waits past the right edge of
+    /// the display, then slides in.
+    fn show_chat(&mut self) {
+        let Some(quick) = self.quick.clone() else { return };
+        if self.chat_open {
+            quick.request_keys();
+            return;
+        }
+        self.chat_open = true;
+        let screen = self.window_screen();
+        Host::place_chat(&quick, screen);
+        self.reveal(screen);
+        quick.request_keys();
+        // On screen first, then the slide (one started while hidden would play out unseen).
+        let Some(handle) = self.handle.clone() else { return };
+        std::thread::spawn(move || {
+            std::thread::sleep(quick_input::ARRIVAL_DELAY);
+            handle.update(|host, _| {
+                if let (true, Some(quick)) = (host.chat_open, &host.quick) {
+                    quick.update(|s, tx| {
+                        s.open_chat();
+                        tx.animated();
+                    });
+                }
+            });
+        });
+    }
+
+    /// Esc or the close button: the chat slides out past the right edge (the window hides after,
+    /// unless the input is up). The conversation stays for next time.
+    pub fn hide_chat(&mut self) {
+        let Some(quick) = &self.quick else { return };
+        if !std::mem::replace(&mut self.chat_open, false) {
+            return;
+        }
+        quick.update(|s, tx| {
+            s.chat.close();
+            tx.animated();
+        });
+        // Its screenshot goes with it.
+        if !self.quick_open && self.capture_shown.load(Ordering::Acquire) {
+            self.dismiss_capture();
+        }
+        self.release();
+    }
+
+    /// Image `id`, pasted into `field` (PNG, and `preview` decoded to show), joins it if it's
+    /// still open.
+    pub fn pasted(&self, field: chat::Field, id: u64, png: Vec<u8>, preview: chat::Image) {
+        let Some(quick) = &self.quick else { return };
+        if !chat::paste_lands(field, self.quick_open, self.chat_open) {
+            return;
+        }
+        quick.update(move |s, tx| {
+            match field {
+                chat::Field::Input => s.pasted(id, png, preview),
+                chat::Field::Chat => s.chat.attach(id, png, preview),
+            }
+            tx.animated();
+        });
+    }
+
+    /// The input holds `n` images now.
+    pub fn set_quick_chips(&mut self, n: usize) {
+        self.quick_chips = n;
+        // A capture for it on screen leaves the input's panel, now this tall, alone.
+        if let Some(overlay) = &self.overlay {
+            overlay.update_if(move |o, _| o.input_chips(n));
+        }
+    }
+
+    /// Who a capture is for: the open input, else the open chat, else itself.
+    fn capture_target(&self) -> shot::For {
+        if self.quick_open {
+            shot::For::Input { dock: self.quick_dock, chips: self.quick_chips }
+        } else if self.chat_open {
+            let screen = self.window_screen();
+            shot::For::Chat { panel: chat::side_rect(screen.size(), chat::insets(screen.frame, screen.visible)) }
+        } else {
+            shot::For::Nothing
+        }
+    }
+
+    /// Message `id`'s captures, decoded off the main thread, join it in the chat.
+    pub fn decode_into_chat(&self, id: u64, pngs: Vec<Vec<u8>>) {
+        let Some(quick) = self.quick.clone() else { return };
+        std::thread::spawn(move || {
+            let images: Vec<chat::Image> = pngs.iter().filter_map(|png| chat::Image::from_png(png)).collect();
+            quick.update(move |s, tx| {
+                s.chat.set_images(id, images);
+                tx.animated();
+            });
+        });
     }
 
     /// Registers the quick input's fixed chord. Main thread, loop running.
@@ -251,7 +384,7 @@ impl Host {
         self.capture_shown.store(false, Ordering::Release);
         // A capture cancelled mid-drag leaves the input tucked; it comes back and takes the keys.
         self.tuck_quick_input(false);
-        if let (Some(quick), true) = (&self.quick, self.quick_open) {
+        if let (Some(quick), true) = (&self.quick, self.quick_open || self.chat_open) {
             quick.request_keys();
         }
         // Its content fades to transparent with the window still up, then the window hides and
@@ -306,9 +439,14 @@ impl Host {
         }
     }
 
+    /// Shows the active capture shortcut (None: unset) in the menu and the input's hint.
     pub fn show_capture_shortcut(&self, shortcut: Option<&rune::Shortcut>) {
         if let Some(tray) = &self.tray {
             tray.show_capture_shortcut(shortcut);
+        }
+        if let Some(quick) = &self.quick {
+            let chord = shortcut.map(|s| quick_input::chord_symbols(&s.keycaps()));
+            quick.update(move |s, _| s.set_capture_chord(chord));
         }
     }
 
@@ -325,7 +463,7 @@ impl Host {
             Action::Capture => start_capture(self, Duration::from_millis(200), Mode::Area),
             Action::CaptureWindow => start_capture(self, Duration::from_millis(200), Mode::Window),
             Action::CaptureFullScreen => start_capture(self, Duration::from_millis(200), Mode::FullScreen),
-            Action::QuickInput => self.show_quick_input(),
+            Action::QuickInput => self.show_input_or_chat(),
             Action::OpenFolder => open(&app_env::screenshots_dir()),
             Action::OpenPermissionSettings => open("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"),
             Action::ToggleLogin => {
@@ -375,7 +513,12 @@ fn host_init() -> Host {
         quick: None,
         quick_open: false,
         quick_dock: 0.0,
+        quick_chips: 0,
+        shown: None,
+        shown_count: 0,
         overlay_shown: 0,
+        chat_open: false,
+        chat_started: false,
         capture_shown: Arc::default(),
     }
 }
@@ -388,19 +531,12 @@ pub(crate) fn on_shortcut(host: &mut Host, _: &mut Tx) {
     start_capture(host, Duration::ZERO, Mode::Area);
 }
 
-/// The quick input's resting place: flush with the bottom edge (the view keeps the gap, over a
-/// Dock too), so a closed or tucked panel waits out of the screen. Centred.
-fn quick_bottom() -> OverlayPlacement {
-    OverlayPlacement::Edge { edge: ScreenEdge::Bottom, margin: 0.0, align: Align::Center, inset: 0.0 }
-}
-
 /// Captures off the UI thread after `delay`, then shows the frozen display (starting in `mode`) on the display it came
-/// from. A missing Screen Recording permission shows in the menu. With the quick input open, the
-/// capture is for it: the input keeps the keys, a label follows the pointer, and picked areas
-/// attach to the input.
+/// from. A missing Screen Recording permission shows in the menu. With the quick input or the chat
+/// open, a label follows the pointer and their panel is left alone; the capture still copies
+/// and saves, and Cmd+V puts it in their field.
 fn start_capture(host: &mut Host, delay: Duration, mode: Mode) {
-    let from_input = host.quick_open;
-    let dock = host.quick_dock;
+    let target = host.capture_target();
     let Some(overlay) = host.overlay.clone() else { return };
     if host.capturing.swap(true, Ordering::AcqRel) {
         return;
@@ -421,9 +557,9 @@ fn start_capture(host: &mut Host, delay: Duration, mode: Mode) {
             Ok(shot) => match &handle {
                 Some(handle) => handle.update(move |host, _| {
                     host.overlay_shown += 1;
-                    show_capture(&overlay, &capture_shown, shot, mode, from_input, dock);
+                    show_capture(&overlay, &capture_shown, shot, mode, target);
                 }),
-                None => show_capture(&overlay, &capture_shown, shot, mode, from_input, dock),
+                None => show_capture(&overlay, &capture_shown, shot, mode, target),
             },
             Err(e) => eprintln!("Capibarapp: {e}"),
         }
@@ -431,26 +567,24 @@ fn start_capture(host: &mut Host, delay: Duration, mode: Mode) {
 }
 
 /// Puts `shot` on screen in `mode`, fading in.
-fn show_capture(overlay: &OverlayHandle<Overlay>, shown: &AtomicBool, shot: capture::Shot, mode: Mode, from_input: bool, dock: f32) {
+fn show_capture(overlay: &OverlayHandle<Overlay>, shown: &AtomicBool, shot: capture::Shot, mode: Mode, target: shot::For) {
     let display = shot.display_id;
+    let from_input = target != shot::For::Nothing;
     // Queued in this order: state, placement, reveal. They may be applied over more than one
     // event-loop turn; the update is queued before the reveal, and a reveal refreshes first.
     overlay.update(move |s, tx| {
-        s.freeze(shot, mode, from_input);
-        if from_input {
-            s.input_at_bottom(dock);
-        }
+        s.freeze(shot, mode, target);
         // Back from a fade out cut short, the content fades in again rather than jump.
         tx.animated();
     });
-    // For the input, the overlay leaves its panel's rect to it (see `Overlay::input_at`).
+    // For the input or the chat, the overlay leaves its panel's rect to it (`Overlay::input_at`).
     overlay.set_input(if from_input { OverlayInput::Regions } else { OverlayInput::All });
     overlay.set_display(DisplayTarget::Native(NativeDisplayId::MacOS(display)));
     shown.store(true, Ordering::Release);
     overlay.fade_in(shot::FADE_IN);
-    if !from_input {
-        overlay.request_keys();
-    }
+    // The capture's keys (Esc, Space, F, the tools, Enter), for the input or chat too; they go
+    // back to its field as it closes (`hide_overlay`).
+    overlay.request_keys();
 }
 
 /// Clears the "capture running" flag when dropped.
@@ -489,13 +623,15 @@ fn main() {
             Overlay::new(handle.clone()),
         );
         let quick = app.overlay(
-            OverlaySpec::new("Capibarapp quick input", quick_input::WINDOW, quick_input::view)
+            // The input and the chat in one window over the whole display (FullScreen replaces
+            // the size): the input's panel turns into the chat's wherever it is on it.
+            OverlaySpec::new("Capibarapp quick input", (0.0, 0.0), quick_input::view)
                 .options(OverlayOptions {
                     display: DisplayTarget::UnderPointer,
-                    placement: Some(quick_bottom()),
+                    placement: Some(OverlayPlacement::FullScreen),
                     // Above the capture overlay, so it stays in view over a frozen screen.
                     level: OverlayLevel::AboveOverlays,
-                    // Only the panel takes clicks; its shadow room passes them through.
+                    // Only the open panels take clicks; the rest passes them through.
                     input: OverlayInput::Regions,
                     keys: KeyPolicy::OnDemand,
                     exclude_from_capture: true,
@@ -531,7 +667,12 @@ fn main() {
             quick: Some(quick),
             quick_open: false,
             quick_dock: 0.0,
+            quick_chips: 0,
+            shown: None,
+            shown_count: 0,
             overlay_shown: 0,
+            chat_open: false,
+            chat_started: false,
             capture_shown: Arc::default(),
         });
         // Runs on the main thread at the loop's first turn: the status item needs a running NSApp,
