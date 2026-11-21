@@ -9,11 +9,12 @@ use rune::{AppHandle, Color, Cx, El, Titlebar, Tx, tok};
 use crate::Host;
 use crate::chat::{self, Chat};
 
-/// Its size when it first opens (the side panel's rect replaces it), and its smallest.
-pub const SIZE: (f32, f32) = (chat::CHAT_W, 720.0);
+/// Its size, centred, once popped out (it grows to it from the side panel's rect), and its
+/// smallest.
+pub const SIZE: (f32, f32) = (1024.0, 768.0);
 pub const MIN_SIZE: (f32, f32) = (360.0, 420.0);
-/// Its background: the panel's frost, opaque.
-const BACKGROUND: Color = Color { r: 0.118, g: 0.118, b: 0.118, a: 1.0 };
+/// Its background: the panel's frost, opaque (#1E1E1E; `Color` is linear).
+const BACKGROUND: Color = Color { r: 0.013, g: 0.013, b: 0.013, a: 1.0 };
 /// An enlarged capture takes at most this much of it.
 const PREVIEW_MAX: [f32; 2] = [chat::CHAT_W, 560.0];
 
@@ -61,6 +62,12 @@ pub fn view(s: &ChatWindow, cx: &mut Cx<ChatWindow>) -> El {
     }
 }
 
+/// Just popped out, at the side panel's rect: it grows to its own size, centred.
+pub fn popped_out(_: &mut ChatWindow, tx: &mut Tx) {
+    tx.resize_window(SIZE);
+    tx.center_window();
+}
+
 /// The window closes (its close button, Cmd+W): it hides, keeping the conversation, and the
 /// Dock icon goes.
 pub fn on_close(s: &mut ChatWindow, _: &mut Tx) {
@@ -100,6 +107,11 @@ mod tests {
             assert!(keys.iter().any(|k| k == key), "{key} in {keys:?}");
         }
         assert!(!keys.iter().any(|k| k == "pop-out" || k == "close"), "no pop-out or close: it's a window");
+    }
+
+    #[test]
+    fn its_background_is_the_side_panels_frost_made_opaque() {
+        assert_eq!(BACKGROUND.hex(), "#1e1e1eff");
     }
 
     #[test]

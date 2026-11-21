@@ -172,6 +172,8 @@ impl Host {
             tx.scroll_to_bottom_instant("messages");
         });
         self.show_chat_window();
+        // Opened at the panel's rect, it grows to its own size, centred.
+        ui.update(chat_window::popped_out);
     }
 
     /// Opens the chat's window in front, with a Dock icon (an accessory app's window is hard
