@@ -10,6 +10,7 @@
 mod app_env;
 mod capture;
 mod chat;
+mod chat_window;
 mod export;
 mod login;
 mod marks;
@@ -40,6 +41,8 @@ use crate::quick_input::QuickInput;
 use crate::shot::{Mode, Overlay};
 use crate::settings::{CaptureShortcut, Settings};
 use crate::settings_ui::SettingsUi;
+use crate::chat::Chat;
+use crate::chat_window::ChatWindow;
 use crate::tray::{Action, Tray};
 
 /// The windowless host app: owns the overlay and the menu-bar icon; the global shortcut and the
@@ -80,12 +83,22 @@ pub struct Host {
     /// The capture overlay is on screen (set by the capture thread as it shows it, cleared on
     /// hide): it takes the keys, which mustn't close the quick input.
     capture_shown: Arc<AtomicBool>,
+    /// The chat's own window, and its state; `windowed` while the chat is in it (popped out,
+    /// until docked back), open or closed.
+    chat_window: Option<WindowHandle>,
+    chat_ui: Option<AppHandle<ChatWindow>>,
+    windowed: bool,
+    /// The chat is on its way between the side panel and its window: what's for it waits here.
+    moving: Option<Vec<ChatUpdate>>,
 }
+
+/// Something for the chat, wherever it is.
+type ChatUpdate = Box<dyn FnOnce(&mut Chat, &mut Tx) + Send>;
 
 impl Host {
     /// The input's shortcut: a started chat comes back (or goes) instead of a new input.
     pub fn toggle_quick_input(&mut self) {
-        match chat::toggle(self.quick_open, self.chat_started, self.chat_open) {
+        match chat::toggle(self.quick_open, self.chat_started, self.chat_open, self.windowed) {
             chat::Toggle::ShowInput => self.show_quick_input(),
             chat::Toggle::HideInput => self.hide_quick_input(),
             chat::Toggle::ShowChat => self.show_chat(),
@@ -95,12 +108,150 @@ impl Host {
 
     /// The menu's item: the started chat, else the input.
     fn show_input_or_chat(&mut self) {
-        if self.chat_started { self.show_chat() } else { self.show_quick_input() }
+        if self.windowed {
+            self.show_chat_window();
+        } else if self.chat_started {
+            self.show_chat()
+        } else {
+            self.show_quick_input()
+        }
     }
 
-    /// Cmd+N in the chat: it slides out past the right edge, over, and a new input rises.
+    /// `f` on the chat: in its window, or in the side panel's (the input's) window, or, while
+    /// it moves between them, once it's arrived.
+    fn with_chat(&mut self, f: impl FnOnce(&mut Chat, &mut Tx) + Send + 'static) {
+        if let Some(waiting) = &mut self.moving {
+            waiting.push(Box::new(f));
+        } else if self.windowed {
+            if let Some(ui) = &self.chat_ui {
+                ui.update(move |w, tx| f(&mut w.chat, tx));
+            }
+        } else if let Some(quick) = &self.quick {
+            quick.update(move |s, tx| f(&mut s.chat, tx));
+        }
+    }
+
+    /// The side panel's pop-out button: the chat moves into its own window, which opens where
+    /// the panel was; the panel goes at once.
+    pub fn pop_out(&mut self) {
+        let (Some(quick), Some(handle)) = (self.quick.clone(), self.handle.clone()) else { return };
+        if self.windowed || !self.chat_open {
+            return;
+        }
+        let screen = self.window_screen();
+        let [x, y, width, height] = chat::side_rect(screen.size(), chat::insets(screen.frame, screen.visible));
+        if let Some(window) = &self.chat_window {
+            let display = match screen.id {
+                0 => DisplayTarget::Primary,
+                id => DisplayTarget::Native(NativeDisplayId::MacOS(id)),
+            };
+            window.place(display, OverlayPlacement::Rect { x, y, width, height });
+        }
+        (self.windowed, self.chat_open, self.moving) = (true, false, Some(Vec::new()));
+        quick.update(move |s, tx| {
+            let chat = s.take_chat();
+            tx.instant();
+            handle.update(move |host, _| host.into_window(chat));
+        });
+        if self.capture_shown.load(Ordering::Acquire) {
+            self.dismiss_capture();
+        }
+        self.release();
+    }
+
+    /// The chat, out of the side panel, goes into its window, which opens.
+    fn into_window(&mut self, mut chat: Chat) {
+        let Some(ui) = &self.chat_ui else { return };
+        let waiting = self.moving.take().unwrap_or_default();
+        chat.set_windowed(true);
+        ui.update(move |w, tx| {
+            w.chat = chat;
+            for f in waiting {
+                f(&mut w.chat, tx);
+            }
+            tx.scroll_to_bottom_instant("messages");
+        });
+        self.show_chat_window();
+    }
+
+    /// Opens the chat's window in front, with a Dock icon (an accessory app's window is hard
+    /// to get back to without one).
+    fn show_chat_window(&self) {
+        if let Some(handle) = &self.handle {
+            handle.set_dock_icon(true);
+        }
+        if let Some(window) = &self.chat_window {
+            window.open();
+            window.focus();
+        }
+    }
+
+    /// Its window closed: the conversation stays in it for next time; the Dock icon goes.
+    pub fn chat_window_closed(&mut self) {
+        if let Some(handle) = &self.handle {
+            handle.set_dock_icon(false);
+        }
+    }
+
+    /// The window's dock button: the chat goes back into the side panel, which slides in.
+    pub fn dock_back(&mut self) {
+        let (Some(ui), Some(handle)) = (self.chat_ui.clone(), self.handle.clone()) else { return };
+        if !self.windowed || self.moving.is_some() {
+            return;
+        }
+        (self.windowed, self.moving) = (false, Some(Vec::new()));
+        ui.update(move |w, _| {
+            let chat = w.take_chat();
+            handle.update(move |host, _| host.into_side(chat));
+        });
+        if let Some(window) = &self.chat_window {
+            window.hide();
+        }
+        self.chat_window_closed();
+    }
+
+    /// The chat, out of its window, goes back into the side panel, which slides in.
+    fn into_side(&mut self, chat: Chat) {
+        let Some(quick) = &self.quick else { return };
+        let waiting = self.moving.take().unwrap_or_default();
+        quick.update(move |s, tx| {
+            s.put_chat(chat);
+            for f in waiting {
+                f(&mut s.chat, tx);
+            }
+        });
+        self.chat_started = true;
+        self.show_chat();
+    }
+
+    /// Sent from the input with the chat in its window: the message goes there, gets its
+    /// reply, and the window comes to the front.
+    pub fn sent_to_window(&mut self, id: u64, text: String, pngs: Vec<Vec<u8>>) {
+        self.quick_open = false;
+        self.release();
+        self.with_chat(move |c, tx| {
+            c.push(chat::Message { id, text, images: Vec::new() });
+            c.ask(id);
+            tx.scroll_to_bottom("messages");
+            tx.animated();
+        });
+        if !pngs.is_empty() {
+            self.decode_into_chat(id, pngs);
+        }
+        self.show_chat_window();
+    }
+
+    /// Cmd+N in the chat: it slides out past the right edge, over, and a new input rises. In its
+    /// window, the conversation clears there.
     pub fn new_chat(&mut self) {
         self.chat_started = false;
+        if self.windowed {
+            self.with_chat(|c, tx| {
+                c.clear();
+                tx.animated();
+            });
+            return;
+        }
         if let (Some(quick), true) = (&self.quick, std::mem::replace(&mut self.chat_open, false)) {
             quick.update(|s, tx| {
                 s.chat.start_over();
@@ -327,18 +478,21 @@ impl Host {
 
     /// Image `id`, pasted into `field` (PNG, and `preview` decoded to show), joins it if it's
     /// still open.
-    pub fn pasted(&self, field: chat::Field, id: u64, png: Vec<u8>, preview: chat::Image) {
+    pub fn pasted(&mut self, field: chat::Field, id: u64, png: Vec<u8>, preview: chat::Image) {
         let Some(quick) = &self.quick else { return };
-        if !chat::paste_lands(field, self.quick_open, self.chat_open) {
+        if !chat::paste_lands(field, self.quick_open, self.chat_open || self.windowed) {
             return;
         }
-        quick.update(move |s, tx| {
-            match field {
-                chat::Field::Input => s.pasted(id, png, preview),
-                chat::Field::Chat => s.chat.attach(id, png, preview),
-            }
-            tx.animated();
-        });
+        match field {
+            chat::Field::Input => quick.update(move |s, tx| {
+                s.pasted(id, png, preview);
+                tx.animated();
+            }),
+            chat::Field::Chat => self.with_chat(move |c, tx| {
+                c.attach(id, png, preview);
+                tx.animated();
+            }),
+        }
     }
 
     /// The input holds `n` images now.
@@ -365,13 +519,15 @@ impl Host {
     /// Streams a reply (`token`) into the chat off the main thread, each event after its wait.
     /// A stopped or replaced reply ignores what still comes.
     pub fn stream_reply(&self, token: u64, script: mock_model::Script) {
-        let Some(quick) = self.quick.clone() else { return };
+        let Some(handle) = self.handle.clone() else { return };
         std::thread::spawn(move || {
             for (wait, event) in script {
                 std::thread::sleep(wait);
-                quick.update(move |s, tx| {
-                    s.chat.reply_event(token, event, std::time::Instant::now());
-                    tx.animated();
+                handle.update(move |host, _| {
+                    host.with_chat(move |c, tx| {
+                        c.reply_event(token, event, std::time::Instant::now());
+                        tx.animated();
+                    })
                 });
             }
         });
@@ -379,12 +535,14 @@ impl Host {
 
     /// Message `id`'s captures, decoded off the main thread, join it in the chat.
     pub fn decode_into_chat(&self, id: u64, pngs: Vec<Vec<u8>>) {
-        let Some(quick) = self.quick.clone() else { return };
+        let Some(handle) = self.handle.clone() else { return };
         std::thread::spawn(move || {
             let images: Vec<chat::Image> = pngs.iter().filter_map(|png| chat::Image::from_png(png)).collect();
-            quick.update(move |s, tx| {
-                s.chat.set_images(id, images);
-                tx.animated();
+            handle.update(move |host, _| {
+                host.with_chat(move |c, tx| {
+                    c.set_images(id, images);
+                    tx.animated();
+                })
             });
         });
     }
@@ -538,6 +696,10 @@ fn host_init() -> Host {
         chat_open: false,
         chat_started: false,
         capture_shown: Arc::default(),
+        chat_window: None,
+        chat_ui: None,
+        windowed: false,
+        moving: None,
     }
 }
 
@@ -671,6 +833,25 @@ fn main() {
                 .state(ui)
                 .options(hidden),
         );
+        // The chat's own window, hidden until the chat pops out into it; closing it keeps it
+        // (and the conversation) for next time.
+        let chat_options = WindowOptions {
+            visible: false,
+            resizable: true,
+            min_size: Some(chat_window::MIN_SIZE),
+            ..Default::default()
+        };
+        let (chat_ui, chat_window) = app.window(
+            WindowSpec::from_app(
+                "chat",
+                App::new(AppSpec::new("Chat", chat_window::SIZE, ChatWindow::placeholder, chat_window::view))
+                    .titlebar(chat_window::titlebar())
+                    .on_close(chat_window::on_close)
+                    .keep_running(),
+            )
+            .state(ChatWindow::new(Some(handle.clone())))
+            .options(chat_options),
+        );
         let own = handle.clone();
         let app = app.init(move || Host {
             overlay: Some(overlay),
@@ -692,6 +873,10 @@ fn main() {
             chat_open: false,
             chat_started: false,
             capture_shown: Arc::default(),
+            chat_window: Some(chat_window),
+            chat_ui: Some(chat_ui),
+            windowed: false,
+            moving: None,
         });
         // Runs on the main thread at the loop's first turn: the status item needs a running NSApp,
         // and runtime shortcut registration needs the host started.
