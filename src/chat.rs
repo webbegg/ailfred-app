@@ -309,11 +309,14 @@ pub struct Chat {
     next_token: u64,
     /// A text field for a question gone meanwhile.
     scratch: TextEdit,
+    /// The user scrolled back from the latest: what comes keeps their place, and a button
+    /// takes them back down.
+    away: bool,
 }
 
 impl Chat {
     pub fn new(host: Option<AppHandle<Host>>) -> Self {
-        Chat { messages: Vec::new(), draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0, replies: Vec::new(), next_token: 0, scratch: TextEdit::new("") }
+        Chat { messages: Vec::new(), draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0, replies: Vec::new(), next_token: 0, scratch: TextEdit::new(""), away: false }
     }
 
     pub fn is_open(&self) -> bool {
@@ -654,6 +657,31 @@ fn send_button<S: 'static>(ready: bool, streaming: bool, t: &tok::Theme, lens: f
 
 /// Enter or the send button: the draft and its captures join the conversation; the captures
 /// are decoded off the main thread and show when ready.
+/// Over the thread's bottom while the user is scrolled back: back to the latest.
+fn to_latest<S: 'static>(t: &tok::Theme) -> El {
+    let button = el()
+        .key("to-latest")
+        .size(32.0, 32.0)
+        .radius(16.0)
+        .center()
+        .fill(Color { r: 0.16, g: 0.16, b: 0.16, a: 0.96 })
+        .border(1.0, Color::WHITE.alpha(0.14))
+        .shadow(4.0, 12.0, Color::BLACK.alpha(0.35))
+        .hover(Color::WHITE.alpha(0.08))
+        .press(Color::BLACK.alpha(0.12))
+        .press_scale(0.94)
+        .cursor(Cursor::Pointer)
+        .label("Jump to latest")
+        .child(icon(&glyphs::CHEVRON_DOWN, 14.0).color(t.text))
+        .on_press_tx(move |_: &mut S, tx: &mut Tx| tx.scroll_to_bottom("messages"));
+    row()
+        .key("to-latest-row")
+        .pin(Some(0.0), None, Some(0.0), Some(10.0))
+        .justify_center()
+        .transition(Transition::opacity().combined(Transition::scale(0.85)))
+        .child(button)
+}
+
 fn send(s: &mut Chat, tx: &mut Tx) {
     let Some((id, pngs)) = s.send() else { return };
     s.ask(id);
@@ -726,9 +754,15 @@ pub fn panel<S: 'static>(s: &Chat, key: &str, lens: fn(&mut S) -> &mut Chat, inp
         .grow(1.0)
         .shrink()
         .min_h(0.0)
+        // Follows what comes while at the bottom; scrolled back, it stays put.
         .scroll(ScrollSpec { stick_bottom: true })
         .scroll_edge_fade(16.0)
+        .on_at_bottom(move |s: &mut S, at: bool| lens(s).away = !at)
         .child(thread);
+    let mut messages = col().key("thread-frame").w_full().grow(1.0).shrink().min_h(0.0).child(messages);
+    if s.away {
+        messages = messages.child(to_latest::<S>(&t));
+    }
     let field = text_input(&s.draft, TextStyle::new(14.0, 400.0).lh(20.0))
         .key("draft")
         .w_full()

@@ -476,6 +476,7 @@ mod tests {
     use super::*;
     use crate::chat::{self, Insets};
     use crate::mock_model;
+    use crate::reply::Event;
 
     struct W {
         chat: Chat,
@@ -523,6 +524,83 @@ mod tests {
             assert!(keys.iter().any(|k| k == key), "{key} in {keys:?}");
         }
         assert!(!keys.iter().any(|k| k == "stop"), "finished: Send again, not Stop");
+    }
+
+    fn settle(rt: &mut Runtime<W>, frames: usize) {
+        for _ in 0..frames {
+            rt.frame(1.0 / 60.0);
+        }
+    }
+
+    fn has(rt: &Runtime<W>, key: &str) -> bool {
+        keys(rt).iter().any(|k| k == key)
+    }
+
+    /// A long conversation, landed at its bottom; the thread's centre.
+    fn long_chat() -> (Runtime<W>, (f32, f32)) {
+        let mut chat = Chat::new(None);
+        chat.place(Insets::default(), [1440.0, 900.0]);
+        chat.open();
+        let mut rt = Runtime::new(W { chat }, window, (1440.0, 900.0), Env::new(true, 2.0));
+        for k in 0..6 {
+            rt.update(|s, _| {
+                let id = chat::tests::sent(&mut s.chat, &format!("code {k}"));
+                let token = s.chat.ask(id).unwrap();
+                for (_, event) in mock_model::script("code") {
+                    s.chat.reply_event(token, event, Instant::now());
+                }
+            });
+            settle(&mut rt, 20);
+        }
+        settle(&mut rt, 60);
+        let m = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("messages")).unwrap();
+        (rt, (m.rect[0] + m.rect[2] / 2.0, m.rect[1] + m.rect[3] / 2.0))
+    }
+
+    #[test]
+    fn the_thread_scrolls_back_and_new_content_keeps_the_place_with_a_way_back_to_the_latest() {
+        let (mut rt, (x, y)) = long_chat();
+        assert_eq!(rt.scroll_at_bottom("messages"), Some(true), "lands on the latest");
+        assert!(!has(&rt, "to-latest"));
+        rt.wheel(x, y, 400.0);
+        settle(&mut rt, 20);
+        assert_eq!(rt.scroll_at_bottom("messages"), Some(false), "scrolled back");
+        assert!(has(&rt, "to-latest"), "a way back");
+        // A reply streams in meanwhile: the place is kept.
+        let mut token = 0;
+        rt.update(|s, _| {
+            let id = chat::tests::sent(&mut s.chat, "more");
+            token = s.chat.ask(id).unwrap();
+        });
+        for k in 0..20 {
+            rt.update(|s, _| s.chat.reply_event(token, Event::Text(format!("word {k} ")), Instant::now()));
+            settle(&mut rt, 3);
+        }
+        assert_eq!(rt.scroll_at_bottom("messages"), Some(false), "kept its place");
+        let b = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("to-latest")).expect("still offered");
+        let (bx, by) = (b.rect[0] + b.rect[2] / 2.0, b.rect[1] + b.rect[3] / 2.0);
+        rt.pointer_down(bx, by);
+        rt.pointer_up(bx, by);
+        settle(&mut rt, 90);
+        assert_eq!(rt.scroll_at_bottom("messages"), Some(true), "back at the latest");
+        assert!(!has(&rt, "to-latest"));
+    }
+
+    #[test]
+    fn at_the_latest_it_follows_a_streaming_reply_and_offers_no_way_back() {
+        let (mut rt, _) = long_chat();
+        let mut token = 0;
+        rt.update(|s, _| {
+            let id = chat::tests::sent(&mut s.chat, "more");
+            token = s.chat.ask(id).unwrap();
+        });
+        for k in 0..40 {
+            rt.update(|s, _| s.chat.reply_event(token, Event::Text(format!("word {k} ")), Instant::now()));
+            settle(&mut rt, 2);
+            assert!(!has(&rt, "to-latest"), "frame {k}: following, no button");
+        }
+        settle(&mut rt, 60);
+        assert_eq!(rt.scroll_at_bottom("messages"), Some(true));
     }
 
     #[test]
