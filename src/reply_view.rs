@@ -587,6 +587,42 @@ mod tests {
     }
 
     #[test]
+    fn in_the_quick_window_the_wheel_scrolls_the_chat_back() {
+        use crate::quick_input::{self, QuickInput};
+        let mut q = QuickInput::new(None);
+        q.chat.place(Insets::default(), [1440.0, 900.0]);
+        q.open_chat();
+        let mut rt = Runtime::new(q, quick_input::view, (1440.0, 900.0), Env::new(true, 2.0));
+        for k in 0..6 {
+            rt.update(|s, _| {
+                let id = chat::tests::sent(&mut s.chat, &format!("code {k}"));
+                let token = s.chat.ask(id).unwrap();
+                for (_, event) in mock_model::script("code") {
+                    s.chat.reply_event(token, event, Instant::now());
+                }
+            });
+            for _ in 0..20 {
+                rt.frame(1.0 / 60.0);
+            }
+        }
+        for _ in 0..60 {
+            rt.frame(1.0 / 60.0);
+        }
+        let m = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("messages")).unwrap();
+        let (x, y) = (m.rect[0] + m.rect[2] / 2.0, m.rect[1] + m.rect[3] / 2.0);
+        assert_eq!(rt.scroll_at_bottom("messages"), Some(true));
+        rt.pointer_move(x, y);
+        // A mouse wheel's notches, as winit hands them over (lines, imprecise, no phase).
+        for _ in 0..4 {
+            rt.wheel_event(rune::WheelEvent::new(0.0, 3.0 * 40.0).at(x, y).phase(rune::GesturePhase::Moved).precise(false));
+            for _ in 0..5 {
+                rt.frame(1.0 / 60.0);
+            }
+        }
+        assert_eq!(rt.scroll_at_bottom("messages"), Some(false), "the wheel at {x},{y} in {:?}", m.rect);
+    }
+
+    #[test]
     fn at_the_latest_it_follows_a_streaming_reply_and_offers_no_way_back() {
         let (mut rt, _) = long_chat();
         let mut token = 0;
