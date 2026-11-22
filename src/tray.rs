@@ -119,7 +119,7 @@ impl Tray {
         .map_err(|e| e.to_string())?;
 
         let icon = TrayIconBuilder::new()
-            .with_icon_templated(icon()?)
+            .with_icon_templated(icon(false)?)
             .with_tooltip("Ailfred")
             .with_menu(Box::new(menu.clone()))
             .build()
@@ -172,6 +172,14 @@ impl Tray {
         }
     }
 
+    /// The dot on the icon on or off: a reply waits to be seen.
+    pub fn set_marked(&self, marked: bool) {
+        let done = icon(marked).and_then(|icon| self._icon.set_icon_templated(Some(icon)).map_err(|e| e.to_string()));
+        if let Err(e) = done {
+            eprintln!("Ailfred: marking the menu-bar icon failed: {e}");
+        }
+    }
+
     pub fn set_login(&self, enabled: bool) {
         self.login.set_checked(enabled);
     }
@@ -203,14 +211,35 @@ impl Tray {
 /// 22 pt), so it shows at 22 pt.
 const SIZE: usize = 36;
 
-/// A template icon: the app's mark, black with alpha; macOS tints it.
-fn icon() -> Result<Icon, String> {
-    Icon::from_rgba(icon_rgba(), SIZE as u32, SIZE as u32).map_err(|e| e.to_string())
+/// The dot of a reply waiting to be seen: its centre and radius, in pixels, at the top right.
+const DOT: [f32; 3] = [SIZE as f32 - 7.0, 7.0, 5.0];
+/// The clear ring between the dot and the mark, in pixels.
+const DOT_GAP: f32 = 2.0;
+
+/// A template icon: the app's mark, black with alpha; macOS tints it. `marked`: with the dot.
+fn icon(marked: bool) -> Result<Icon, String> {
+    Icon::from_rgba(icon_rgba(marked), SIZE as u32, SIZE as u32).map_err(|e| e.to_string())
 }
 
 /// The icon's pixels, RGBA.
-fn icon_rgba() -> Vec<u8> {
-    rune::text::icon_coverage(&crate::app_icon::MENU_BAR_MARK, SIZE as u32).into_iter().flat_map(|a| [0, 0, 0, a]).collect()
+fn icon_rgba(marked: bool) -> Vec<u8> {
+    let coverage = rune::text::icon_coverage(&crate::app_icon::MENU_BAR_MARK, SIZE as u32);
+    let [cx, cy, r] = DOT;
+    let mut rgba = Vec::with_capacity(SIZE * SIZE * 4);
+    for (at, a) in coverage.into_iter().enumerate() {
+        let a = if marked {
+            let (x, y) = ((at % SIZE) as f32 + 0.5, (at / SIZE) as f32 + 0.5);
+            let d = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
+            // Antialiased by half a pixel each side: the dot, and the ring cut out of the mark.
+            let dot = (r + 0.5 - d).clamp(0.0, 1.0);
+            let kept = (d - (r + DOT_GAP) + 0.5).clamp(0.0, 1.0);
+            ((f32::from(a) * kept).max(dot * 255.0)).round() as u8
+        } else {
+            a
+        };
+        rgba.extend([0, 0, 0, a]);
+    }
+    rgba
 }
 
 #[cfg(test)]
@@ -229,7 +258,7 @@ mod tests {
 
     #[test]
     fn the_menu_bar_icon_is_the_apps_mark() {
-        let rgba = icon_rgba();
+        let rgba = icon_rgba(false);
         let want = rune::text::icon_coverage(&crate::app_icon::MENU_BAR_MARK, SIZE as u32);
         let whole = rune::text::icon_coverage(&crate::app_icon::MARK, SIZE as u32);
         let ink = |c: &[u8]| c.iter().map(|&a| u32::from(a)).sum::<u32>();
@@ -244,7 +273,7 @@ mod tests {
 
     #[test]
     fn the_menu_bar_mark_keeps_a_margin_like_the_other_menu_bar_icons() {
-        let rgba = icon_rgba();
+        let rgba = icon_rgba(false);
         let edge = 4;
         for y in 0..SIZE {
             for x in 0..SIZE {
@@ -254,5 +283,59 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Writes both icons, 8x, black on white, to look at: `cargo test --offline menu_bar_icons_to_look_at -- --ignored`.
+    #[test]
+    #[ignore]
+    fn menu_bar_icons_to_look_at() {
+        const ZOOM: usize = 8;
+        let side = SIZE * ZOOM;
+        let mut out = vec![255u8; side * 2 * side * 4];
+        for (i, rgba) in [icon_rgba(false), icon_rgba(true)].iter().enumerate() {
+            for y in 0..side {
+                for x in 0..side {
+                    let v = 255 - rgba[((y / ZOOM) * SIZE + x / ZOOM) * 4 + 3];
+                    let at = (y * side * 2 + i * side + x) * 4;
+                    out[at..at + 3].copy_from_slice(&[v, v, v]);
+                }
+            }
+        }
+        let png = crate::export::encode_png((side * 2) as u32, side as u32, 1.0, &out).unwrap();
+        let path = std::env::temp_dir().join("ailfred-menu-bar-icons.png");
+        std::fs::write(&path, png).unwrap();
+        eprintln!("wrote {}", path.display());
+    }
+
+    /// A pixel's distance from the dot's centre.
+    fn from_dot(x: usize, y: usize) -> f32 {
+        let [cx, cy, _] = DOT;
+        ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt()
+    }
+
+    #[test]
+    fn a_reply_waiting_puts_a_dot_at_the_top_right_with_a_clear_ring_around_it() {
+        let (plain, marked) = (icon_rgba(false), icon_rgba(true));
+        assert_eq!(marked.len(), plain.len());
+        assert!(marked.as_chunks::<4>().0.iter().all(|p| p[..3] == [0, 0, 0]), "still a template icon");
+        let alpha = |rgba: &[u8], x: usize, y: usize| rgba[(y * SIZE + x) * 4 + 3];
+        let [cx, cy, r] = DOT;
+        let (cx, cy) = (cx as usize, cy as usize);
+        assert_eq!(alpha(&marked, cx, cy), 255, "the dot is solid");
+        assert!(cx + (r as usize) < SIZE && cy >= r as usize, "the dot fits inside the icon");
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let d = from_dot(x, y);
+                if d < r - 1.0 {
+                    assert_eq!(alpha(&marked, x, y), 255, "inside the dot at ({x}, {y})");
+                } else if d > r + 1.0 && d < r + DOT_GAP - 0.5 {
+                    assert_eq!(alpha(&marked, x, y), 0, "the ring is clear at ({x}, {y})");
+                } else if d > r + DOT_GAP + 1.0 {
+                    assert_eq!(alpha(&marked, x, y), alpha(&plain, x, y), "the mark as it was at ({x}, {y})");
+                }
+            }
+        }
+        let ink = |rgba: &[u8]| rgba.as_chunks::<4>().0.iter().map(|p| u32::from(p[3])).sum::<u32>();
+        assert!(ink(&marked) != ink(&plain));
     }
 }
