@@ -578,3 +578,16 @@ fn stopping_asking_again_retrying_and_starting_over_cancel_the_run_of_the_reply_
     c.clear();
     assert_eq!(c.cancelled.last(), Some(&fifth), "Cmd+N in its window");
 }
+
+#[test]
+fn pi_hears_the_answers_to_its_questions_claudes_are_the_mocks() {
+    // Only the mock asks questions of Claude's replies; pi asks its own and waits for them.
+    assert!(by_mock(true, crate::model::DEFAULT_MODEL, false));
+    assert!(!by_mock(true, crate::model::PI, false));
+    assert!(!by_mock(false, crate::model::PI, false));
+    assert!(by_mock(false, crate::model::PI, true), "AILFRED_MOCK_MODEL=1 mocks everything");
+    let mut c = Chat::new(None);
+    let id = sent(&mut c, "hi");
+    let request = c.request_for(id, crate::model::PI).unwrap();
+    assert!(!request.answer);
+}

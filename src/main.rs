@@ -20,6 +20,8 @@ mod marks;
 mod mock_model;
 mod model;
 mod output;
+mod pi;
+mod pi_setup;
 mod icons;
 mod keychain;
 mod quick_input;
@@ -29,9 +31,9 @@ mod screens;
 mod settings;
 mod settings_ui;
 mod shot;
+mod spawn;
 mod tray;
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -96,8 +98,10 @@ pub struct Host {
     /// Where the chat is (the side panel, or its window, open or closed, until docked back),
     /// and what waits for it while it moves.
     place: ChatPlace<ChatUpdate>,
-    /// The model calls running, by their reply's token: Stop ends the process behind one.
-    runs: HashMap<u64, model::Run>,
+    /// Claude, and Ailfred's pi once it's been picked: whichever the setting names writes the
+    /// next reply; Stop ends the one going.
+    claude: model::Claude,
+    pi: Option<pi_setup::Pi>,
     /// The thread that saves conversations (None only in the placeholder host).
     writer: Option<history::Writer>,
     /// The most recent conversations, as the menu lists them.
@@ -615,8 +619,31 @@ impl Host {
     /// reply ignores what still comes.
     pub fn ask_model(&mut self, token: u64, request: model::Request) {
         let Some(handle) = self.handle.clone() else { return };
-        let run = model::start(request, move |item| handle.update(move |host, _| host.model_said(token, item)));
-        self.runs.insert(token, run);
+        let sink: model::Sink = Arc::new(move |item| handle.update(move |host, _| host.model_said(token, item)));
+        let is_pi = request.model == model::PI;
+        self.model(is_pi).send(request, sink);
+    }
+
+    /// pi (started the first time it's asked for, and again after it failed to) or Claude.
+    fn model(&mut self, pi: bool) -> &mut dyn model::Model {
+        if !pi {
+            return &mut self.claude;
+        }
+        if self.pi.as_ref().is_some_and(pi_setup::Pi::failed) {
+            self.pi = None;
+        }
+        self.pi.get_or_insert_with(|| {
+            let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+            let data = home.join("Library/Application Support").join(settings::APP_ID).join("pi");
+            pi_setup::Pi::start(pi_setup::pi_binary(&home), data, home)
+        })
+    }
+
+    /// Cmd+N: pi starts a new session (Claude is told the history each time).
+    pub fn new_conversation(&mut self) {
+        if let Some(pi) = &mut self.pi {
+            model::Model::new_conversation(pi);
+        }
     }
 
     /// What the model's run for `token` reported.
@@ -624,9 +651,8 @@ impl Host {
         match item {
             model::Item::Session(session) => self.with_chat(move |c, _| c.set_session(token, session)),
             model::Item::Event(event) => {
-                // Over: nothing left to cancel.
                 if matches!(event, reply::Event::Done | reply::Event::Fail(_)) {
-                    self.runs.remove(&token);
+                    self.claude.finished();
                 }
                 self.with_chat(move |c, tx| {
                     c.reply_event(token, event, std::time::Instant::now());
@@ -636,12 +662,12 @@ impl Host {
         }
     }
 
-    /// Stop, Retry, a new message or Cmd+N: ends the processes behind the replies `tokens`.
-    pub fn cancel_runs(&mut self, tokens: &[u64]) {
-        for token in tokens {
-            if let Some(run) = self.runs.remove(token) {
-                run.cancel();
-            }
+    /// Stop, Retry, a new message or Cmd+N: the reply streaming (one at a time; the chat names
+    /// it by `_tokens`) ends, with the process behind it.
+    pub fn cancel_runs(&mut self, _tokens: &[u64]) {
+        model::Model::stop(&mut self.claude);
+        if let Some(pi) = &mut self.pi {
+            model::Model::stop(pi);
         }
     }
 
@@ -903,7 +929,8 @@ fn host_init() -> Host {
         chat_window: None,
         chat_ui: None,
         place: ChatPlace::default(),
-        runs: HashMap::new(),
+        claude: model::Claude::default(),
+        pi: None,
         writer: None,
         recent: Vec::new(),
     }
@@ -1118,7 +1145,8 @@ fn main() {
             chat_window: Some(chat_window),
             chat_ui: Some(chat_ui),
             place: ChatPlace::default(),
-            runs: HashMap::new(),
+            claude: model::Claude::default(),
+            pi: None,
             writer: Some(writer),
             recent: Vec::new(),
         });

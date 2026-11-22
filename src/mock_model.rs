@@ -28,7 +28,20 @@ fn requested_from(value: Option<&str>) -> bool {
 pub fn script(prompt: &str) -> Script {
     let p = prompt.to_lowercase();
     let has = |words: &[&str]| words.iter().any(|w| p.contains(w));
+    let word = |w: &str| p.split(|c: char| !c.is_alphanumeric()).any(|x| x == w);
     let mut s = Script::new();
+    // The chat's edges: no waits, waits for Stop, 0.6 s a piece.
+    if word("burst") {
+        return script("").into_iter().map(|(_, e)| (Duration::ZERO, e)).collect();
+    }
+    if word("hang") {
+        text(&mut s, "On it, this may take a while…");
+        s.push((Duration::from_secs(24 * 3600), Event::Done));
+        return s;
+    }
+    if word("slow") {
+        return script("code").into_iter().map(|(d, e)| (d.max(ms(600)), e)).collect();
+    }
     if has(&["error", "fail"]) {
         text(&mut s, "Let me look into that. The first thing to check is ");
         s.push((ms(600), Event::Fail("The model is overloaded right now. Try again in a moment.".into())));
@@ -216,6 +229,33 @@ mod tests {
             let total: Duration = script(prompt).iter().map(|(d, _)| *d).sum();
             assert!(total > ms(300) && total < Duration::from_secs(15), "{prompt}: {total:?}");
         }
+    }
+
+    #[test]
+    fn burst_is_the_showcase_all_at_once() {
+        let burst = script("burst");
+        assert!(burst.iter().all(|(d, _)| d.is_zero()), "no waits");
+        let events: Vec<Event> = burst.into_iter().map(|(_, e)| e).collect();
+        let showcase: Vec<Event> = script("hello").into_iter().map(|(_, e)| e).collect();
+        assert_eq!(events, showcase);
+    }
+
+    #[test]
+    fn hang_starts_then_waits_for_stop() {
+        let hang = script("please hang");
+        assert!(matches!(hang.first(), Some((_, Event::Text(_)))));
+        let total: Duration = hang.iter().map(|(d, _)| *d).sum();
+        assert!(total >= Duration::from_secs(3600), "{total:?}");
+        // A word holding it ("change") is still a diff.
+        assert!(script("change it").iter().any(|(_, e)| matches!(e, Event::Diff { .. })));
+    }
+
+    #[test]
+    fn slow_streams_with_long_waits() {
+        let slow = script("go slow");
+        assert_eq!(slow.last().map(|(_, e)| e), Some(&Event::Done));
+        let pieces: Vec<Duration> = slow.iter().filter(|(_, e)| matches!(e, Event::Text(_))).map(|(d, _)| *d).collect();
+        assert!(pieces.len() > 3 && pieces.iter().all(|d| *d >= ms(500)), "{pieces:?}");
     }
 
     #[test]
