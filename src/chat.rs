@@ -213,6 +213,12 @@ pub enum Toggle {
 /// The shortcut with the input `quick_open`, a conversation `started` (not replaced by Cmd+N),
 /// shown or not (`chat_open`): an open input closes; a conversation comes back instead of a new
 /// input, or goes; otherwise the input opens.
+/// The chat's back in the side panel from its window: it slides in, or, emptied there, a
+/// fresh input rises as Cmd+N's does.
+pub fn on_dock(has_messages: bool) -> Toggle {
+    if has_messages { Toggle::ShowChat } else { Toggle::ShowInput }
+}
+
 pub fn toggle(quick_open: bool, started: bool, chat_open: bool, windowed: bool) -> Toggle {
     // The chat in its window: the shortcut is the input's, to send to it.
     let started = started && !windowed;
@@ -327,9 +333,15 @@ impl Chat {
         self.open
     }
 
+    pub fn has_messages(&self) -> bool {
+        !self.messages.is_empty()
+    }
+
     /// Into its own window (true), or back into the side panel, closed, so it slides in.
     pub fn set_windowed(&mut self, on: bool) {
         self.windowed = on;
+        // It arrives at the latest (`Host::into_window`, `QuickInput::put_chat`).
+        self.away = false;
         self.landed = true;
         self.preview = None;
         self.open = on;
@@ -557,7 +569,8 @@ impl Chat {
     }
 
     fn next_id(&self) -> u64 {
-        self.messages.last().map_or(0, |m| m.id + 1).max(LOCAL_IDS)
+        // Past every id so far: the input's (small) ones arrive after typed ones too.
+        self.messages.iter().map(|m| m.id + 1).max().unwrap_or(0).max(LOCAL_IDS)
     }
 
     /// Adds a message at the end of the conversation, the field focused for the next.
@@ -1076,6 +1089,53 @@ pub(crate) mod tests {
         c.ask(id);
         c.stop(Instant::now());
         assert!(c.field_key(&esc), "Esc closes the side panel");
+    }
+
+    #[test]
+    fn a_message_typed_after_one_from_the_input_gets_an_id_of_its_own() {
+        let mut c = Chat::new(None);
+        c.push(Message { id: 0, text: "from the input".into(), images: Vec::new() });
+        let typed = sent(&mut c, "typed");
+        c.push(Message { id: 1, text: "from the input again".into(), images: Vec::new() });
+        let again = sent(&mut c, "typed again");
+        let ids: Vec<u64> = c.messages.iter().map(|m| m.id).collect();
+        assert!(again != typed && again != 0 && again != 1, "{ids:?}");
+    }
+
+    #[test]
+    fn moved_between_the_panel_and_its_window_it_starts_at_the_latest() {
+        let mut c = Chat::new(None);
+        c.away = true;
+        c.set_windowed(true);
+        assert!(!c.away, "no stuck jump-to-latest button in the window");
+        c.away = true;
+        c.set_windowed(false);
+        assert!(!c.away, "nor back in the side panel");
+    }
+
+    #[test]
+    fn docked_back_empty_it_offers_the_input_not_an_empty_panel() {
+        assert_eq!(on_dock(true), Toggle::ShowChat);
+        assert_eq!(on_dock(false), Toggle::ShowInput, "cleared with Cmd+N in its window");
+    }
+
+    #[test]
+    fn esc_while_a_reply_streams_stops_it_and_only_the_next_closes_the_side_panel() {
+        let esc = KeyEvent { key: Key::Escape, mods: rune::Mods::default() };
+        let mut c = Chat::new(None);
+        c.open();
+        let id = sent(&mut c, "hi");
+        c.ask(id);
+        assert!(c.streaming());
+        assert!(c.field_key(&esc));
+        assert!(!c.streaming() && c.is_open(), "stopped, still open");
+        assert!(c.field_key(&esc), "the next asks the host to slide it out");
+        let mut w = Chat::new(None);
+        let id = sent(&mut w, "hi");
+        w.ask(id);
+        w.set_windowed(true);
+        assert!(w.field_key(&esc) && !w.streaming() && w.is_open(), "stopped in the window");
+        assert!(!w.field_key(&esc) && w.is_open(), "the window stays");
     }
 
     #[test]

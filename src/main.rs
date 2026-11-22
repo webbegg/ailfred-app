@@ -10,6 +10,7 @@
 mod app_env;
 mod capture;
 mod chat;
+mod chat_place;
 mod chat_window;
 mod export;
 mod login;
@@ -42,6 +43,7 @@ use crate::shot::{Mode, Overlay};
 use crate::settings::{CaptureShortcut, Settings};
 use crate::settings_ui::SettingsUi;
 use crate::chat::Chat;
+use crate::chat_place::{ChatPlace, Route, Where};
 use crate::chat_window::ChatWindow;
 use crate::tray::{Action, Tray};
 
@@ -83,13 +85,12 @@ pub struct Host {
     /// The capture overlay is on screen (set by the capture thread as it shows it, cleared on
     /// hide): it takes the keys, which mustn't close the quick input.
     capture_shown: Arc<AtomicBool>,
-    /// The chat's own window, and its state; `windowed` while the chat is in it (popped out,
-    /// until docked back), open or closed.
+    /// The chat's own window, and its state.
     chat_window: Option<WindowHandle>,
     chat_ui: Option<AppHandle<ChatWindow>>,
-    windowed: bool,
-    /// The chat is on its way between the side panel and its window: what's for it waits here.
-    moving: Option<Vec<ChatUpdate>>,
+    /// Where the chat is (the side panel, or its window, open or closed, until docked back),
+    /// and what waits for it while it moves.
+    place: ChatPlace<ChatUpdate>,
 }
 
 /// Something for the chat, wherever it is.
@@ -98,7 +99,7 @@ type ChatUpdate = Box<dyn FnOnce(&mut Chat, &mut Tx) + Send>;
 impl Host {
     /// The input's shortcut: a started chat comes back (or goes) instead of a new input.
     pub fn toggle_quick_input(&mut self) {
-        match chat::toggle(self.quick_open, self.chat_started, self.chat_open, self.windowed) {
+        match chat::toggle(self.quick_open, self.chat_started, self.chat_open, self.place.windowed()) {
             chat::Toggle::ShowInput => self.show_quick_input(),
             chat::Toggle::HideInput => self.hide_quick_input(),
             chat::Toggle::ShowChat => self.show_chat(),
@@ -108,7 +109,7 @@ impl Host {
 
     /// The menu's item: the started chat, else the input.
     fn show_input_or_chat(&mut self) {
-        if self.windowed {
+        if self.place.windowed() {
             self.show_chat_window();
         } else if self.chat_started {
             self.show_chat()
@@ -120,14 +121,18 @@ impl Host {
     /// `f` on the chat: in its window, or in the side panel's (the input's) window, or, while
     /// it moves between them, once it's arrived.
     fn with_chat(&mut self, f: impl FnOnce(&mut Chat, &mut Tx) + Send + 'static) {
-        if let Some(waiting) = &mut self.moving {
-            waiting.push(Box::new(f));
-        } else if self.windowed {
-            if let Some(ui) = &self.chat_ui {
-                ui.update(move |w, tx| f(&mut w.chat, tx));
+        match self.place.route(Box::new(f)) {
+            Route::Held => {}
+            Route::Window(f) => {
+                if let Some(ui) = &self.chat_ui {
+                    ui.update(move |w, tx| f(&mut w.chat, tx));
+                }
             }
-        } else if let Some(quick) = &self.quick {
-            quick.update(move |s, tx| f(&mut s.chat, tx));
+            Route::Side(f) => {
+                if let Some(quick) = &self.quick {
+                    quick.update(move |s, tx| f(&mut s.chat, tx));
+                }
+            }
         }
     }
 
@@ -135,7 +140,7 @@ impl Host {
     /// the panel was; the panel goes at once.
     pub fn pop_out(&mut self) {
         let (Some(quick), Some(handle)) = (self.quick.clone(), self.handle.clone()) else { return };
-        if self.windowed || !self.chat_open {
+        if self.chat_ui.is_none() || !self.chat_open || !self.place.start(Where::Window) {
             return;
         }
         let screen = self.window_screen();
@@ -147,7 +152,7 @@ impl Host {
             };
             window.place(display, OverlayPlacement::Rect { x, y, width, height });
         }
-        (self.windowed, self.chat_open, self.moving) = (true, false, Some(Vec::new()));
+        self.chat_open = false;
         quick.update(move |s, tx| {
             let chat = s.take_chat();
             tx.instant();
@@ -161,8 +166,21 @@ impl Host {
 
     /// The chat, out of the side panel, goes into its window, which opens.
     fn into_window(&mut self, mut chat: Chat) {
-        let Some(ui) = &self.chat_ui else { return };
-        let waiting = self.moving.take().unwrap_or_default();
+        let Some(ui) = self.chat_ui.clone() else {
+            // No window to take it: it stays in the side panel, with what came meanwhile.
+            let waiting = self.place.stayed();
+            if let Some(quick) = &self.quick {
+                quick.update(move |s, tx| {
+                    s.put_chat(chat);
+                    for f in waiting {
+                        f(&mut s.chat, tx);
+                    }
+                });
+            }
+            self.show_chat();
+            return;
+        };
+        let waiting = self.place.arrived();
         chat.set_windowed(true);
         ui.update(move |w, tx| {
             w.chat = chat;
@@ -198,10 +216,9 @@ impl Host {
     /// The window's dock button: the chat goes back into the side panel, which slides in.
     pub fn dock_back(&mut self) {
         let (Some(ui), Some(handle)) = (self.chat_ui.clone(), self.handle.clone()) else { return };
-        if !self.windowed || self.moving.is_some() {
+        if self.quick.is_none() || !self.place.start(Where::Side) {
             return;
         }
-        (self.windowed, self.moving) = (false, Some(Vec::new()));
         ui.update(move |w, _| {
             let chat = w.take_chat();
             handle.update(move |host, _| host.into_side(chat));
@@ -214,20 +231,44 @@ impl Host {
 
     /// The chat, out of its window, goes back into the side panel, which slides in.
     fn into_side(&mut self, chat: Chat) {
-        let Some(quick) = &self.quick else { return };
-        let waiting = self.moving.take().unwrap_or_default();
+        let (Some(quick), Some(handle)) = (self.quick.clone(), self.handle.clone()) else {
+            // No side panel to take it: it stays in its window, with what came meanwhile.
+            let waiting = self.place.stayed();
+            if let Some(ui) = &self.chat_ui {
+                ui.update(move |w, tx| {
+                    w.chat = chat;
+                    w.chat.set_windowed(true);
+                    for f in waiting {
+                        f(&mut w.chat, tx);
+                    }
+                });
+            }
+            self.show_chat_window();
+            return;
+        };
+        let waiting = self.place.arrived();
         quick.update(move |s, tx| {
             s.put_chat(chat);
             for f in waiting {
                 f(&mut s.chat, tx);
             }
+            tx.scroll_to_bottom_instant("messages");
+            let has_messages = s.chat.has_messages();
+            handle.update(move |host, _| host.docked(has_messages));
         });
-        self.chat_started = true;
-        self.show_chat();
     }
 
-    /// Sent from the input with the chat in its window: the message goes there, gets its
-    /// reply, and the window comes to the front.
+    /// Back in the side panel: it slides in, or, emptied in its window, a fresh input rises.
+    fn docked(&mut self, has_messages: bool) {
+        self.chat_started = has_messages;
+        match chat::on_dock(has_messages) {
+            chat::Toggle::ShowChat => self.show_chat(),
+            _ => self.show_quick_input(),
+        }
+    }
+
+    /// Sent from the input with the chat in its window (or on its way to or from it): the
+    /// message goes to the chat, gets its reply, and the chat comes to the front.
     pub fn sent_to_window(&mut self, id: u64, text: String, pngs: Vec<Vec<u8>>) {
         self.quick_open = false;
         self.release();
@@ -240,14 +281,23 @@ impl Host {
         if !pngs.is_empty() {
             self.decode_into_chat(id, pngs);
         }
-        self.show_chat_window();
+        // Mid-move, its arrival shows it.
+        if self.place.moving() {
+            return;
+        }
+        if self.place.windowed() {
+            self.show_chat_window();
+        } else {
+            self.chat_started = true;
+            self.show_chat();
+        }
     }
 
     /// Cmd+N in the chat: it slides out past the right edge, over, and a new input rises. In its
     /// window, the conversation clears there.
     pub fn new_chat(&mut self) {
         self.chat_started = false;
-        if self.windowed {
+        if self.place.windowed() {
             self.with_chat(|c, tx| {
                 c.clear();
                 tx.animated();
@@ -416,6 +466,14 @@ impl Host {
     pub fn sent_from_quick_input(&mut self, id: u64, pngs: Vec<Vec<u8>>) {
         let Some(quick) = self.quick.clone() else { return };
         self.quick_open = false;
+        // Sent as the chat left for its window: the message went with it, and the window shows.
+        if self.place.windowed() {
+            self.release();
+            if !pngs.is_empty() {
+                self.decode_into_chat(id, pngs);
+            }
+            return;
+        }
         self.chat_open = true;
         self.chat_started = true;
         quick.request_keys();
@@ -482,7 +540,7 @@ impl Host {
     /// still open.
     pub fn pasted(&mut self, field: chat::Field, id: u64, png: Vec<u8>, preview: chat::Image) {
         let Some(quick) = &self.quick else { return };
-        if !chat::paste_lands(field, self.quick_open, self.chat_open || self.windowed) {
+        if !chat::paste_lands(field, self.quick_open, self.chat_open || self.place.windowed()) {
             return;
         }
         match field {
@@ -700,8 +758,7 @@ fn host_init() -> Host {
         capture_shown: Arc::default(),
         chat_window: None,
         chat_ui: None,
-        windowed: false,
-        moving: None,
+        place: ChatPlace::default(),
     }
 }
 
@@ -877,8 +934,7 @@ fn main() {
             capture_shown: Arc::default(),
             chat_window: Some(chat_window),
             chat_ui: Some(chat_ui),
-            windowed: false,
-            moving: None,
+            place: ChatPlace::default(),
         });
         // Runs on the main thread at the loop's first turn: the status item needs a running NSApp,
         // and runtime shortcut registration needs the host started.
