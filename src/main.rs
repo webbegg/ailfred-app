@@ -8,6 +8,7 @@
 //! Cmd+Shift+Space captures. Escape cancels. Cmd+Q quits.
 
 mod app_env;
+mod attention;
 mod capture;
 mod app_icon;
 mod chat;
@@ -89,6 +90,10 @@ pub struct Host {
     chat_open: bool,
     /// A conversation is going (sent to, not ended by Cmd+N): the input's shortcut shows it.
     chat_started: bool,
+    /// The chat's own window is open.
+    chat_window_open: bool,
+    /// The dot on the menu-bar icon: a reply ended while the chat was off screen.
+    attention: attention::Attention,
     /// The capture overlay is on screen (set by the capture thread as it shows it, cleared on
     /// hide): it takes the keys, which mustn't close the quick input.
     capture_shown: Arc<AtomicBool>,
@@ -214,19 +219,22 @@ impl Host {
     /// Opens the chat's window in front, with a Dock icon (an accessory app's window is hard
     /// to get back to without one). Asked on the window's own handle, so the switch to a
     /// Dock app and the window's opening apply in one turn, policy first (Rune's tested path).
-    fn show_chat_window(&self) {
+    fn show_chat_window(&mut self) {
         if let Some(ui) = &self.chat_ui {
             ui.set_dock_icon(true);
         }
         if let Some(window) = &self.chat_window {
             window.open();
             window.focus();
+            self.chat_window_open = true;
         }
+        self.chat_seen();
         app_env::log_app_type_soon("chat window opened, Dock icon on");
     }
 
     /// Its window closed: the conversation stays in it for next time; the Dock icon goes.
     pub fn chat_window_closed(&mut self) {
+        self.chat_window_open = false;
         if let Some(ui) = &self.chat_ui {
             ui.set_dock_icon(false);
         }
@@ -496,6 +504,7 @@ impl Host {
             return;
         }
         self.chat_open = true;
+        self.chat_seen();
         self.chat_started = true;
         quick.request_keys();
         let lander = quick.clone();
@@ -520,6 +529,7 @@ impl Host {
             return;
         }
         self.chat_open = true;
+        self.chat_seen();
         let screen = self.window_screen();
         Host::place_chat(&quick, screen);
         self.reveal(screen);
@@ -653,12 +663,30 @@ impl Host {
             model::Item::Event(event) => {
                 if matches!(event, reply::Event::Done | reply::Event::Fail(_)) {
                     self.claude.finished();
+                    // Moving between panel and window counts as on screen: the user just acted.
+                    let on_screen = self.chat_open || self.chat_window_open || self.place.moving();
+                    if self.attention.reply_ended(on_screen) {
+                        self.mark_tray(true);
+                    }
                 }
                 self.with_chat(move |c, tx| {
                     c.reply_event(token, event, std::time::Instant::now());
                     tx.animated();
                 });
             }
+        }
+    }
+
+    /// The chat came on screen: the menu-bar icon's dot, if any, goes.
+    fn chat_seen(&mut self) {
+        if self.attention.chat_shown() {
+            self.mark_tray(false);
+        }
+    }
+
+    fn mark_tray(&self, marked: bool) {
+        if let Some(tray) = &self.tray {
+            tray.set_marked(marked);
         }
     }
 
@@ -933,6 +961,8 @@ fn host_init() -> Host {
         pi: None,
         writer: None,
         recent: Vec::new(),
+        chat_window_open: false,
+        attention: attention::Attention::default(),
     }
 }
 
@@ -1149,6 +1179,8 @@ fn main() {
             pi: None,
             writer: Some(writer),
             recent: Vec::new(),
+            chat_window_open: false,
+            attention: attention::Attention::default(),
         });
         // Runs on the main thread at the loop's first turn: the status item needs a running NSApp,
         // and runtime shortcut registration needs the host started.
