@@ -241,9 +241,9 @@ fn icon_rgba() -> Vec<u8> {
 }
 
 /// How the icon shows a [`Status`], one look each: the mark, faded while the model starts, else
-/// with a badge in its lower right corner, cut out of it: a ring while it thinks, a ring round a
-/// dot while it works on a tool, a dot when it asks the user, a small dot when it replied
-/// unseen, a cross after a failure.
+/// with a badge at its top right, cut out of it: a ring while it thinks, a ring round a dot while
+/// it works on a tool, a diamond when it asks the user, a dot when a reply ended unseen, a cross
+/// after a failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Glyph {
     Plain,
@@ -269,26 +269,26 @@ impl Glyph {
     }
 }
 
-/// The badge's centre (x and y), in pixels: inside the icon's 4 px margin.
-const BADGE_CENTRE: f32 = 26.5;
-/// Its radius, and the gap cut out of the mark around it.
-const BADGE_R: f32 = 5.0;
-const BADGE_GAP: f32 = 2.0;
-/// Half the ring's and the cross's strokes; the small dot's and the working dot's radii.
+/// The badge (the dot of a reply waiting to be seen): its centre and radius, in pixels, at the
+/// top right.
+const DOT: [f32; 3] = [SIZE as f32 - 7.0, 7.0, 5.0];
+/// The clear ring between the badge and the mark, in pixels.
+const DOT_GAP: f32 = 2.0;
+/// Half the ring's and the cross's strokes; the working dot's radius.
 const RING_HALF: f32 = 0.9;
 const CROSS_HALF: f32 = 1.1;
-const SMALL_DOT_R: f32 = 3.0;
 const CENTRE_DOT_R: f32 = 1.6;
 
 fn glyph_rgba(glyph: Glyph) -> Vec<u8> {
     let mut alpha = rune::text::icon_coverage(&crate::app_icon::MENU_BAR_MARK, SIZE as u32);
     // How much of a pixel lies inside an edge `d` px away (positive: inside).
     let cover = |d: f32| (d + 0.5).clamp(0.0, 1.0);
+    let [cx, cy, r] = DOT;
     for (i, a) in alpha.iter_mut().enumerate() {
         let (x, y) = ((i % SIZE) as f32 + 0.5, (i / SIZE) as f32 + 0.5);
-        let (dx, dy) = (x - BADGE_CENTRE, y - BADGE_CENTRE);
+        let (dx, dy) = (x - cx, y - cy);
         let d = (dx * dx + dy * dy).sqrt();
-        let ring = cover(RING_HALF - (d - (BADGE_R - RING_HALF)).abs());
+        let ring = cover(RING_HALF - (d - (r - RING_HALF)).abs());
         let badge = match glyph {
             Glyph::Plain => continue,
             Glyph::Faded => {
@@ -297,15 +297,16 @@ fn glyph_rgba(glyph: Glyph) -> Vec<u8> {
             }
             Glyph::Thinking => ring,
             Glyph::Working => ring.max(cover(CENTRE_DOT_R - d)),
-            Glyph::Asking => cover(BADGE_R - d),
-            Glyph::Replied => cover(SMALL_DOT_R - d),
+            // Corners on the axes, within the badge's circle.
+            Glyph::Asking => cover((r - dx.abs() - dy.abs()) / std::f32::consts::SQRT_2),
+            Glyph::Replied => cover(r - d),
             Glyph::Failed => {
                 // The two diagonals, within the badge's circle.
                 let off = (dx - dy).abs().min((dx + dy).abs()) / std::f32::consts::SQRT_2;
-                cover(CROSS_HALF - off).min(cover(BADGE_R - d))
+                cover(CROSS_HALF - off).min(cover(r - d))
             }
         };
-        let cut = cover(d - BADGE_R - BADGE_GAP);
+        let cut = cover(d - r - DOT_GAP);
         *a = ((f32::from(*a) * cut).max(255.0 * badge)).round() as u8;
     }
     alpha.into_iter().flat_map(|a| [0, 0, 0, a]).collect()
@@ -344,7 +345,8 @@ mod tests {
 
     #[test]
     fn the_menu_bar_mark_keeps_a_margin_like_the_other_menu_bar_icons() {
-        for glyph in GLYPHS {
+        // The badge, like a notification's, may reach the corner.
+        for glyph in [Glyph::Plain, Glyph::Faded] {
             let rgba = glyph_rgba(glyph);
             let edge = 4;
             for y in 0..SIZE {
@@ -376,17 +378,76 @@ mod tests {
         let mark = alpha(Glyph::Plain);
         let faded = ink(&alpha(Glyph::Faded)) as f32 / ink(&mark) as f32;
         assert!((0.45..0.55).contains(&faded), "half the ink: {faded}");
-        // Each badge in the corner, alone: centre filled for a dot, empty for a ring.
+        // Each badge alone: centre filled for a dot, empty for a ring.
         let at = |a: &[u8], x: f32, y: f32| a[y as usize * SIZE + x as usize];
-        let (c, r) = (BADGE_CENTRE, BADGE_R);
+        let [cx, cy, r] = DOT;
         let [thinking, working, asking, replied, failed] = [Glyph::Thinking, Glyph::Working, Glyph::Asking, Glyph::Replied, Glyph::Failed].map(alpha);
-        assert_eq!([&thinking, &working, &asking, &replied, &failed].map(|a| at(a, c, c)), [0, 255, 255, 255, 255], "the centre");
-        assert_eq!([&thinking, &working, &asking, &replied].map(|a| at(a, c + r - 1.0, c) > 200), [true, true, true, false], "the rim");
-        assert!(at(&working, c + 2.0, c) < 60, "a ring round a dot");
-        assert!(at(&failed, c + 2.5, c) < 60 && at(&failed, c + 2.0, c + 2.0) > 200, "a cross, not a dot");
+        assert_eq!([&thinking, &working, &asking, &replied, &failed].map(|a| at(a, cx, cy)), [0, 255, 255, 255, 255], "the centre");
+        assert_eq!([&thinking, &working, &replied].map(|a| at(a, cx + r - 1.0, cy) > 200), [true, true, true], "the rim");
+        assert!(at(&working, cx + 2.0, cy) < 60, "a ring round a dot");
+        assert!(at(&asking, cx + 3.0, cy + 2.0) < 60 && at(&replied, cx + 3.0, cy + 2.0) > 200, "a diamond, not a dot");
+        assert!(at(&failed, cx + 2.5, cy) < 60 && at(&failed, cx + 2.0, cy + 2.0) > 200, "a cross, not a dot");
         for a in [&thinking, &working, &asking, &replied, &failed] {
-            assert_eq!(at(a, c - r - BADGE_GAP + 0.6, c), 0, "the gap around the badge");
+            // A pixel about r + gap/2 from the centre.
+            assert_eq!(at(a, cx - r - DOT_GAP / 4.0, cy + DOT_GAP), 0, "the gap around the badge");
         }
-        assert_eq!(&thinking[..SIZE * 18], &mark[..SIZE * 18], "the mark's top half stays");
+        let bottom = SIZE * 18;
+        assert_eq!(&thinking[bottom..], &mark[bottom..], "the mark's bottom half stays");
+    }
+
+    /// Writes every glyph, 8x, black on white, to look at: `cargo test --offline menu_bar_icons_to_look_at -- --ignored`.
+    #[test]
+    #[ignore]
+    fn menu_bar_icons_to_look_at() {
+        const ZOOM: usize = 8;
+        let side = SIZE * ZOOM;
+        let n = GLYPHS.len();
+        let mut out = vec![255u8; side * n * side * 4];
+        for (i, glyph) in GLYPHS.iter().enumerate() {
+            let rgba = glyph_rgba(*glyph);
+            for y in 0..side {
+                for x in 0..side {
+                    let v = 255 - rgba[((y / ZOOM) * SIZE + x / ZOOM) * 4 + 3];
+                    let at = (y * side * n + i * side + x) * 4;
+                    out[at..at + 3].copy_from_slice(&[v, v, v]);
+                }
+            }
+        }
+        let png = crate::export::encode_png((side * n) as u32, side as u32, 1.0, &out).unwrap();
+        let path = std::env::temp_dir().join("ailfred-menu-bar-icons.png");
+        std::fs::write(&path, png).unwrap();
+        eprintln!("wrote {}", path.display());
+    }
+
+    /// A pixel's distance from the dot's centre.
+    fn from_dot(x: usize, y: usize) -> f32 {
+        let [cx, cy, _] = DOT;
+        ((x as f32 + 0.5 - cx).powi(2) + (y as f32 + 0.5 - cy).powi(2)).sqrt()
+    }
+
+    #[test]
+    fn a_reply_waiting_puts_a_dot_at_the_top_right_with_a_clear_ring_around_it() {
+        let (plain, marked) = (glyph_rgba(Glyph::Plain), glyph_rgba(Glyph::Replied));
+        assert_eq!(marked.len(), plain.len());
+        assert!(marked.as_chunks::<4>().0.iter().all(|p| p[..3] == [0, 0, 0]), "still a template icon");
+        let alpha = |rgba: &[u8], x: usize, y: usize| rgba[(y * SIZE + x) * 4 + 3];
+        let [cx, cy, r] = DOT;
+        let (cx, cy) = (cx as usize, cy as usize);
+        assert_eq!(alpha(&marked, cx, cy), 255, "the dot is solid");
+        assert!(cx + (r as usize) < SIZE && cy >= r as usize, "the dot fits inside the icon");
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let d = from_dot(x, y);
+                if d < r - 1.0 {
+                    assert_eq!(alpha(&marked, x, y), 255, "inside the dot at ({x}, {y})");
+                } else if d > r + 1.0 && d < r + DOT_GAP - 0.5 {
+                    assert_eq!(alpha(&marked, x, y), 0, "the ring is clear at ({x}, {y})");
+                } else if d > r + DOT_GAP + 1.0 {
+                    assert_eq!(alpha(&marked, x, y), alpha(&plain, x, y), "the mark as it was at ({x}, {y})");
+                }
+            }
+        }
+        let ink = |rgba: &[u8]| rgba.as_chunks::<4>().0.iter().map(|p| u32::from(p[3])).sum::<u32>();
+        assert!(ink(&marked) != ink(&plain));
     }
 }

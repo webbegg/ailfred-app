@@ -30,7 +30,8 @@ static IGNORE_REDUCE_MOTION_NOW: AtomicBool = AtomicBool::new(true);
 /// The model as last set, read when a message is sent (any thread).
 static MODEL_NOW: RwLock<Option<String>> = RwLock::new(None);
 
-/// Tests that pick a model publish it for the whole process: they take turns.
+/// Tests that pick a model or set the (test) Keychain publish it for the whole process: they
+/// take turns.
 #[cfg(test)]
 pub(crate) static MODEL_TEST: Mutex<()> = Mutex::new(());
 

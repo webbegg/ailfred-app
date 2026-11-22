@@ -724,4 +724,68 @@ mod tests {
         rt.frame(1.0 / 60.0);
         assert!(keys(&rt).iter().any(|k| k == "retry"));
     }
+
+    /// S2g, measured: what a frame costs while a long reply streams, early on and near its end.
+    /// `cargo test --release --offline streaming_a_long_reply_frame_cost -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn streaming_a_long_reply_frame_cost() {
+        let section = |n: usize| {
+            format!(
+                "## Part {n}\n\nSome **bold** words, `code`, and a [link](https://example.com) in a paragraph that runs on for a while to fill a few lines of the panel.\n\n- one item\n- another, with *emphasis*\n  - nested\n\n```rust\nfn part_{n}() -> u32 {{\n    let x = {n};\n    x * 2\n}}\n```\n\n| a | b |\n| - | - |\n| {n} | two |\n\n"
+            )
+        };
+        let source: String = (0..120).map(section).collect();
+        let chars: Vec<char> = source.chars().collect();
+        let deltas: Vec<String> = chars.chunks(24).map(|c| c.iter().collect()).collect();
+
+        let mut chat = Chat::new(None);
+        chat.place(Insets::default(), [1440.0, 900.0]);
+        chat.open();
+        let mut rt = Runtime::new(W { chat }, window, (1440.0, 900.0), Env::new(true, 2.0));
+        let mut token = 0;
+        rt.update(|s, _| {
+            let id = chat::tests::sent(&mut s.chat, "long");
+            token = s.chat.ask(id).unwrap();
+        });
+        settle(&mut rt, 30);
+        let mut costs = Vec::with_capacity(deltas.len());
+        let mut updates = Vec::with_capacity(deltas.len());
+        for delta in deltas {
+            let started = Instant::now();
+            rt.update(|s, _| s.chat.reply_event(token, Event::Text(delta), Instant::now()));
+            updates.push(started.elapsed().as_secs_f64() * 1000.0);
+            rt.frame(1.0 / 60.0);
+            costs.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        let timed = |rt: &mut Runtime<W>| {
+            let mut v: Vec<f64> = (0..60)
+                .map(|_| {
+                    let started = Instant::now();
+                    rt.frame(1.0 / 60.0);
+                    started.elapsed().as_secs_f64() * 1000.0
+                })
+                .collect();
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        eprintln!("still streaming, no new text: median frame {:.2} ms", timed(&mut rt));
+        rt.update(|s, _| s.chat.reply_event(token, Event::Done, Instant::now()));
+        settle(&mut rt, 30);
+        eprintln!("done, idle: median frame {:.2} ms", timed(&mut rt));
+        let n = updates.len();
+        let mut late_updates = updates[n - 100..].to_vec();
+        late_updates.sort_by(f64::total_cmp);
+        eprintln!("last 100 updates alone (state + view build?): median {:.2} ms", late_updates[50]);
+        let stats = |slice: &[f64]| {
+            let mut v = slice.to_vec();
+            v.sort_by(f64::total_cmp);
+            (v[v.len() / 2], v[v.len() * 95 / 100], v[v.len() - 1])
+        };
+        let n = costs.len();
+        let (early, late) = (stats(&costs[..100]), stats(&costs[n - 100..]));
+        eprintln!("reply {} KB in {n} deltas", source.len() / 1024);
+        eprintln!("first 100 frames: median {:.2} ms, p95 {:.2} ms, max {:.2} ms", early.0, early.1, early.2);
+        eprintln!("last 100 frames:  median {:.2} ms, p95 {:.2} ms, max {:.2} ms", late.0, late.1, late.2);
+    }
 }

@@ -90,6 +90,8 @@ pub struct Host {
     chat_open: bool,
     /// A conversation is going (sent to, not ended by Cmd+N): the input's shortcut shows it.
     chat_started: bool,
+    /// The chat's own window is open.
+    chat_window_open: bool,
     /// The capture overlay is on screen (set by the capture thread as it shows it, cleared on
     /// hide): it takes the keys, which mustn't close the quick input.
     capture_shown: Arc<AtomicBool>,
@@ -107,10 +109,9 @@ pub struct Host {
     writer: Option<history::Writer>,
     /// The most recent conversations, as the menu lists them.
     recent: Vec<history::Entry>,
-    /// What Ailfred is doing, for the menu-bar icon.
+    /// What Ailfred is doing, for the menu-bar icon (its dot, too, when a reply ended while
+    /// the chat was off screen).
     status: status::Tracker,
-    /// The chat's own window is open.
-    chat_window_open: bool,
 }
 
 /// Something for the chat, wherever it is.
@@ -220,15 +221,15 @@ impl Host {
     /// to get back to without one). Asked on the window's own handle, so the switch to a
     /// Dock app and the window's opening apply in one turn, policy first (Rune's tested path).
     fn show_chat_window(&mut self) {
-        self.chat_window_open = true;
-        self.show_status();
         if let Some(ui) = &self.chat_ui {
             ui.set_dock_icon(true);
         }
         if let Some(window) = &self.chat_window {
             window.open();
             window.focus();
+            self.chat_window_open = true;
         }
+        self.show_status();
         app_env::log_app_type_soon("chat window opened, Dock icon on");
     }
 
@@ -505,6 +506,7 @@ impl Host {
             return;
         }
         self.chat_open = true;
+        self.show_status();
         self.chat_started = true;
         quick.request_keys();
         let lander = quick.clone();
@@ -634,7 +636,8 @@ impl Host {
 
     /// The menu-bar icon and its tooltip say what Ailfred is doing.
     fn show_status(&mut self) {
-        self.status.shown(self.chat_open || self.chat_window_open);
+        // Moving between panel and window counts as on screen: the user just acted.
+        self.status.shown(self.chat_open || self.chat_window_open || self.place.moving());
         if let Some(tray) = &mut self.tray {
             tray.set_status(&self.status.status());
         }
