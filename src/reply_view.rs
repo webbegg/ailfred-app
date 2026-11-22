@@ -35,8 +35,12 @@ const PULSE: Cycle = Cycle { period: 1.4, phase: 0.0, stops: &[(0.0, 0.35), (0.5
 
 type Lens<S> = fn(&mut S) -> &mut Chat;
 
-/// Reply `r` in a window whose state `S` holds the chat at `lens`.
-pub fn view<S: 'static>(r: &Reply, lens: Lens<S>) -> El {
+/// What an interrupted reply asks, when it's the conversation's last.
+pub const INTERRUPTED_ASK: &str = "I was interrupted. Continue?";
+
+/// Reply `r` in a window whose state `S` holds the chat at `lens`; `goes_on`: it offers
+/// Continue (`Chat::continuable`).
+pub fn view<S: 'static>(r: &Reply, goes_on: bool, lens: Lens<S>) -> El {
     let t = tok::theme(true);
     let token = r.token;
     let mut out = col().key(format!("reply-{token}")).w_full().gap(10.0).hover_group().transition(Transition::opacity());
@@ -60,10 +64,36 @@ pub fn view<S: 'static>(r: &Reply, lens: Lens<S>) -> El {
     if r.parts.is_empty() && r.streaming() {
         out = out.child(waiting(&t));
     }
+    if goes_on {
+        out = out.child(continue_notice(token, &t, lens));
+    }
     if !r.streaming() {
         out = out.child(footer(r, &t, lens));
     }
     out
+}
+
+/// Under the conversation's last reply, interrupted: the question and Continue.
+fn continue_notice<S: 'static>(token: u64, t: &tok::Theme, lens: Lens<S>) -> El {
+    row()
+        .key("continue-notice")
+        .w_full()
+        .gap(10.0)
+        .px(12.0)
+        .py(8.0)
+        .center_y()
+        .radius(10.0)
+        .continuous_corners()
+        .fill(CARD)
+        .border(1.0, EDGE)
+        .role("status")
+        .label(INTERRUPTED_ASK)
+        .child(text(INTERRUPTED_ASK).font(SMALL).color(t.text_secondary).wrap().grow(1.0).min_w(0.0))
+        .child(word_button::<S>("continue", "Continue", ACCENT, Color::WHITE, true, move |s: &mut S, tx: &mut Tx| {
+            if lens(s).go_on(token).is_some() {
+                tx.scroll_to_bottom("messages");
+            }
+        }))
 }
 
 /// Before anything came: three dots in turn.
@@ -448,7 +478,8 @@ fn error<S: 'static>(token: u64, message: &str, t: &tok::Theme, lens: Lens<S>) -
         }))
 }
 
-/// Under a finished reply, shown on hover: Copy and Retry; "Stopped" when the user stopped it.
+/// Under a finished reply, shown on hover: Copy and Retry; "Stopped" when the user stopped it,
+/// "Interrupted" when Ailfred quit or the model's process ended as it streamed.
 fn footer<S: 'static>(r: &Reply, t: &tok::Theme, lens: Lens<S>) -> El {
     let token = r.token;
     let copy = r.copy_text();
@@ -463,7 +494,8 @@ fn footer<S: 'static>(r: &Reply, t: &tok::Theme, lens: Lens<S>) -> El {
     }
     let mut out = row().key("footer").h(24.0).gap(8.0).center_y().ml(-4.0);
     if r.state == State::Stopped {
-        out = out.child(text("Stopped").key("stopped").font(SMALL).color(t.text_secondary).pl(4.0));
+        let (key, word) = if r.interrupted { ("interrupted", "Interrupted") } else { ("stopped", "Stopped") };
+        out = out.child(text(word).key(key).font(SMALL).color(t.text_secondary).pl(4.0));
     }
     out.child(actions)
 }
@@ -723,6 +755,23 @@ mod tests {
         });
         rt.frame(1.0 / 60.0);
         assert!(keys(&rt).iter().any(|k| k == "retry"));
+    }
+
+    #[test]
+    fn the_last_reply_interrupted_says_so_and_offers_continue() {
+        use crate::history::{Loaded, LoadedMessage, ReplyState, SavedReply};
+        let mut chat = Chat::new(None);
+        chat.place(Insets::default(), [1440.0, 900.0]);
+        chat.open();
+        let cut = |text: &str| LoadedMessage { text: text.into(), files: Vec::new(), pngs: Vec::new(), reply: Some(SavedReply { state: ReplyState::Interrupted, text: "Half".into(), ..SavedReply::default() }) };
+        chat.load(Loaded { id: "20240101-000000-0001".into(), created: 1, title: None, title_by_user: false, session: None, messages: vec![cut("one"), cut("two")], next_png: 0 });
+        let mut rt = Runtime::new(W { chat }, window, (1440.0, 900.0), Env::new(true, 2.0));
+        rt.frame(1.0 / 60.0);
+        let k = keys(&rt);
+        assert_eq!(k.iter().filter(|k| *k == "continue").count(), 1, "under the last reply only: {k:?}");
+        assert_eq!(k.iter().filter(|k| *k == "interrupted").count(), 2, "both say they were interrupted: {k:?}");
+        assert!(!k.iter().any(|k| k == "stopped"), "not 'Stopped': the user didn't stop them");
+        assert!(rt.elements().iter().any(|e| e.label.as_deref() == Some(INTERRUPTED_ASK)), "the question");
     }
 
     /// S2g, measured: what a frame costs while a long reply streams, early on and near its end.

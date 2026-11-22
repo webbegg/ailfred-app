@@ -55,6 +55,9 @@ pub const ROW_FADE: f32 = 0.12;
 /// Messages typed in the panel take ids from here; the host's (sent from the input) are below.
 const LOCAL_IDS: u64 = 1 << 32;
 
+/// The message Continue sends, under an interrupted reply.
+pub const CONTINUE: &str = "Continue where you left off.";
+
 /// What the quick input's shortcut does.
 #[derive(Debug, PartialEq)]
 pub enum Toggle {
@@ -539,6 +542,29 @@ impl Chat {
             host.update(move |host, _| host.cancel_runs(&tokens));
         }
         true
+    }
+
+    /// The reply offering "I was interrupted. Continue?": the conversation's last, interrupted
+    /// (Ailfred quit, or the model's process ended, as it streamed).
+    pub fn continuable(&self) -> Option<u64> {
+        let last = self.messages.last()?;
+        self.reply_to(last.id).filter(|r| r.interrupted && r.state == reply::State::Stopped).map(|r| r.token)
+    }
+
+    /// Continue on the interrupted reply `token`: the user's message `CONTINUE` asks the model
+    /// to go on from what it said (in the history); one that had said nothing is asked again.
+    /// The new reply's token; None unless `token` is the one offering it.
+    pub fn go_on(&mut self, token: u64) -> Option<u64> {
+        if self.continuable() != Some(token) {
+            return None;
+        }
+        let reply = self.reply_mut(token)?;
+        if reply.history_text().is_none() {
+            return self.retry(token);
+        }
+        let id = self.next_id();
+        self.push(Message::text(id, CONTINUE));
+        Some(self.start_reply(id, CONTINUE.into(), false))
     }
 
     /// Retry: the reply `token` starts over; its new token.

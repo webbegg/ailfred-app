@@ -200,7 +200,7 @@ fn a_loaded_conversation_shows_its_messages_under_fresh_ids_and_its_replies_as_t
     let stopped = c.reply_to(ids[1]).unwrap();
     assert_eq!(stopped.state, State::Stopped, "interrupted shows as stopped");
     assert_eq!(stopped.history_text().as_deref(), Some("Half an ans"));
-    assert!(stopped.parts.iter().any(|p| matches!(p, reply::Part::Error(e) if e.starts_with("Interrupted: Ailfred quit"))), "with the note");
+    assert!(stopped.interrupted, "and says it was interrupted");
     assert_eq!(c.reply_to(ids[2]).unwrap().state, State::Failed);
     assert!(c.reply_to(ids[3]).is_none());
     assert!(!c.streaming());
@@ -211,6 +211,74 @@ fn a_loaded_conversation_shows_its_messages_under_fresh_ids_and_its_replies_as_t
     let request = c.request_for(c.messages[4].id, "m").unwrap();
     let texts: Vec<&str> = request.history.iter().map(|t| t.reply.as_str()).collect();
     assert_eq!(texts, ["first", "Half an ans"]);
+}
+
+// "I was interrupted. Continue?"
+
+fn interrupted(text: &str) -> SavedReply {
+    SavedReply { state: ReplyState::Interrupted, text: text.into(), ..SavedReply::default() }
+}
+
+#[test]
+fn the_last_reply_interrupted_offers_continue_which_asks_the_model_to_go_on_from_it() {
+    let mut c = Chat::new(None);
+    c.model = Some("m".into());
+    c.load(loaded("20240101-000000-0005", vec![loaded_message("one", Some(done("first"))), loaded_message("two", Some(interrupted("Half an ans")))], None));
+    let token = c.reply_to(c.messages[1].id).unwrap().token;
+    assert_eq!(c.continuable(), Some(token));
+    let next = c.go_on(token).expect("it goes on");
+    assert_eq!(c.messages.last().map(|m| m.text.as_str()), Some(CONTINUE));
+    let asked = c.messages.last().unwrap().id;
+    let reply = c.reply_to(asked).unwrap();
+    assert_eq!((reply.token, reply.streaming()), (next, true));
+    let (_, request) = c.requests.last().expect("asked the model");
+    assert_eq!(request.text, CONTINUE);
+    let said: Vec<&str> = request.history.iter().map(|t| t.reply.as_str()).collect();
+    assert_eq!(said, ["first", "Half an ans"], "with what it said before it was interrupted");
+    assert_eq!(c.continuable(), None, "once");
+    assert_eq!(c.saved.last().unwrap().saved.messages.len(), 3, "saved with the new message");
+    assert_eq!(c.go_on(token), None);
+}
+
+#[test]
+fn an_interrupted_reply_that_had_said_nothing_is_asked_again_instead() {
+    let mut c = Chat::new(None);
+    c.model = Some("m".into());
+    c.load(loaded("20240101-000000-0006", vec![loaded_message("hello", Some(interrupted("")))], None));
+    let token = c.continuable().expect("offered");
+    let again = c.go_on(token).expect("asked again");
+    assert_eq!(c.messages.len(), 1, "no message of its own");
+    let reply = c.reply_to(c.messages[0].id).unwrap();
+    assert_eq!((reply.token, reply.streaming(), reply.interrupted), (again, true, false));
+    assert_eq!(c.requests.last().unwrap().1.text, "hello");
+}
+
+#[test]
+fn only_the_conversations_last_reply_offers_continue() {
+    let mut c = Chat::new(None);
+    c.model = Some("m".into());
+    c.load(loaded("20240101-000000-0007", vec![loaded_message("one", Some(interrupted("Half"))), loaded_message("two", Some(done("ok")))], None));
+    assert_eq!(c.continuable(), None, "one further up");
+    let older = c.reply_to(c.messages[0].id).unwrap().token;
+    assert_eq!(c.go_on(older), None);
+    let mut c = Chat::new(None);
+    c.model = Some("m".into());
+    c.load(loaded("20240101-000000-0008", vec![loaded_message("one", Some(interrupted("Half")))], None));
+    c.push(msg(c.next_id(), "something else"));
+    assert_eq!(c.continuable(), None, "a message after it");
+    let mut c = Chat::new(None);
+    c.model = Some("m".into());
+    c.load(loaded("20240101-000000-0009", vec![loaded_message("one", Some(SavedReply { state: ReplyState::Stopped, text: "Half".into(), ..SavedReply::default() }))], None));
+    assert_eq!(c.continuable(), None, "stopped by the user");
+}
+
+#[test]
+fn a_reply_whose_model_went_away_offers_continue() {
+    let mut c = Chat::new(None);
+    c.model = Some("m".into());
+    let token = exchange(&mut c, LOCAL_IDS, "hi", "Half", Event::Lost("The assistant stopped unexpectedly.".into()));
+    assert_eq!(c.continuable(), Some(token));
+    assert_eq!(reply_state(&c, 0), Some(ReplyState::Interrupted), "saved so");
 }
 
 #[test]

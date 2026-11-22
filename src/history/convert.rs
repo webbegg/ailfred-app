@@ -11,10 +11,11 @@ fn joined<'a>(texts: impl Iterator<Item = &'a str>) -> String {
 }
 
 /// What to save of `reply`: one still streaming, or queued, is written `interrupted` (if the app
-/// quits now, that's what's left of it).
+/// quits now, that's what's left of it), and so is one interrupted already.
 pub fn saved_reply(reply: &Reply) -> SavedReply {
     let state = match reply.state {
         State::Queued | State::Streaming => ReplyState::Interrupted,
+        State::Stopped if reply.interrupted => ReplyState::Interrupted,
         State::Done => ReplyState::Done,
         State::Stopped => ReplyState::Stopped,
         State::Failed => ReplyState::Failed,
@@ -27,7 +28,8 @@ pub fn saved_reply(reply: &Reply) -> SavedReply {
 
 /// The reply to message `id` (which said `prompt`) as it was saved, with its stream's `token`:
 /// finished, so Stop has nothing to end and Retry asks again. One that was interrupted shows as
-/// stopped, with its text and the note saying so.
+/// stopped and `interrupted`, with its text (an older save of one, stopped with the note
+/// `INTERRUPTED` as its error, too).
 pub fn reply_from(saved: &SavedReply, id: u64, prompt: &str, token: u64) -> Reply {
     let mut reply = Reply::new(id, prompt);
     reply.token = token;
@@ -37,17 +39,15 @@ pub fn reply_from(saved: &SavedReply, id: u64, prompt: &str, token: u64) -> Repl
     if !saved.text.trim().is_empty() {
         reply.parts.push(Part::Text(saved.text.clone()));
     }
-    if let Some(error) = saved.error.as_ref().filter(|e| !e.is_empty()) {
+    let noted = saved.state == ReplyState::Stopped && saved.error.as_deref() == Some(INTERRUPTED);
+    if let Some(error) = saved.error.as_ref().filter(|e| !e.is_empty() && !noted) {
         reply.parts.push(Part::Error(error.clone()));
     }
     reply.state = match saved.state {
         ReplyState::Done => State::Done,
         ReplyState::Failed => State::Failed,
-        ReplyState::Stopped => State::Stopped,
-        ReplyState::Interrupted => {
-            reply.parts.push(Part::Error(INTERRUPTED.into()));
-            State::Stopped
-        }
+        ReplyState::Stopped | ReplyState::Interrupted => State::Stopped,
     };
+    reply.interrupted = saved.state == ReplyState::Interrupted || noted;
     reply
 }

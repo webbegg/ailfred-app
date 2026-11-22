@@ -69,7 +69,7 @@ impl Tracker {
         // A steered reply takes over once the model starts on it; one refused never does.
         if let Some(at) = self.steered.iter().position(|&t| t == token) {
             self.steered.remove(at);
-            if matches!(event, Event::Done | Event::Fail(_)) {
+            if matches!(event, Event::Done | Event::Fail(_) | Event::Lost(_)) {
                 return;
             }
             self.start(token, false);
@@ -84,7 +84,7 @@ impl Tracker {
             }
             Event::StepEnd { id, .. } => self.steps.retain(|(s, _)| s != id),
             Event::Ask { prompt, .. } => self.after = Some(Status::NeedsYou(prompt.clone())),
-            Event::Fail(why) => self.ended((!self.shown).then(|| Status::Error(why.clone()))),
+            Event::Fail(why) | Event::Lost(why) => self.ended((!self.shown).then(|| Status::Error(why.clone()))),
             Event::Done => self.ended((!self.shown).then_some(Status::Replied)),
             _ => {}
         }
@@ -192,6 +192,10 @@ mod tests {
         t.start(2, false);
         assert_eq!(t.status(), Status::Thinking);
         t.event(2, &Event::Fail("Again.".into()));
+        let mut lost = Tracker::default();
+        lost.start(9, false);
+        lost.event(9, &Event::Lost("The assistant stopped unexpectedly.".into()));
+        assert_eq!(lost.status(), Status::Error("The assistant stopped unexpectedly.".into()), "the model gone mid-reply");
         t.shown(true);
         assert_eq!(t.status(), Status::Idle);
         // Seen as it happens: nothing stays.
