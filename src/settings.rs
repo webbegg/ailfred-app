@@ -1,5 +1,5 @@
 //! The user's settings (the capture shortcut and the save folder), stored with Rune's prefs in
-//! `~/Library/Application Support/com.ailfred/prefs.json`, and the capture shortcut's registration.
+//! `~/Library/Application Support/com.ailfred/prefs.json` (`com.ailfred.dev` for a dev run), and the capture shortcut's registration.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -11,6 +11,13 @@ use rune::{AppHandle, Shortcut, ShortcutError, ShortcutId};
 use crate::Host;
 
 pub const APP_ID: &str = "com.ailfred";
+/// A run from the terminal (`cargo run`): its own settings, apart from the installed app's.
+pub const DEV_APP_ID: &str = "com.ailfred.dev";
+
+/// The id the settings are kept under: the installed app's, or a dev run's.
+pub fn app_id(installed: bool) -> &'static str {
+    if installed { APP_ID } else { DEV_APP_ID }
+}
 pub const DEFAULT_SHORTCUT: &str = "cmd+shift+space";
 const SHORTCUT: &str = "shortcut";
 const FOLDER: &str = "folder";
@@ -28,8 +35,8 @@ pub struct Settings {
 
 impl Settings {
     /// The real settings: also publishes the save folder for the export thread.
-    pub fn open() -> Settings {
-        let settings = Settings::with(Prefs::open(APP_ID));
+    pub fn open(installed: bool) -> Settings {
+        let settings = Settings::with(Prefs::open(app_id(installed)));
         *FOLDER_NOW.write().unwrap_or_else(|e| e.into_inner()) = Some(settings.folder());
         IGNORE_REDUCE_MOTION_NOW.store(settings.ignore_reduce_motion(), Ordering::Relaxed);
         settings
@@ -164,6 +171,12 @@ mod tests {
     fn the_settings_live_under_ailfreds_id() {
         assert_eq!(APP_ID, "com.ailfred");
         assert_eq!(crate::app_env::BUNDLE_NAME, "Ailfred");
+    }
+
+    #[test]
+    fn a_run_from_the_terminal_keeps_its_settings_apart_from_the_installed_apps() {
+        assert_eq!(app_id(true), "com.ailfred");
+        assert_eq!(app_id(false), "com.ailfred.dev");
     }
 
     #[test]
