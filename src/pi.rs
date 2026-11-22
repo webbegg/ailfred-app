@@ -29,6 +29,29 @@ pub struct Prompt {
     /// Sent while pi works: it goes into the run going (`steer`), its reply starting where pi
     /// reads it; a stop drops it.
     pub steer: bool,
+    /// The conversation before it, as text (`context`): it goes first when pi's session hasn't
+    /// seen the conversation (a new pi, another conversation loaded).
+    pub context: String,
+}
+
+/// The conversation before a message (its turns), for a pi session that has none of it: a
+/// transcript, its captures named but not sent again. Empty without turns.
+pub fn context(turns: &[crate::model::Turn]) -> String {
+    if turns.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("This conversation began before your session, so here is what was said so far:\n\n");
+    for turn in turns {
+        out.push_str(&format!("User: {}\n", turn.text));
+        match turn.pngs.len() {
+            0 => {}
+            1 => out.push_str("(1 screenshot, not sent again)\n"),
+            n => out.push_str(&format!("({n} screenshots, not sent again)\n")),
+        }
+        out.push_str(&format!("\nYou: {}\n\n", turn.reply));
+    }
+    out.push_str("The user's new message follows.\n---");
+    out
 }
 use crate::reply::{Event, Tool};
 
@@ -101,6 +124,8 @@ pub struct Core {
     later: Vec<(Prompt, Sink)>,
     /// The user messages pi has read in the run going (the first is its prompt).
     users: u32,
+    /// pi's session has had a message of this conversation: the next needs no context.
+    seen: bool,
 }
 
 /// A message steered into pi's run.
@@ -319,6 +344,7 @@ impl Core {
             self.renew = true;
         } else {
             out.push(self.command(json!({"type": "new_session"})));
+            self.seen = false;
         }
         out
     }
@@ -331,8 +357,9 @@ impl Core {
     /// pi's process ended: the reply streaming fails, and so does one waiting for it.
     pub fn exited(&mut self) {
         const STOPPED: &str = "The assistant stopped unexpectedly.";
+        // The reply streaming keeps what came: it was interrupted. The others never started.
         if self.busy || self.dialog.is_some() {
-            self.emit(Event::Fail(STOPPED.into()));
+            self.emit(Event::Lost(STOPPED.into()));
         }
         if let Some((_, sink)) = self.queued.take() {
             sink(Event::Fail(STOPPED.into()));
@@ -345,7 +372,7 @@ impl Core {
         }
         self.down = true;
         // The pi that comes back starts a session of its own.
-        self.renew = false;
+        (self.renew, self.seen) = (false, false);
         self.busy = false;
         self.aborting = false;
         self.dialog = None;
@@ -372,6 +399,7 @@ impl Core {
         let mut out = Vec::new();
         if std::mem::take(&mut self.renew) {
             out.push(self.command(json!({"type": "new_session"})));
+            self.seen = false;
         }
         if let Some(steer) = started {
             self.run_of_its_own(steer);
@@ -393,7 +421,10 @@ impl Core {
         self.steps.clear();
         self.next_step = 0;
         self.users = 0;
-        let command = self.prompt_command(&prompt);
+        let mut command = self.prompt_command(&prompt);
+        if !std::mem::replace(&mut self.seen, true) && !prompt.context.is_empty() {
+            command["message"] = json!(format!("{}\n\n{}", prompt.context, prompt.text));
+        }
         self.command(command)
     }
 
@@ -1213,12 +1244,64 @@ mod tests {
     }
 
     #[test]
-    fn pi_ending_mid_reply_fails_it() {
+    fn pi_ending_mid_reply_interrupts_it() {
         let mut core = Core::default();
         let (sink, rx) = channel();
         core.send(prompt("hi"), sink);
         core.exited();
-        assert!(matches!(rx.try_iter().next(), Some(Event::Fail(_))));
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), [Event::Lost("The assistant stopped unexpectedly.".into())]);
+    }
+
+    fn with_context(text: &str, context: &str) -> Prompt {
+        Prompt { text: text.into(), context: context.into(), ..Prompt::default() }
+    }
+
+    #[test]
+    fn a_session_that_hasnt_seen_the_conversation_gets_it_with_the_message() {
+        let mut core = Core::default();
+        let (sink, _rx) = channel();
+        let wrote = core.send(with_context("and now?", "EARLIER"), sink);
+        assert_eq!(wrote[0]["message"], "EARLIER\n\nand now?", "a fresh pi");
+        feed(&mut core, &[STARTED, SETTLED]);
+        let (sink, _rx) = channel();
+        let wrote = core.send(with_context("next", "EARLIER"), sink);
+        assert_eq!(wrote[0]["message"], "next", "its session has it now");
+        feed(&mut core, &[STARTED, SETTLED]);
+        // A new session (another conversation loaded, Cmd+N) and a pi that came back have none.
+        core.new_conversation();
+        let (sink, _rx) = channel();
+        assert_eq!(core.send(with_context("a", "EARLIER"), sink)[0]["message"], "EARLIER\n\na");
+        feed(&mut core, &[STARTED, SETTLED]);
+        core.exited();
+        core.started();
+        let (sink, _rx) = channel();
+        assert_eq!(core.send(with_context("b", "EARLIER"), sink)[0]["message"], "EARLIER\n\nb");
+        // A new session asked while it runs: the message queued for it gets the context.
+        feed(&mut core, &[STARTED]);
+        core.new_conversation();
+        let (sink, _rx) = channel();
+        assert!(core.send(with_context("c", "EARLIER"), sink).is_empty(), "waits for the abort");
+        let wrote = feed(&mut core, &[SETTLED]);
+        assert_eq!(types(&wrote), ["new_session", "prompt"]);
+        assert_eq!(wrote[1]["message"], "EARLIER\n\nc");
+        // Without a conversation before it, the message alone.
+        let mut core = Core::default();
+        let (sink, _rx) = channel();
+        assert_eq!(core.send(prompt("hi"), sink)[0]["message"], "hi");
+    }
+
+    #[test]
+    fn the_conversation_so_far_reads_as_a_transcript() {
+        use crate::model::Turn;
+        let turns = [
+            Turn { text: "What's 2+2?".into(), pngs: vec![Arc::new(vec![1])], reply: "4.".into() },
+            Turn { text: "And 3+3?".into(), pngs: Vec::new(), reply: "6.".into() },
+        ];
+        let got = context(&turns);
+        assert!(got.starts_with("This conversation began before your session"), "{got}");
+        assert!(got.contains("User: What's 2+2?\n(1 screenshot, not sent again)\n\nYou: 4.\n\nUser: And 3+3?\n\nYou: 6."), "{got}");
+        assert!(got.ends_with("The user's new message follows.\n---"), "{got}");
+        assert_eq!(context(&[]), "");
     }
 
     /// A stand-in for pi: reads the prompt, answers it, then waits for stdin to close.
@@ -1272,7 +1355,7 @@ mod tests {
         .expect("spawned");
         let (sink, rx) = channel();
         engine.send(prompt("hi"), sink);
-        assert!(matches!(rx.recv_timeout(Duration::from_secs(5)), Ok(Event::Fail(_))));
+        assert!(matches!(rx.recv_timeout(Duration::from_secs(5)), Ok(Event::Lost(_))));
         std::thread::sleep(Duration::from_millis(1500));
         let (sink, rx) = channel();
         engine.send(prompt("again"), sink);
@@ -1379,12 +1462,12 @@ mod tests {
     }
 
     #[test]
-    fn the_engine_fails_the_reply_when_the_process_ends() {
+    fn the_engine_interrupts_the_reply_when_the_process_ends() {
         let mut command = Command::new("/bin/sh");
         command.arg("-c").arg("read line; exit 1");
         let mut engine = PiEngine::spawn(command).expect("spawned");
         let (sink, rx) = channel();
         engine.send(prompt("hi"), sink);
-        assert!(matches!(rx.recv_timeout(Duration::from_secs(5)), Ok(Event::Fail(_))));
+        assert!(matches!(rx.recv_timeout(Duration::from_secs(5)), Ok(Event::Lost(_))));
     }
 }
