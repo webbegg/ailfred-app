@@ -13,6 +13,8 @@ use super::stream::Kind;
 use super::{Item, MAX_TOKENS, Request, Run, SYSTEM_PROMPT, errors, pump, title, user_content};
 use crate::reply::Event;
 
+mod leftovers;
+
 pub const URL: &str = "https://api.anthropic.com/v1/messages";
 pub const VERSION: &str = "2023-06-01";
 const CURL: &str = "/usr/bin/curl";
@@ -100,6 +102,13 @@ pub fn run_title(run: &Run, key: &str, request: &Request, sink: &mut dyn FnMut(I
 }
 
 fn run_body(run: &Run, key: &str, body: &serde_json::Value, sink: &mut dyn FnMut(Item)) {
+    static SWEPT: std::sync::Once = std::sync::Once::new();
+    SWEPT.call_once(|| {
+        let removed = leftovers::sweep(&std::env::temp_dir(), std::process::id(), leftovers::alive);
+        if !removed.is_empty() {
+            eprintln!("Ailfred: removed {} request file(s) an earlier run left", removed.len());
+        }
+    });
     static N: AtomicU64 = AtomicU64::new(0);
     let name = N.fetch_add(1, Ordering::Relaxed).to_string();
     let file = match BodyFile::write(&std::env::temp_dir(), &name, body) {
