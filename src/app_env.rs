@@ -44,6 +44,9 @@ pub fn screenshots_dir() -> String {
     crate::settings::folder_now().to_string_lossy().into_owned()
 }
 
+/// System Settings' Screen Recording list (Privacy & Security).
+pub const SCREEN_RECORDING_SETTINGS: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
+
 /// Whether Screen Recording is allowed, without prompting or logging.
 pub fn screen_recording_allowed_quiet() -> bool {
     CGPreflightScreenCaptureAccess()

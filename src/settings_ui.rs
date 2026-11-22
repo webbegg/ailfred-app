@@ -1,6 +1,7 @@
 //! The Settings window: the capture shortcut (rune-kit's recorder), the save folder, the model
-//! (Claude's version and the Anthropic API key, which lives in the Keychain), and whether
-//! animations play under the system's Reduce Motion.
+//! (Claude's version and the Anthropic API key, which lives in the Keychain), whether Screen
+//! Recording is on (with the way to System Settings), and whether animations play under the
+//! system's Reduce Motion.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -14,7 +15,7 @@ use crate::model;
 use crate::settings::{CaptureShortcut, Settings};
 
 /// The window's size in points.
-pub const SIZE: (f32, f32) = (480.0, 400.0);
+pub const SIZE: (f32, f32) = (480.0, 480.0);
 
 pub struct SettingsUi {
     settings: Settings,
@@ -31,6 +32,10 @@ pub struct SettingsUi {
     host: Option<AppHandle<Host>>,
     capture: CaptureShortcut,
     error: Option<String>,
+    /// Whether Screen Recording is on, as last checked (None: not yet).
+    screen_recording: Option<bool>,
+    /// How it's checked (the system's; a fake in tests).
+    check_screen_recording: fn() -> bool,
 }
 
 /// Where replies come from with pi picked.
@@ -48,12 +53,37 @@ impl SettingsUi {
         let folder = settings.folder();
         let ignore_reduce_motion = settings.ignore_reduce_motion();
         let model = settings.model();
-        SettingsUi { settings, recorder, folder, ignore_reduce_motion, model, key: TextEdit::new(""), status: String::new(), host: Some(host), capture, error: None }
+        SettingsUi {
+            settings,
+            recorder,
+            folder,
+            ignore_reduce_motion,
+            model,
+            key: TextEdit::new(""),
+            status: String::new(),
+            host: Some(host),
+            capture,
+            error: None,
+            screen_recording: None,
+            check_screen_recording: crate::app_env::screen_recording_allowed_quiet,
+        }
     }
 
-    /// Settings opened: says where replies come from now.
+    /// Settings opened: says where replies come from now, and whether Screen Recording is on.
     pub fn refresh_status(&mut self) {
         self.status = if self.model == model::PI { pi_status() } else { model::status_now() };
+        self.check_permissions();
+    }
+
+    /// Asks whether Screen Recording is on (cheap, no prompt); a change shows in the menu too.
+    fn check_permissions(&mut self) {
+        let allowed = (self.check_screen_recording)();
+        if self.screen_recording.replace(allowed) == Some(allowed) {
+            return;
+        }
+        if let Some(host) = &self.host {
+            host.update(move |host, _| host.set_permission(allowed));
+        }
     }
 
     /// A model picked in the chat's composer: kept, and shown here. The status line is looked
@@ -133,6 +163,8 @@ impl SettingsUi {
             host: None,
             capture: CaptureShortcut::default(),
             error: None,
+            screen_recording: None,
+            check_screen_recording: crate::app_env::screen_recording_allowed_quiet,
         }
     }
 }
@@ -181,9 +213,19 @@ pub fn view(s: &SettingsUi, cx: &mut Cx<SettingsUi>) -> El {
         .padding(24.0)
         .gap(18.0)
         .fill(k.c.page)
+        // Back from System Settings: Screen Recording may have changed.
+        .on_window_focus(|s: &mut SettingsUi, focused, _| {
+            if focused {
+                s.check_permissions();
+            }
+        })
         .child(col().gap(8.0).child(label("Capture shortcut")).child(recorder))
         .child(col().gap(8.0).child(label("Save screenshots to")).child(folder))
-        .child(model_section)
+        .child(model_section);
+    if let Some(allowed) = s.screen_recording {
+        page = page.child(permissions(allowed, k, label("Permissions")));
+    }
+    page = page
         .child(
             Checkbox::new(s.ignore_reduce_motion)
                 .label("Show animations even with Reduce Motion on")
@@ -195,6 +237,20 @@ pub fn view(s: &SettingsUi, cx: &mut Cx<SettingsUi>) -> El {
         page = page.child(text(error.clone()).font(k.ty.small).color(k.c.text_weak));
     }
     page
+}
+
+/// Screen Recording, on or off; off, the way to turn it on.
+fn permissions(allowed: bool, k: &Kit, title: El) -> El {
+    let line = if allowed {
+        "Screen Recording: On, so Ailfred can capture the screen."
+    } else {
+        "Screen Recording: Off. Turn on Ailfred there, then quit and reopen it."
+    };
+    let mut status = row().gap(10.0).items_center().child(text(line).key("screen-recording").font(k.ty.ui).color(k.c.text_weak));
+    if !allowed {
+        status = status.child(Button::new("Open System Settings…").on_press(|_: &mut SettingsUi| crate::open(crate::app_env::SCREEN_RECORDING_SETTINGS)).build(k));
+    }
+    col().key("permissions").gap(8.0).child(title).child(status)
 }
 
 /// `~/Desktop` rather than `/Users/name/Desktop`.
@@ -304,6 +360,62 @@ mod tests {
         s.key = TextEdit::new("   ");
         s.save_key();
         assert_eq!(s.error.as_deref(), Some("Paste your Anthropic API key first."));
+    }
+
+    fn frames(s: SettingsUi) -> Runtime<SettingsUi> {
+        let mut rt = Runtime::new(s, view, SIZE, Env::new(true, 2.0));
+        for _ in 0..10 {
+            rt.frame(1.0 / 60.0);
+        }
+        rt
+    }
+
+    fn shown(rt: &Runtime<SettingsUi>) -> Vec<rune::ElementInfo> {
+        rt.elements().into_iter().filter(|e| !e.exiting).collect()
+    }
+
+    #[test]
+    fn screen_recording_off_says_so_and_offers_system_settings() {
+        let mut s = ui();
+        s.check_screen_recording = || false;
+        s.refresh_status();
+        let rt = frames(s);
+        let els = shown(&rt);
+        assert!(els.iter().any(|e| e.key.as_deref() == Some("permissions")));
+        let says = |key: &str| els.iter().find(|e| e.key.as_deref() == Some(key)).and_then(|e| e.text.clone()).unwrap_or_default();
+        assert!(says("screen-recording").contains("Off"), "{:?}", says("screen-recording"));
+        assert!(els.iter().any(|e| e.role == "button" && e.label.as_deref() == Some("Open System Settings…")), "a way there");
+        // The lowest control (the page itself fills the window); an error line (about 20) fits under it.
+        let low = els.iter().filter(|e| e.role == "button" || e.role == "checkbox").map(|e| e.rect[1] + e.rect[3]).fold(0.0, f32::max);
+        assert!(low + 24.0 + 20.0 <= SIZE.1, "inside the window: {low}");
+    }
+
+    #[test]
+    fn screen_recording_on_says_so_without_the_button() {
+        let mut s = ui();
+        s.check_screen_recording = || true;
+        s.refresh_status();
+        let rt = frames(s);
+        let els = shown(&rt);
+        let line = els.iter().find(|e| e.key.as_deref() == Some("screen-recording")).and_then(|e| e.text.clone()).unwrap_or_default();
+        assert!(line.contains("On"), "{line:?}");
+        assert!(!els.iter().any(|e| e.label.as_deref() == Some("Open System Settings…")));
+    }
+
+    #[test]
+    fn coming_back_to_the_window_checks_again() {
+        // Turned on in System Settings while Settings stayed open.
+        static ALLOWED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let mut s = ui();
+        s.check_screen_recording = || ALLOWED.load(std::sync::atomic::Ordering::Relaxed);
+        s.refresh_status();
+        let mut rt = frames(s);
+        rt.update(|s, _| assert_eq!(s.screen_recording, Some(false)));
+        ALLOWED.store(true, std::sync::atomic::Ordering::Relaxed);
+        rt.window_focus(false);
+        rt.window_focus(true);
+        rt.frame(1.0 / 60.0);
+        rt.update(|s, _| assert_eq!(s.screen_recording, Some(true)));
     }
 
     #[test]

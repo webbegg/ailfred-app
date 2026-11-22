@@ -908,7 +908,7 @@ impl Host {
             Action::CaptureFullScreen => start_capture(self, Duration::from_millis(200), Mode::FullScreen),
             Action::QuickInput => self.show_input_or_chat(),
             Action::OpenFolder => open(&app_env::screenshots_dir()),
-            Action::OpenPermissionSettings => open("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"),
+            Action::OpenPermissionSettings => open(app_env::SCREEN_RECORDING_SETTINGS),
             Action::ToggleLogin => {
                 let (Some(handle), Some(tray)) = (self.handle.clone(), &self.tray) else { return };
                 // muda already flipped the checkmark: its new state is the request. The service
@@ -946,7 +946,7 @@ impl Host {
 }
 
 /// Opens a path or URL with its default app (`open`), without waiting for it.
-fn open(target: &str) {
+pub(crate) fn open(target: &str) {
     if let Err(e) = std::process::Command::new("open").arg(target).spawn() {
         eprintln!("Ailfred: open {target} failed: {e}");
     }
