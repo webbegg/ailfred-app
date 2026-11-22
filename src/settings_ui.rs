@@ -257,6 +257,8 @@ mod tests {
     // The Keychain here is the test build's, in memory: no test touches the real one.
     #[test]
     fn saving_a_key_keeps_it_in_the_keychain_and_empties_the_field_and_removing_forgets_it() {
+        // The Keychain changes where replies come from, which other tests read.
+        let _turn = MODEL_TEST.lock().unwrap_or_else(|e| e.into_inner());
         let mut s = ui();
         s.key = TextEdit::new("  sk-ant-abc \n");
         s.save_key();
