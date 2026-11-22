@@ -660,9 +660,9 @@ pub fn view(s: &QuickInput, cx: &mut Cx<QuickInput>) -> El {
         // waits below the window's edge, never on screen.
         .pin(Some(x), None, None, Some(bottom))
         .offset(0.0, dy)
-        .offset_motion(motion.clone())
+        .offset_motion(motion)
         .opacity(alpha)
-        .opacity_motion(motion.clone())
+        .opacity_motion(motion)
         .scale(scale)
         .scale_motion(if s.pressed { Anim::new(Curve::ease_in_out(PRESS.as_secs_f32())) } else { motion })
         .motion(GLIDE);
@@ -756,7 +756,7 @@ mod tests {
         let s = QuickInput::new(None);
         assert!(!s.is_open());
         assert_eq!(pose(false, false), Pose { dy: TUCK, alpha: 1.0, scale: 1.0 });
-        assert!(TUCK >= PANEL_H + MARGIN + PAD, "fully below the bottom edge, shadow included");
+        const { assert!(TUCK >= PANEL_H + MARGIN + PAD, "fully below the bottom edge, shadow included") };
     }
 
     #[test]

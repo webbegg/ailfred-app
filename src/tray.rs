@@ -175,8 +175,8 @@ mod tests {
         let ratio = ink(&want) as f32 / ink(&whole) as f32;
         assert!((0.55..0.75).contains(&ratio), "the mark at about 80% (64% of its ink): {ratio}");
         assert_eq!(rgba.len(), SIZE * SIZE * 4);
-        assert!(rgba.chunks_exact(4).all(|p| p[..3] == [0, 0, 0]), "black: a template icon");
-        let alpha: Vec<u8> = rgba.chunks_exact(4).map(|p| p[3]).collect();
+        assert!(rgba.as_chunks::<4>().0.iter().all(|p| p[..3] == [0, 0, 0]), "black: a template icon");
+        let alpha: Vec<u8> = rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
         assert_eq!(alpha, want);
         assert!(want.iter().map(|&a| u32::from(a)).sum::<u32>() > 2000, "it has ink");
     }

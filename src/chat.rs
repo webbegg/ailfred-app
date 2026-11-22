@@ -95,8 +95,8 @@ pub fn decode_png(png: &[u8]) -> Option<(u32, u32, Vec<u8>)> {
     buf.truncate(info.buffer_size());
     let rgba = match info.color_type {
         png::ColorType::Rgba => buf,
-        png::ColorType::Rgb => buf.chunks_exact(3).flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
-        png::ColorType::GrayscaleAlpha => buf.chunks_exact(2).flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
+        png::ColorType::Rgb => buf.as_chunks::<3>().0.iter().flat_map(|p| [p[0], p[1], p[2], 255]).collect(),
+        png::ColorType::GrayscaleAlpha => buf.as_chunks::<2>().0.iter().flat_map(|p| [p[0], p[0], p[0], p[1]]).collect(),
         png::ColorType::Grayscale => buf.iter().flat_map(|&g| [g, g, g, 255]).collect(),
         png::ColorType::Indexed => return None,
     };
@@ -340,7 +340,7 @@ impl Chat {
     /// Into its own window (true), or back into the side panel, closed, so it slides in.
     pub fn set_windowed(&mut self, on: bool) {
         self.windowed = on;
-        // It arrives at the latest (`Host::into_window`, `QuickInput::put_chat`).
+        // It arrives at the latest (`Host::land_in_window`, `QuickInput::put_chat`).
         self.away = false;
         self.landed = true;
         self.preview = None;

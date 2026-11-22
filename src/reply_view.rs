@@ -166,7 +166,7 @@ fn md_style(t: &tok::Theme) -> MarkdownStyle {
 /// Markdown, its words fading in while it streams (`live`); code blocks framed with their
 /// language and a copy button.
 fn markdown<S: 'static>(source: &str, live: bool, t: &tok::Theme) -> El {
-    let t2 = t.clone();
+    let t2 = *t;
     col().w_full().child(
         Markdown::new(source.to_owned())
             .streaming(live)
@@ -470,6 +470,24 @@ fn footer<S: 'static>(r: &Reply, t: &tok::Theme, lens: Lens<S>) -> El {
     out.child(actions)
 }
 
+/// The send button's place while a reply streams: Stop.
+pub fn stop_button<S: 'static>(lens: Lens<S>) -> El {
+    el().key("stop")
+        .size(28.0, 28.0)
+        .radius(8.0)
+        .continuous_corners()
+        .center()
+        .fill(Color::WHITE.alpha(0.14))
+        .hover(Color::WHITE.alpha(0.10))
+        .press(Color::BLACK.alpha(0.12))
+        .press_scale(0.94)
+        .cursor(Cursor::Pointer)
+        .label("Stop")
+        .shortcut_hint("Esc")
+        .child(el().size(10.0, 10.0).radius(2.5).fill(Color::WHITE))
+        .on_press(move |s: &mut S| lens(s).stop(Instant::now()))
+}
+
 #[cfg(test)]
 mod tests {
     use rune::{Cx, Env, Runtime};
@@ -685,22 +703,4 @@ mod tests {
         rt.frame(1.0 / 60.0);
         assert!(keys(&rt).iter().any(|k| k == "retry"));
     }
-}
-
-/// The send button's place while a reply streams: Stop.
-pub fn stop_button<S: 'static>(lens: Lens<S>) -> El {
-    el().key("stop")
-        .size(28.0, 28.0)
-        .radius(8.0)
-        .continuous_corners()
-        .center()
-        .fill(Color::WHITE.alpha(0.14))
-        .hover(Color::WHITE.alpha(0.10))
-        .press(Color::BLACK.alpha(0.12))
-        .press_scale(0.94)
-        .cursor(Cursor::Pointer)
-        .label("Stop")
-        .shortcut_hint("Esc")
-        .child(el().size(10.0, 10.0).radius(2.5).fill(Color::WHITE))
-        .on_press(move |s: &mut S| lens(s).stop(Instant::now()))
 }

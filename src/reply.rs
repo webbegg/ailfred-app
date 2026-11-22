@@ -107,6 +107,8 @@ pub struct Question {
     pub answered: Option<String>,
 }
 
+// A reply holds a handful of parts: boxing the big ones would buy nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum Part {
     Thinking(Thinking),
     Text(String),

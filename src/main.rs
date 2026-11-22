@@ -157,7 +157,7 @@ impl Host {
         quick.update(move |s, tx| {
             let chat = s.take_chat();
             tx.instant();
-            handle.update(move |host, _| host.into_window(chat));
+            handle.update(move |host, _| host.land_in_window(chat));
         });
         if self.capture_shown.load(Ordering::Acquire) {
             self.dismiss_capture();
@@ -166,7 +166,7 @@ impl Host {
     }
 
     /// The chat, out of the side panel, goes into its window, which opens.
-    fn into_window(&mut self, mut chat: Chat) {
+    fn land_in_window(&mut self, mut chat: Chat) {
         let Some(ui) = self.chat_ui.clone() else {
             // No window to take it: it stays in the side panel, with what came meanwhile.
             let waiting = self.place.stayed();
@@ -227,7 +227,7 @@ impl Host {
         }
         ui.update(move |w, _| {
             let chat = w.take_chat();
-            handle.update(move |host, _| host.into_side(chat));
+            handle.update(move |host, _| host.land_in_side(chat));
         });
         if let Some(window) = &self.chat_window {
             window.hide();
@@ -236,7 +236,7 @@ impl Host {
     }
 
     /// The chat, out of its window, goes back into the side panel, which slides in.
-    fn into_side(&mut self, chat: Chat) {
+    fn land_in_side(&mut self, chat: Chat) {
         let (Some(quick), Some(handle)) = (self.quick.clone(), self.handle.clone()) else {
             // No side panel to take it: it stays in its window, with what came meanwhile.
             let waiting = self.place.stayed();
