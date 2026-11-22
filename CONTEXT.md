@@ -39,7 +39,9 @@ replies, draft and chips. It moves between the two whole.
 
 **Conversation**:
 The messages and replies since the last Cmd+N. It has an id (`YYYYMMDD-HHMMSS-xxxx`), is kept in a
-conversation file, and the last one updated comes back into the chat at launch.
+conversation file, and the last one updated comes back into the chat at launch. One longer than
+40 messages opens at its latest 40; **Show earlier**, at the top, brings 40 more each time (the
+model always gets the whole conversation).
 _Avoid_: session, thread
 
 **Conversation file**:

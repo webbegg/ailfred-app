@@ -471,3 +471,41 @@ fn a_title_for_a_conversation_the_chat_has_left_doesnt_touch_the_one_it_has() {
     assert_eq!(c.conv.title, None, "the new conversation has no title");
     assert_eq!(c.saved.len(), saved, "and isn't written for it");
 }
+
+// Show earlier: a long conversation opens at its latest page.
+
+fn many(n: usize) -> Loaded {
+    loaded("long", (0..n).map(|i| loaded_message(&format!("m{i}"), Some(done("ok")))).collect(), None)
+}
+
+#[test]
+fn a_long_conversation_opens_at_its_latest_page_and_shows_earlier_a_page_at_a_time() {
+    let mut c = Chat::new(None);
+    c.load(many(PAGE * 2 + 5));
+    assert_eq!(c.earlier(), PAGE + 5, "the last page shows");
+    assert!(c.show_earlier());
+    assert_eq!(c.earlier(), 5);
+    assert!(c.show_earlier());
+    assert_eq!(c.earlier(), 0, "the rest, though less than a page");
+    assert!(!c.show_earlier(), "nothing earlier");
+
+    let mut short = Chat::new(None);
+    short.load(many(PAGE));
+    assert_eq!(short.earlier(), 0, "a page or less shows whole");
+}
+
+#[test]
+fn what_is_sent_after_a_long_conversation_opens_keeps_the_earlier_ones_hidden_and_a_new_one_has_none() {
+    let mut c = Chat::new(None);
+    c.load(many(PAGE + 3));
+    exchange(&mut c, 900, "more", "yes", Event::Done);
+    assert_eq!(c.earlier(), 3, "the new message shows below; the hidden ones stay so");
+    let request = c.request_for(900, "fake").unwrap();
+    assert_eq!(request.history.len(), PAGE + 3, "the model still gets the whole conversation");
+    c.clear();
+    assert_eq!(c.earlier(), 0);
+    c.load(many(PAGE + 3));
+    c.start_over();
+    c.reset_conversation();
+    assert_eq!(c.earlier(), 0, "a new conversation hides nothing");
+}

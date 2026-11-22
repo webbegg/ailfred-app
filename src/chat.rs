@@ -118,8 +118,14 @@ impl Message {
     }
 }
 
+/// How many messages a long conversation opens with, and how many more each "Show earlier"
+/// brings: the panel draws only those (a long one would cost every frame).
+pub const PAGE: usize = 40;
+
 pub struct Chat {
     messages: Vec<Message>,
+    /// How many of the first messages don't show (opened long: all but the latest page).
+    hidden: usize,
     draft: TextEdit,
     /// Captures pasted into the field, to go with the next message.
     shots: Vec<Attached>,
@@ -178,7 +184,7 @@ pub struct Chat {
 
 impl Chat {
     pub fn new(host: Option<AppHandle<Host>>) -> Self {
-        Chat { messages: Vec::new(), draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0, replies: Vec::new(), next_token: 0, scratch: TextEdit::new(""), away: false, windowed: false, session: None, conv: history::Meta::fresh(), running_model: String::new(), models_open: false, #[cfg(test)] cancelled: Vec::new(), #[cfg(test)] saved: Vec::new(), #[cfg(test)] title_asks: Vec::new(), #[cfg(test)] model: None, #[cfg(test)] requests: Vec::new() }
+        Chat { messages: Vec::new(), hidden: 0, draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0, replies: Vec::new(), next_token: 0, scratch: TextEdit::new(""), away: false, windowed: false, session: None, conv: history::Meta::fresh(), running_model: String::new(), models_open: false, #[cfg(test)] cancelled: Vec::new(), #[cfg(test)] saved: Vec::new(), #[cfg(test)] title_asks: Vec::new(), #[cfg(test)] model: None, #[cfg(test)] requests: Vec::new() }
     }
 
     pub fn is_open(&self) -> bool {
@@ -187,6 +193,19 @@ impl Chat {
 
     pub fn has_messages(&self) -> bool {
         !self.messages.is_empty()
+    }
+
+    /// How many earlier messages don't show ("Show earlier" brings them).
+    #[cfg(test)]
+    pub fn earlier(&self) -> usize {
+        self.hidden
+    }
+
+    /// "Show earlier": the page before the first shown; false if all show.
+    pub fn show_earlier(&mut self) -> bool {
+        let had = self.hidden;
+        self.hidden = had.saturating_sub(PAGE);
+        had > 0
     }
 
     /// Into its own window (true), or back into the side panel, closed, so it slides in.
