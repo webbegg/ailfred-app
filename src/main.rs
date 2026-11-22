@@ -28,6 +28,7 @@ mod quick_input;
 mod reply;
 mod reply_view;
 mod screens;
+mod link;
 mod settings;
 mod settings_ui;
 mod shot;
@@ -939,6 +940,14 @@ impl Host {
     }
 }
 
+/// A link the system opened with Ailfred (`ailfred://…`; it comes from anyone who can run `open`).
+fn on_link(host: &mut Host, url: &str, _: &mut Tx) {
+    match link::parse(url) {
+        Some(link::Link::Toggle) => host.toggle_quick_input(),
+        None => eprintln!("Ailfred: ignored a link it doesn't know ({} chars)", url.chars().count()),
+    }
+}
+
 /// Opens a path or URL with its default app (`open`), without waiting for it.
 pub(crate) fn open(target: &str) {
     if let Err(e) = std::process::Command::new("open").arg(target).spawn() {
@@ -1077,7 +1086,7 @@ fn main() {
     }
     // accessory: no Dock icon and no activation at launch.
     rune::run_windows_with(RunOptions { accessory: true }, move |_displays| {
-        let mut app = App::new(AppSpec::new("Ailfred", (1.0, 1.0), host_init, host_view)).windowless();
+        let mut app = App::new(AppSpec::new("Ailfred", (1.0, 1.0), host_init, host_view)).windowless().on_open_url(on_link);
         let handle = app.handle();
         let overlay = app.overlay(
             // The size is replaced by the display's size: FullScreen placement.
