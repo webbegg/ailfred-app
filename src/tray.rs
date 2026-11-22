@@ -3,10 +3,11 @@
 
 use rune::AppHandle;
 use tray_icon::menu::accelerator::{Accelerator, Code, Modifiers};
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 use crate::Host;
+use crate::history::Entry;
 
 /// What a menu pick asks the host to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -42,11 +43,33 @@ impl Action {
     }
 }
 
+/// What a menu pick is: one of the fixed items, or a conversation from Recent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Pick {
+    Action(Action),
+    Recent(String),
+}
+
+/// The menu id of a recent conversation's item: the prefix, then its id.
+const RECENT_PREFIX: &str = "recent:";
+
+impl Pick {
+    pub fn from_id(id: &str) -> Option<Pick> {
+        match id.strip_prefix(RECENT_PREFIX) {
+            Some(conversation) => Some(Pick::Recent(conversation.to_owned())),
+            None => Action::from_id(id).map(Pick::Action),
+        }
+    }
+}
+
 pub struct Tray {
     /// Dropping it removes the icon.
     _icon: TrayIcon,
     capture: MenuItem,
     menu: Menu,
+    /// The most recent conversations, after "Quick Input"; in the menu only while there are any.
+    recent: Submenu,
+    recent_shown: bool,
     login: CheckMenuItem,
     permission: MenuItem,
     permission_shown: bool,
@@ -105,11 +128,14 @@ impl Tray {
         // muda calls this on the main thread from the menu's action; the host handles it next turn.
         // muda keeps the first handler set in the process: build one Tray per process.
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-            if let Some(action) = Action::from_id(&event.id.0) {
-                host.update(move |host, tx| host.on_menu(action, tx));
+            match Pick::from_id(&event.id.0) {
+                Some(Pick::Action(action)) => host.update(move |host, tx| host.on_menu(action, tx)),
+                Some(Pick::Recent(id)) => host.update(move |host, _| host.open_recent(id)),
+                None => {}
             }
         }));
-        Ok(Tray { _icon: icon, capture, menu, login, permission, permission_shown: false, can_login })
+        let recent = Submenu::with_id("recent", "Recent", true);
+        Ok(Tray { _icon: icon, capture, menu, recent, recent_shown: false, login, permission, permission_shown: false, can_login })
     }
 
     /// Shows the capture chord next to "Capture Area" (none when cleared). Rune writes chords as
@@ -118,6 +144,31 @@ impl Tray {
         let accelerator = shortcut.and_then(|s| s.to_string().parse::<Accelerator>().ok());
         if let Err(e) = self.capture.set_accelerator(accelerator) {
             eprintln!("Ailfred: showing the shortcut in the menu failed: {e}");
+        }
+    }
+
+    /// Shows `entries` (newest first) under "Recent", which is in the menu only while there are
+    /// any.
+    pub fn set_recent(&mut self, entries: &[Entry]) {
+        while self.recent.remove_at(0).is_some() {}
+        for entry in entries {
+            let item = MenuItem::with_id(format!("{RECENT_PREFIX}{}", entry.id), &entry.label, true, None);
+            if let Err(e) = self.recent.append(&item) {
+                eprintln!("Ailfred: listing a recent conversation failed: {e}");
+            }
+        }
+        if entries.is_empty() == !self.recent_shown {
+            return;
+        }
+        let done = if entries.is_empty() {
+            self.menu.remove(&self.recent)
+        } else {
+            let after_quick_input = self.menu.items().iter().position(|item| item.id().0 == Action::QuickInput.id()).map_or(0, |at| at + 1);
+            self.menu.insert(&self.recent, after_quick_input)
+        };
+        match done {
+            Ok(()) => self.recent_shown = !entries.is_empty(),
+            Err(e) => eprintln!("Ailfred: updating the menu failed: {e}"),
         }
     }
 
@@ -165,6 +216,16 @@ fn icon_rgba() -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_menu_id_is_a_fixed_item_or_a_recent_conversation_by_its_id() {
+        for (action, id) in Action::ALL {
+            assert_eq!(Pick::from_id(id), Some(Pick::Action(action)));
+        }
+        assert_eq!(Pick::from_id("recent:20240101-000000-abcd"), Some(Pick::Recent("20240101-000000-abcd".into())));
+        assert_eq!(Pick::from_id("recent"), None, "the submenu itself picks nothing");
+        assert_eq!(Pick::from_id("nope"), None);
+    }
 
     #[test]
     fn the_menu_bar_icon_is_the_apps_mark() {

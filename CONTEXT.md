@@ -37,8 +37,27 @@ The conversation's view and state wherever it lives (side panel or chat window):
 replies, draft and chips. It moves between the two whole.
 
 **Conversation**:
-The messages and replies since the last Cmd+N.
+The messages and replies since the last Cmd+N. It has an id (`YYYYMMDD-HHMMSS-xxxx`), is kept in a
+conversation file, and the last one updated comes back into the chat at launch.
 _Avoid_: session, thread
+
+**Conversation file**:
+A conversation on disk: `<id>.json` in `conversations/` under the app's settings folder (owner-only,
+written to a `.tmp` and renamed), its shots as `<id>/<n>.png` beside it. A damaged field falls back
+to its default; a file that won't parse is skipped and left alone. Written by one thread, never
+the main one.
+_Avoid_: history file, save file
+
+**Recent**:
+The tray menu's list of the 10 most recently updated conversations, by title (else the start of
+their first message). Picking one stops what streams and loads it into the chat.
+_Avoid_: history (in UI copy)
+
+**Title**:
+A conversation's short name: asked of a cheap model (Haiku) once the first reply is done, unless
+the user wrote one (`title_by_user`), which always wins. No title (a failed or slow call) shows
+the start of the first message instead.
+_Avoid_: name, subject
 
 **Message**:
 What the user sent: text and its shots.

@@ -10,7 +10,7 @@ use std::process::Command;
 use serde_json::json;
 
 use super::stream::Kind;
-use super::{Item, Request, Run, SYSTEM_PROMPT, errors, pump, user_content};
+use super::{Item, Request, Run, SYSTEM_PROMPT, errors, pump, title, user_content};
 use crate::reply::Event;
 
 /// The folders Claude Code lands in, then `PATH`'s (an app launched from Finder has a short
@@ -34,7 +34,16 @@ pub fn find() -> Option<PathBuf> {
 
 /// `claude`'s arguments: lean, streaming, the model, and the session to continue.
 pub fn args(model: &str, session: Option<&str>) -> Vec<String> {
-    let mut args: Vec<String> = [
+    let mut args = lean(SYSTEM_PROMPT, model);
+    if let Some(session) = session {
+        args.extend(["--resume".into(), session.into()]);
+    }
+    args
+}
+
+/// Lean and streaming, with `system` as its prompt and `model` as its model.
+fn lean(system: &str, model: &str) -> Vec<String> {
+    [
         "-p",
         "--input-format",
         "stream-json",
@@ -48,15 +57,18 @@ pub fn args(model: &str, session: Option<&str>) -> Vec<String> {
         "--tools",
         "",
         "--system-prompt",
-        SYSTEM_PROMPT,
+        system,
         "--model",
         model,
     ]
     .map(String::from)
-    .to_vec();
-    if let Some(session) = session {
-        args.extend(["--resume".into(), session.into()]);
-    }
+    .to_vec()
+}
+
+/// The title call's arguments: lean, the cheap model, no session kept and none resumed.
+pub fn title_args(model: &str) -> Vec<String> {
+    let mut args = lean(title::SYSTEM_PROMPT, model);
+    args.push("--no-session-persistence".into());
     args
 }
 
@@ -107,10 +119,19 @@ pub fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
 
 /// Answers `request` with Claude Code at `claude`, run from `dir`, streaming into `sink`.
 pub fn run(run: &Run, claude: &Path, dir: &Path, request: &Request, sink: &mut dyn FnMut(Item)) {
+    run_with(run, claude, dir, args(&request.model, request.session.as_deref()), request, sink);
+}
+
+/// Asks for a title (`title_args`), streaming into `sink`.
+pub fn run_title(run: &Run, claude: &Path, dir: &Path, request: &Request, sink: &mut dyn FnMut(Item)) {
+    run_with(run, claude, dir, title_args(&request.model), request, sink);
+}
+
+fn run_with(run: &Run, claude: &Path, dir: &Path, args: Vec<String>, request: &Request, sink: &mut dyn FnMut(Item)) {
     if let Err(e) = ensure_private_dir(dir) {
         return sink(Item::Event(Event::Fail(errors::not_started(Kind::Cli, &e))));
     }
     let mut cmd = Command::new(claude);
-    cmd.args(args(&request.model, request.session.as_deref())).current_dir(dir);
+    cmd.args(args).current_dir(dir);
     pump(run, Kind::Cli, cmd, input(request).into_bytes(), sink);
 }

@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use serde_json::json;
 
 use super::stream::Kind;
-use super::{Item, MAX_TOKENS, Request, Run, SYSTEM_PROMPT, errors, pump, user_content};
+use super::{Item, MAX_TOKENS, Request, Run, SYSTEM_PROMPT, errors, pump, title, user_content};
 use crate::reply::Event;
 
 pub const URL: &str = "https://api.anthropic.com/v1/messages";
@@ -19,6 +19,10 @@ const CURL: &str = "/usr/bin/curl";
 
 /// The request's JSON body: the conversation's earlier turns, then the message.
 pub fn body(request: &Request) -> serde_json::Value {
+    body_with(request, SYSTEM_PROMPT, MAX_TOKENS)
+}
+
+fn body_with(request: &Request, system: &str, max_tokens: u32) -> serde_json::Value {
     let mut messages = Vec::new();
     for turn in &request.history {
         messages.push(json!({"role": "user", "content": user_content(&turn.text, &turn.pngs)}));
@@ -27,11 +31,16 @@ pub fn body(request: &Request) -> serde_json::Value {
     messages.push(json!({"role": "user", "content": user_content(&request.text, &request.pngs)}));
     json!({
         "model": request.model,
-        "max_tokens": MAX_TOKENS,
+        "max_tokens": max_tokens,
         "stream": true,
-        "system": SYSTEM_PROMPT,
+        "system": system,
         "messages": messages,
     })
+}
+
+/// The title call's body: one small message, no history.
+pub fn title_body(request: &Request) -> serde_json::Value {
+    body_with(request, title::SYSTEM_PROMPT, title::MAX_TOKENS)
 }
 
 /// The body in a file only its owner can read, removed when dropped.
@@ -82,9 +91,18 @@ pub fn config(key: &str, body_file: &Path) -> String {
 
 /// Answers `request` with the API, streaming into `sink`.
 pub fn run(run: &Run, key: &str, request: &Request, sink: &mut dyn FnMut(Item)) {
+    run_body(run, key, &body(request), sink);
+}
+
+/// Asks for a title (`title_body`), streaming into `sink`.
+pub fn run_title(run: &Run, key: &str, request: &Request, sink: &mut dyn FnMut(Item)) {
+    run_body(run, key, &title_body(request), sink);
+}
+
+fn run_body(run: &Run, key: &str, body: &serde_json::Value, sink: &mut dyn FnMut(Item)) {
     static N: AtomicU64 = AtomicU64::new(0);
     let name = N.fetch_add(1, Ordering::Relaxed).to_string();
-    let file = match BodyFile::write(&std::env::temp_dir(), &name, &body(request)) {
+    let file = match BodyFile::write(&std::env::temp_dir(), &name, body) {
         Ok(file) => file,
         Err(e) => return sink(Item::Event(Event::Fail(errors::not_started(Kind::Api, &e)))),
     };

@@ -14,6 +14,7 @@ mod chat;
 mod chat_place;
 mod chat_window;
 mod export;
+mod history;
 mod login;
 mod marks;
 mod mock_model;
@@ -101,6 +102,10 @@ pub struct Host {
     /// next reply; Stop ends the one going.
     claude: model::Claude,
     pi: Option<pi_setup::Pi>,
+    /// The thread that saves conversations (None only in the placeholder host).
+    writer: Option<history::Writer>,
+    /// The most recent conversations, as the menu lists them.
+    recent: Vec<history::Entry>,
 }
 
 /// Something for the chat, wherever it is.
@@ -666,6 +671,85 @@ impl Host {
         }
     }
 
+    /// A conversation to write: the writer thread does it, this one goes on.
+    pub fn save_conversation(&mut self, snapshot: history::Snapshot) {
+        if let Some(writer) = &self.writer {
+            writer.save(snapshot);
+        }
+    }
+
+    /// An automatic title for a conversation the chat has left: into its file.
+    pub fn patch_title(&mut self, id: String, title: String) {
+        if let Some(writer) = &self.writer {
+            writer.set_title(id, title);
+        }
+    }
+
+    /// Asks the cheap model for conversation `id`'s title, off the main thread; what comes
+    /// (nothing, if it fails or takes more than `model::TITLE_TIMEOUT`) goes to the chat.
+    pub fn ask_title(&mut self, id: String, request: model::Request) {
+        let Some(handle) = self.handle.clone() else { return };
+        model::ask_title(request, model::TITLE_TIMEOUT, move |title| {
+            match title {
+                Some(title) => handle.update(move |host, _| host.with_chat(move |c, _| c.title_arrived(&id, title))),
+                None => eprintln!("Ailfred: no title for conversation {id}"),
+            }
+        });
+    }
+
+    /// The menu's list of recent conversations changed.
+    pub fn set_recent(&mut self, list: Vec<history::Entry>) {
+        if let Some(tray) = &mut self.tray {
+            tray.set_recent(&list);
+        }
+        self.recent = list;
+    }
+
+    /// Launch: the conversation last updated comes back into the chat, which stays closed: the
+    /// next press of the input's shortcut shows it. Not when the user has started one already.
+    fn restore(&mut self, loaded: history::Loaded) {
+        if self.chat_started || self.place.windowed() {
+            return;
+        }
+        self.chat_started = true;
+        self.load_into_chat(loaded);
+    }
+
+    /// A pick in the menu's Recent: that conversation is read off the main thread, and comes into
+    /// the chat (what streams is stopped), which shows.
+    pub fn open_recent(&mut self, id: String) {
+        let Some(handle) = self.handle.clone() else { return };
+        std::thread::spawn(move || match history::load(&history::dir_now(), &id) {
+            Some(loaded) => handle.update(move |host, _| host.show_loaded(loaded)),
+            None => eprintln!("Ailfred: conversation {id} couldn't be read"),
+        });
+    }
+
+    fn show_loaded(&mut self, loaded: history::Loaded) {
+        self.chat_started = true;
+        self.load_into_chat(loaded);
+        // Mid-move, its arrival shows it.
+        if self.place.moving() {
+            return;
+        }
+        if self.place.windowed() {
+            self.show_chat_window();
+        } else {
+            if self.quick_open {
+                self.hide_quick_input();
+            }
+            self.show_chat();
+        }
+    }
+
+    fn load_into_chat(&mut self, loaded: history::Loaded) {
+        self.with_chat(move |c, tx| {
+            c.load(loaded);
+            tx.scroll_to_bottom_instant("messages");
+            tx.animated();
+        });
+    }
+
     /// Message `id`'s captures, decoded off the main thread, join it in the chat.
     pub fn decode_into_chat(&self, id: u64, pngs: Vec<Vec<u8>>) {
         let Some(handle) = self.handle.clone() else { return };
@@ -723,7 +807,10 @@ impl Host {
         let Some(handle) = self.handle.clone() else { return };
         // The checkmark starts off; the startup thread reads the real state off the UI thread.
         match Tray::new(handle, self.installed, false) {
-            Ok(tray) => self.tray = Some(tray),
+            Ok(mut tray) => {
+                tray.set_recent(&self.recent);
+                self.tray = Some(tray);
+            }
             Err(e) => eprintln!("Ailfred: menu-bar icon failed: {e}"),
         }
     }
@@ -800,7 +887,13 @@ impl Host {
                     ui.update(|ui, _| ui.refresh_status());
                 }
             }
-            Action::Quit => tx.quit(),
+            Action::Quit => {
+                // What's queued to be saved is written first (a moment at most).
+                if let Some(writer) = &self.writer {
+                    writer.flush(Duration::from_secs(2));
+                }
+                tx.quit()
+            }
         }
     }
 }
@@ -838,6 +931,8 @@ fn host_init() -> Host {
         place: ChatPlace::default(),
         claude: model::Claude::default(),
         pi: None,
+        writer: None,
+        recent: Vec::new(),
     }
 }
 
@@ -1008,6 +1103,25 @@ fn main() {
             .options(chat_options),
         );
         let own = handle.clone();
+        // Conversations are written by a thread of their own; the list it keeps goes to the menu.
+        let folder = history::dir_now();
+        let writer = {
+            let handle = handle.clone();
+            history::Writer::start(folder.clone(), move |list| handle.update(move |host, _| host.set_recent(list)))
+        };
+        // At launch, off the UI thread: what's saved gives the menu its list and the chat its
+        // last conversation.
+        {
+            let (handle, writer) = (handle.clone(), writer.clone());
+            std::thread::spawn(move || {
+                let entries = history::scan(&folder);
+                let latest = entries.iter().find_map(|e| history::load(&folder, &e.id));
+                writer.seed(entries);
+                if let Some(loaded) = latest {
+                    handle.update(move |host, _| host.restore(loaded));
+                }
+            });
+        }
         let app = app.init(move || Host {
             overlay: Some(overlay),
             handle: Some(own),
@@ -1033,6 +1147,8 @@ fn main() {
             place: ChatPlace::default(),
             claude: model::Claude::default(),
             pi: None,
+            writer: Some(writer),
+            recent: Vec::new(),
         });
         // Runs on the main thread at the loop's first turn: the status item needs a running NSApp,
         // and runtime shortcut registration needs the host started.

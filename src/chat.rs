@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::Host;
+use crate::history;
 use crate::icons;
 use crate::mock_model;
 use crate::model;
@@ -27,6 +28,9 @@ use crate::quick_input::{self, ACCENT, Attached, Escape};
 
 mod geometry;
 mod images;
+mod saving;
+#[cfg(test)]
+mod saving_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 mod view;
@@ -94,12 +98,14 @@ pub struct Message {
     pub images: Vec<Image>,
     /// Its captures' PNG bytes, for the model (the conversation's later messages send them again).
     pub pngs: Vec<Arc<Vec<u8>>>,
+    /// Where each capture is kept on disk (`history`), once the conversation has been saved.
+    pub files: Vec<String>,
 }
 
 impl Message {
     /// A message with `text` and no captures.
     pub fn text(id: u64, text: impl Into<String>) -> Message {
-        Message { id, text: text.into(), images: Vec::new(), pngs: Vec::new() }
+        Message { id, text: text.into(), images: Vec::new(), pngs: Vec::new(), files: Vec::new() }
     }
 
     /// The same with the captures `pngs` (copied: the originals go to be decoded).
@@ -144,14 +150,21 @@ pub struct Chat {
     /// Claude Code's session of this conversation, once it has one (`set_session`), and the
     /// message whose reply it ends at: the next message resumes it. A new conversation has none.
     session: Option<(String, u64)>,
+    /// What the conversation is on disk: its id, title and the next capture's number.
+    conv: history::Meta,
     /// The streams whose runs were cancelled (the host ends their processes), for tests.
     #[cfg(test)]
     cancelled: Vec<u64>,
+    /// What was handed over to be saved, and the title calls asked for, for tests.
+    #[cfg(test)]
+    saved: Vec<history::Snapshot>,
+    #[cfg(test)]
+    title_asks: Vec<model::Request>,
 }
 
 impl Chat {
     pub fn new(host: Option<AppHandle<Host>>) -> Self {
-        Chat { messages: Vec::new(), draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0, replies: Vec::new(), next_token: 0, scratch: TextEdit::new(""), away: false, windowed: false, session: None, #[cfg(test)] cancelled: Vec::new() }
+        Chat { messages: Vec::new(), draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0, replies: Vec::new(), next_token: 0, scratch: TextEdit::new(""), away: false, windowed: false, session: None, conv: history::Meta::fresh(), #[cfg(test)] cancelled: Vec::new(), #[cfg(test)] saved: Vec::new(), #[cfg(test)] title_asks: Vec::new() }
     }
 
     pub fn is_open(&self) -> bool {
@@ -182,11 +195,7 @@ impl Chat {
     pub fn clear(&mut self) {
         self.stop(Instant::now());
         self.new_conversation();
-        self.session = None;
-        self.messages.clear();
-        self.replies.clear();
-        self.draft.clear();
-        self.shots.clear();
+        self.reset_conversation();
         (self.preview, self.over, self.away) = (None, false, false);
         self.draft.focused = true;
     }
@@ -354,7 +363,7 @@ impl Chat {
 
     /// Asks message `id` again: from `prompt` (`answer`: the user's answer to a question).
     fn start_reply(&mut self, id: u64, prompt: String, answer: bool) -> u64 {
-        self.stop(Instant::now());
+        self.stop_replies(Instant::now());
         self.next_token += 1;
         let token = self.next_token;
         // Claude's questions with options come from the mock only (so do their answers); pi asks
@@ -365,6 +374,8 @@ impl Chat {
         (reply.token, reply.answer) = (token, answer);
         self.replies.retain(|r| r.id != id);
         self.replies.push(reply);
+        // Saved as it starts: quitting now leaves it interrupted.
+        self.save();
         if let Some(host) = &self.host {
             match script {
                 Some(script) => host.update(move |host, _| host.stream_reply(token, script)),
@@ -381,8 +392,11 @@ impl Chat {
 
     /// The next event of the reply stream `token`; one stopped or replaced takes none.
     pub fn reply_event(&mut self, token: u64, event: Event, now: Instant) {
-        if let Some(reply) = self.reply_mut(token) {
-            reply.apply(event, now);
+        let Some(reply) = self.reply_mut(token) else { return };
+        let was_streaming = reply.streaming();
+        reply.apply(event, now);
+        if was_streaming && !reply.streaming() {
+            self.reply_ended(token);
         }
     }
 
@@ -392,19 +406,28 @@ impl Chat {
     }
 
     /// Stop: the reply streaming keeps what came, and its run (the process behind it) ends.
+    /// The conversation is saved with it.
     pub fn stop(&mut self, now: Instant) {
+        if self.stop_replies(now) {
+            self.save();
+        }
+    }
+
+    /// Stops what streams without saving; whether anything did.
+    fn stop_replies(&mut self, now: Instant) -> bool {
         let tokens: Vec<u64> = self.replies.iter().filter(|r| r.streaming()).map(|r| r.token).collect();
         for reply in &mut self.replies {
             reply.stop(now);
         }
         if tokens.is_empty() {
-            return;
+            return false;
         }
         #[cfg(test)]
         self.cancelled.extend(&tokens);
         if let Some(host) = &self.host {
             host.update(move |host, _| host.cancel_runs(&tokens));
         }
+        true
     }
 
     /// Retry: the reply `token` starts over; its new token.
@@ -462,11 +485,7 @@ impl Chat {
     /// Adds a message at the end of the conversation, the field focused for the next.
     pub fn push(&mut self, message: Message) {
         if std::mem::replace(&mut self.over, false) {
-            self.session = None;
-            self.messages.clear();
-            self.replies.clear();
-            self.draft.clear();
-            self.shots.clear();
+            self.reset_conversation();
         }
         self.messages.push(message);
         self.draft.focused = true;
