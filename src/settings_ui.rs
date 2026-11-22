@@ -1,4 +1,5 @@
-//! The Settings window: the capture shortcut (rune-kit's recorder), the save folder, the model
+//! The Settings window: the capture's and the quick input's shortcuts (rune-kit's recorders,
+//! with what happened to a saved one that was taken at startup), the save folder, the model
 //! (Claude's version and the Anthropic API key, which lives in the Keychain), whether Screen
 //! Recording is on (with the way to System Settings), and whether animations play under the
 //! system's Reduce Motion.
@@ -12,14 +13,19 @@ use rune_kit::{Button, Checkbox, Kit, SegmentedControl, ShortcutRecorder, Shortc
 use crate::Host;
 use crate::keychain;
 use crate::model;
-use crate::settings::{CaptureShortcut, Settings};
+use crate::settings::{HotKey, Settings, ShortcutFor};
 
 /// The window's size in points.
-pub const SIZE: (f32, f32) = (480.0, 480.0);
+pub const SIZE: (f32, f32) = (480.0, 540.0);
 
 pub struct SettingsUi {
     settings: Settings,
+    /// The capture's shortcut, and the quick input's.
     recorder: ShortcutRecorderState,
+    quick_recorder: ShortcutRecorderState,
+    /// What happened to each saved shortcut at startup, when it was taken.
+    capture_notice: Option<String>,
+    quick_notice: Option<String>,
     folder: PathBuf,
     ignore_reduce_motion: bool,
     /// The model picked (its id), and the API key being typed (a secure field).
@@ -30,7 +36,8 @@ pub struct SettingsUi {
     status: String,
     /// None only in the placeholder `init` Rune requires; the real state is supplied.
     host: Option<AppHandle<Host>>,
-    capture: CaptureShortcut,
+    capture: HotKey,
+    quick: HotKey,
     error: Option<String>,
     /// Whether Screen Recording is on, as last checked (None: not yet).
     screen_recording: Option<bool>,
@@ -48,14 +55,18 @@ fn pi_status() -> String {
 }
 
 impl SettingsUi {
-    pub fn new(settings: Settings, host: AppHandle<Host>, capture: CaptureShortcut) -> SettingsUi {
+    pub fn new(settings: Settings, host: AppHandle<Host>, capture: HotKey, quick: HotKey) -> SettingsUi {
         let recorder = ShortcutRecorderState::new(settings.shortcut());
+        let quick_recorder = ShortcutRecorderState::new(settings.quick_shortcut());
         let folder = settings.folder();
         let ignore_reduce_motion = settings.ignore_reduce_motion();
         let model = settings.model();
         SettingsUi {
             settings,
             recorder,
+            quick_recorder,
+            capture_notice: None,
+            quick_notice: None,
             folder,
             ignore_reduce_motion,
             model,
@@ -63,6 +74,7 @@ impl SettingsUi {
             status: String::new(),
             host: Some(host),
             capture,
+            quick,
             error: None,
             screen_recording: None,
             check_screen_recording: crate::app_env::screen_recording_allowed_quiet,
@@ -135,11 +147,18 @@ impl SettingsUi {
         }
     }
 
-    /// The saved shortcut couldn't be registered at startup: say so, and let recording the same
-    /// chord again retry it.
-    pub fn shortcut_failed(&mut self, error: String) {
-        self.recorder.mark_unregistered();
-        self.error = Some(error);
+    /// A saved shortcut was taken at startup: `active` is the one that works instead (its
+    /// default), if any; else the saved one stays shown, and recording it again retries it.
+    pub fn shortcut_notice(&mut self, which: ShortcutFor, active: Option<Shortcut>, notice: String) {
+        let (recorder, slot) = match which {
+            ShortcutFor::Capture => (&mut self.recorder, &mut self.capture_notice),
+            ShortcutFor::QuickInput => (&mut self.quick_recorder, &mut self.quick_notice),
+        };
+        match active {
+            Some(active) => *recorder = ShortcutRecorderState::new(Some(active)),
+            None => recorder.mark_unregistered(),
+        }
+        *slot = Some(notice);
     }
 
     fn toggle_reduce_motion(&mut self) {
@@ -152,7 +171,12 @@ impl SettingsUi {
     pub fn placeholder() -> SettingsUi {
         let settings = Settings::with(rune::prefs::Prefs::memory());
         let recorder = ShortcutRecorderState::new(settings.shortcut());
+        let quick_recorder = ShortcutRecorderState::new(settings.quick_shortcut());
         SettingsUi {
+            quick_recorder,
+            capture_notice: None,
+            quick_notice: None,
+            quick: HotKey::quick_input(),
             folder: settings.folder(),
             ignore_reduce_motion: settings.ignore_reduce_motion(),
             model: settings.model(),
@@ -161,7 +185,7 @@ impl SettingsUi {
             settings,
             recorder,
             host: None,
-            capture: CaptureShortcut::default(),
+            capture: HotKey::capture(),
             error: None,
             screen_recording: None,
             check_screen_recording: crate::app_env::screen_recording_allowed_quiet,
@@ -179,10 +203,23 @@ pub fn view(s: &SettingsUi, cx: &mut Cx<SettingsUi>) -> El {
     crate::settings::apply_motion(cx);
     let k = kit(cx.system_dark());
     let label = |t: &str| text(t).font(k.ty.ui_medium).color(k.c.text_strong);
-    let recorder = ShortcutRecorder::new("capture-shortcut", &s.recorder, |s: &mut SettingsUi| &mut s.recorder)
-        .label("Capture area")
-        .on_change(change_shortcut)
-        .build(k);
+    let notice = |key: &str, notice: &Option<String>| notice.as_ref().map(|n| text(n.clone()).key(key).font(k.ty.small).color(k.c.text_weak));
+    let mut shortcuts = col()
+        .gap(8.0)
+        .child(label("Shortcuts"))
+        .child(ShortcutRecorder::new("capture-shortcut", &s.recorder, |s: &mut SettingsUi| &mut s.recorder).label("Capture area").on_change(change_shortcut).build(k));
+    if let Some(n) = notice("capture-notice", &s.capture_notice) {
+        shortcuts = shortcuts.child(n);
+    }
+    shortcuts = shortcuts.child(
+        ShortcutRecorder::new("quick-shortcut", &s.quick_recorder, |s: &mut SettingsUi| &mut s.quick_recorder)
+            .label("Quick input")
+            .on_change(change_quick_shortcut)
+            .build(k),
+    );
+    if let Some(n) = notice("quick-notice", &s.quick_notice) {
+        shortcuts = shortcuts.child(n);
+    }
     let folder = row()
         .gap(10.0)
         .child(text(short(&s.folder)).font(k.ty.ui).color(k.c.text_weak))
@@ -219,7 +256,7 @@ pub fn view(s: &SettingsUi, cx: &mut Cx<SettingsUi>) -> El {
                 s.check_permissions();
             }
         })
-        .child(col().gap(8.0).child(label("Capture shortcut")).child(recorder))
+        .child(shortcuts)
         .child(col().gap(8.0).child(label("Save screenshots to")).child(folder))
         .child(model_section);
     if let Some(allowed) = s.screen_recording {
@@ -269,8 +306,20 @@ fn change_shortcut(s: &mut SettingsUi, shortcut: Option<&Shortcut>, _: &mut Tx) 
     let Some(host) = s.host.clone() else { return Ok(()) };
     s.capture.replace(&host, shortcut)?;
     s.settings.set_shortcut(shortcut);
+    s.capture_notice = None;
     let shown = shortcut.cloned();
-    host.update(move |host, _| host.show_capture_shortcut(shown.as_ref()));
+    host.update(move |host, _| host.show_shortcut(ShortcutFor::Capture, shown.as_ref()));
+    Ok(())
+}
+
+/// The same for the quick input's shortcut.
+fn change_quick_shortcut(s: &mut SettingsUi, shortcut: Option<&Shortcut>, _: &mut Tx) -> Result<(), ShortcutError> {
+    let Some(host) = s.host.clone() else { return Ok(()) };
+    s.quick.replace(&host, shortcut)?;
+    s.settings.set_quick_shortcut(shortcut);
+    s.quick_notice = None;
+    let shown = shortcut.cloned();
+    host.update(move |host, _| host.show_shortcut(ShortcutFor::QuickInput, shown.as_ref()));
     Ok(())
 }
 
@@ -292,7 +341,7 @@ mod tests {
     use rune::{Env, Runtime};
 
     use super::*;
-    use crate::settings::MODEL_TEST;
+    use crate::settings::{MODEL_TEST, ShortcutFor};
 
     fn ui() -> SettingsUi {
         SettingsUi::placeholder()
@@ -372,6 +421,41 @@ mod tests {
 
     fn shown(rt: &Runtime<SettingsUi>) -> Vec<rune::ElementInfo> {
         rt.elements().into_iter().filter(|e| !e.exiting).collect()
+    }
+
+    #[test]
+    fn both_shortcuts_can_be_recorded() {
+        let mut rt = frames(ui());
+        let els = shown(&rt);
+        for label in ["Capture area", "Quick input"] {
+            assert!(els.iter().any(|e| e.label.as_deref() == Some(label)), "{label}");
+        }
+        let default: Shortcut = "ctrl+alt+space".parse().unwrap();
+        rt.update(|s, _| assert_eq!(s.quick_recorder.shortcut(), Some(&default)));
+    }
+
+    #[test]
+    fn a_taken_quick_input_shortcut_shows_the_one_that_works_and_says_why() {
+        let mut s = ui();
+        let fallback: Shortcut = "ctrl+alt+space".parse().unwrap();
+        s.shortcut_notice(ShortcutFor::QuickInput, Some(fallback.clone()), "⌃⌥J isn't available: ⌃⌥Space works instead.".into());
+        assert_eq!(s.quick_recorder.shortcut(), Some(&fallback));
+        assert!(s.capture_notice.is_none());
+        let rt = frames(s);
+        let els = shown(&rt);
+        let notice = els.iter().find(|e| e.key.as_deref() == Some("quick-notice")).and_then(|e| e.text.clone());
+        assert!(notice.is_some_and(|n| n.contains("⌃⌥J")));
+        let low = els.iter().filter(|e| e.role == "button" || e.role == "checkbox").map(|e| e.rect[1] + e.rect[3]).fold(0.0, f32::max);
+        assert!(low + 24.0 + 20.0 <= SIZE.1, "inside the window: {low}");
+    }
+
+    #[test]
+    fn a_shortcut_that_cant_be_had_at_all_stays_shown_and_recording_it_again_retries() {
+        let mut s = ui();
+        let saved = s.recorder.shortcut().cloned();
+        s.shortcut_notice(ShortcutFor::Capture, None, "⇧⌘Space isn't available.".into());
+        assert_eq!(s.recorder.shortcut(), saved.as_ref(), "the saved one, unregistered");
+        assert!(s.capture_notice.is_some() && s.quick_notice.is_none());
     }
 
     #[test]

@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use rune::prefs::Prefs;
-use rune::{AppHandle, Shortcut, ShortcutError, ShortcutId};
+use rune::{AppHandle, Shortcut, ShortcutError, ShortcutId, Tx};
 
 use crate::Host;
 
@@ -20,6 +20,32 @@ pub fn app_id(installed: bool) -> &'static str {
 }
 pub const DEFAULT_SHORTCUT: &str = "cmd+shift+space";
 const SHORTCUT: &str = "shortcut";
+/// The quick input's chord, until changed in Settings (Option+Space alone is Claude's quick entry).
+pub const DEFAULT_QUICK_SHORTCUT: &str = "ctrl+alt+space";
+
+/// Which global shortcut: the capture's or the quick input's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShortcutFor {
+    Capture,
+    QuickInput,
+}
+
+impl ShortcutFor {
+    pub fn default_chord(self) -> &'static str {
+        match self {
+            ShortcutFor::Capture => DEFAULT_SHORTCUT,
+            ShortcutFor::QuickInput => DEFAULT_QUICK_SHORTCUT,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ShortcutFor::Capture => "capture",
+            ShortcutFor::QuickInput => "quick input",
+        }
+    }
+}
+const QUICK_SHORTCUT: &str = "quick_shortcut";
 const FOLDER: &str = "folder";
 const IGNORE_REDUCE_MOTION: &str = "ignore_reduce_motion";
 const MODEL: &str = "model";
@@ -62,16 +88,33 @@ impl Settings {
 
     /// The capture shortcut: the default until changed; None once the user cleared it.
     pub fn shortcut(&self) -> Option<Shortcut> {
-        match self.prefs.get::<Option<String>>(SHORTCUT) {
-            None => DEFAULT_SHORTCUT.parse().ok(),
-            Some(None) => None,
-            Some(Some(saved)) => saved.parse().ok().or_else(|| DEFAULT_SHORTCUT.parse().ok()),
-        }
+        self.saved_shortcut(SHORTCUT, DEFAULT_SHORTCUT)
     }
 
     pub fn set_shortcut(&mut self, shortcut: Option<&Shortcut>) {
+        self.save_shortcut(SHORTCUT, shortcut);
+    }
+
+    /// The quick input's shortcut: the default until changed; None once the user cleared it.
+    pub fn quick_shortcut(&self) -> Option<Shortcut> {
+        self.saved_shortcut(QUICK_SHORTCUT, DEFAULT_QUICK_SHORTCUT)
+    }
+
+    pub fn set_quick_shortcut(&mut self, shortcut: Option<&Shortcut>) {
+        self.save_shortcut(QUICK_SHORTCUT, shortcut);
+    }
+
+    fn saved_shortcut(&self, key: &str, default: &str) -> Option<Shortcut> {
+        match self.prefs.get::<Option<String>>(key) {
+            None => default.parse().ok(),
+            Some(None) => None,
+            Some(Some(saved)) => saved.parse().ok().or_else(|| default.parse().ok()),
+        }
+    }
+
+    fn save_shortcut(&mut self, key: &str, shortcut: Option<&Shortcut>) {
         let value: Option<String> = shortcut.map(|s| s.to_string());
-        if let Err(e) = self.prefs.set(SHORTCUT, &value) {
+        if let Err(e) = self.prefs.set(key, &value) {
             eprintln!("Ailfred: saving the shortcut failed: {e}");
         }
     }
@@ -151,20 +194,63 @@ pub fn folder_now() -> PathBuf {
     FOLDER_NOW.read().unwrap_or_else(|e| e.into_inner()).clone().filter(|p| p.is_dir()).unwrap_or_else(default_folder)
 }
 
-/// The capture shortcut's current registration, shared by startup and the settings window.
-/// Main thread only (registration is called from the app's own updates and windows).
-#[derive(Clone, Default)]
-pub struct CaptureShortcut(Arc<Mutex<Option<ShortcutId>>>);
+/// A saved shortcut as registered at startup.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Started {
+    /// The chord that works now: the saved one, else the default; None: neither (or cleared).
+    pub active: Option<Shortcut>,
+    /// What to tell the user when the saved one couldn't be had.
+    pub notice: Option<String>,
+}
 
-impl CaptureShortcut {
+/// Registers `saved` (None: cleared, nothing); refused, the `default` instead, saying so.
+pub fn start_shortcut(saved: Option<Shortcut>, default: &str, mut register: impl FnMut(Option<&Shortcut>) -> Result<(), ShortcutError>) -> Started {
+    let Some(saved) = saved else {
+        let _ = register(None);
+        return Started { active: None, notice: None };
+    };
+    let error = match register(Some(&saved)) {
+        Ok(()) => return Started { active: Some(saved), notice: None },
+        Err(e) => e,
+    };
+    let name = |s: &Shortcut| crate::quick_input::chord_symbols(&s.keycaps());
+    let gone = format!("{} isn't available ({error})", name(&saved));
+    if let Some(default) = default.parse::<Shortcut>().ok().filter(|d| *d != saved)
+        && register(Some(&default)).is_ok()
+    {
+        let notice = format!("{gone}: {} works instead. Record another to change it.", name(&default));
+        return Started { active: Some(default), notice: Some(notice) };
+    }
+    Started { active: None, notice: Some(format!("{gone}. Record another; the menu still has it.")) }
+}
+
+/// A global shortcut's current registration and what it does, shared by startup and the settings
+/// window. Main thread only (registration is called from the app's own updates and windows).
+#[derive(Clone)]
+pub struct HotKey {
+    current: Arc<Mutex<Option<ShortcutId>>>,
+    action: fn(&mut Host, &mut Tx),
+}
+
+impl HotKey {
+    /// The capture's: takes a screenshot.
+    pub fn capture() -> HotKey {
+        HotKey { current: Arc::default(), action: crate::on_shortcut }
+    }
+
+    /// The quick input's: shows or hides it.
+    pub fn quick_input() -> HotKey {
+        HotKey { current: Arc::default(), action: |host, _| host.toggle_quick_input() }
+    }
+
     /// Registers `shortcut` (None: no shortcut) and only then releases the previous one, so a
     /// refused chord leaves the old one working.
     pub fn replace(&self, host: &AppHandle<Host>, shortcut: Option<&Shortcut>) -> Result<(), ShortcutError> {
         let new = match shortcut {
-            Some(s) => Some(host.register_shortcut(s.clone(), |host: &mut Host, tx| crate::on_shortcut(host, tx))?),
+            Some(s) => Some(host.register_shortcut(s.clone(), self.action)?),
             None => None,
         };
-        let mut current = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut current = self.current.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(old) = *current
             && let Err(e) = host.unregister_shortcut(old)
         {
@@ -193,6 +279,76 @@ mod tests {
         let chord: Shortcut = "ctrl+alt+k".parse().unwrap();
         s.set_shortcut(Some(&chord));
         assert_eq!(s.shortcut(), Some(chord));
+    }
+
+    #[test]
+    fn the_quick_input_shortcut_defaults_to_ctrl_option_space_clears_and_round_trips() {
+        let mut s = Settings::with(Prefs::memory());
+        assert_eq!(s.quick_shortcut(), "ctrl+alt+space".parse().ok());
+        s.set_quick_shortcut(None);
+        assert_eq!(s.quick_shortcut(), None, "cleared stays cleared");
+        let chord: Shortcut = "ctrl+alt+j".parse().unwrap();
+        s.set_quick_shortcut(Some(&chord));
+        assert_eq!(s.quick_shortcut(), Some(chord));
+        assert_eq!(s.shortcut(), DEFAULT_SHORTCUT.parse().ok(), "the capture shortcut is its own");
+    }
+
+    fn chord(s: &str) -> Shortcut {
+        s.parse().unwrap()
+    }
+
+    /// Registers what `taken` doesn't hold, recording each try.
+    fn registrar<'a>(taken: &'a [&'a str], tried: &'a mut Vec<Option<String>>) -> impl FnMut(Option<&Shortcut>) -> Result<(), ShortcutError> + 'a {
+        move |s| {
+            tried.push(s.map(|s| s.to_string()));
+            match s {
+                Some(s) if taken.iter().any(|t| chord(t) == *s) => Err(ShortcutError::Conflict),
+                _ => Ok(()),
+            }
+        }
+    }
+
+    #[test]
+    fn a_saved_shortcut_that_registers_is_used_as_is() {
+        let mut tried = Vec::new();
+        let started = start_shortcut(Some(chord("ctrl+alt+j")), "ctrl+alt+space", registrar(&[], &mut tried));
+        assert_eq!(started, Started { active: Some(chord("ctrl+alt+j")), notice: None });
+        assert_eq!(tried.len(), 1);
+    }
+
+    #[test]
+    fn a_saved_shortcut_thats_taken_falls_back_to_the_default_and_says_so() {
+        let mut tried = Vec::new();
+        let started = start_shortcut(Some(chord("ctrl+alt+j")), "ctrl+alt+space", registrar(&["ctrl+alt+j"], &mut tried));
+        assert_eq!(started.active, Some(chord("ctrl+alt+space")));
+        let notice = started.notice.expect("a notice");
+        assert!(notice.contains("⌃⌥J") && notice.contains("⌃⌥Space"), "names both: {notice}");
+    }
+
+    #[test]
+    fn with_the_default_taken_too_theres_no_shortcut_and_a_notice() {
+        let mut tried = Vec::new();
+        let started = start_shortcut(Some(chord("ctrl+alt+j")), "ctrl+alt+space", registrar(&["ctrl+alt+j", "ctrl+alt+space"], &mut tried));
+        assert_eq!(started.active, None);
+        assert!(started.notice.is_some());
+        assert_eq!(tried.len(), 2);
+    }
+
+    #[test]
+    fn the_default_itself_taken_isnt_tried_twice() {
+        let mut tried = Vec::new();
+        let started = start_shortcut(Some(chord("ctrl+alt+space")), "ctrl+alt+space", registrar(&["ctrl+alt+space"], &mut tried));
+        assert_eq!(started.active, None);
+        assert!(started.notice.expect("a notice").contains("⌃⌥Space"));
+        assert_eq!(tried.len(), 1);
+    }
+
+    #[test]
+    fn a_cleared_shortcut_registers_nothing_and_says_nothing() {
+        let mut tried = Vec::new();
+        let started = start_shortcut(None, "ctrl+alt+space", registrar(&[], &mut tried));
+        assert_eq!(started, Started { active: None, notice: None });
+        assert_eq!(tried, vec![None]);
     }
 
     #[test]

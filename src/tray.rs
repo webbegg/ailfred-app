@@ -8,6 +8,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 use crate::Host;
 use crate::history::Entry;
+use crate::settings::ShortcutFor;
 use crate::status::Status;
 
 /// What a menu pick asks the host to do.
@@ -67,6 +68,7 @@ pub struct Tray {
     /// Dropping it removes the icon.
     icon: TrayIcon,
     capture: MenuItem,
+    quick: MenuItem,
     menu: Menu,
     /// The most recent conversations, after "Quick Input"; in the menu only while there are any.
     recent: Submenu,
@@ -88,13 +90,8 @@ impl Tray {
         let capture = MenuItem::with_id(Action::Capture.id(), "Capture Area", true, None);
         let window = MenuItem::with_id(Action::CaptureWindow.id(), "Capture Window", true, None);
         let full = MenuItem::with_id(Action::CaptureFullScreen.id(), "Capture Full Screen", true, None);
-        // Shows the fixed chord (`quick_input::SHORTCUT`, Ctrl+Option+Space).
-        let quick = MenuItem::with_id(
-            Action::QuickInput.id(),
-            "Quick Input",
-            true,
-            Some(Accelerator::new(Modifiers::CONTROL | Modifiers::ALT, Code::Space)),
-        );
+        // Its chord too, once registered.
+        let quick = MenuItem::with_id(Action::QuickInput.id(), "Quick Input", true, None);
         let folder = MenuItem::with_id(Action::OpenFolder.id(), "Open Screenshots Folder", true, None);
         let login = CheckMenuItem::with_id(Action::ToggleLogin.id(), "Launch at Login", can_login, login_enabled, None);
         let permission = MenuItem::with_id(
@@ -139,7 +136,7 @@ impl Tray {
             }
         }));
         let recent = Submenu::with_id("recent", "Recent", true);
-        Ok(Tray { icon, capture, menu, recent, recent_shown: false, login, permission, permission_shown: false, can_login, glyph: Glyph::Plain, tooltip: "Ailfred".into() })
+        Ok(Tray { icon, capture, quick, menu, recent, recent_shown: false, login, permission, permission_shown: false, can_login, glyph: Glyph::Plain, tooltip: "Ailfred".into() })
     }
 
     /// The icon and its tooltip show `status` (each set only when it changes).
@@ -160,11 +157,15 @@ impl Tray {
         }
     }
 
-    /// Shows the capture chord next to "Capture Area" (none when cleared). Rune writes chords as
-    /// `shift+super+space`, which muda's accelerator parser reads.
-    pub fn show_capture_shortcut(&self, shortcut: Option<&rune::Shortcut>) {
+    /// Shows a chord next to "Capture Area" or "Quick Input" (none when it has none). Rune writes
+    /// chords as `shift+super+space`, which muda's accelerator parser reads.
+    pub fn show_shortcut(&self, which: ShortcutFor, shortcut: Option<&rune::Shortcut>) {
         let accelerator = shortcut.and_then(|s| s.to_string().parse::<Accelerator>().ok());
-        if let Err(e) = self.capture.set_accelerator(accelerator) {
+        let item = match which {
+            ShortcutFor::Capture => &self.capture,
+            ShortcutFor::QuickInput => &self.quick,
+        };
+        if let Err(e) = item.set_accelerator(accelerator) {
             eprintln!("Ailfred: showing the shortcut in the menu failed: {e}");
         }
     }
