@@ -191,7 +191,9 @@ impl Host {
         });
         self.show_chat_window();
         // Opened at the panel's rect, it grows to its own size, centred.
-        ui.update(chat_window::popped_out);
+        let [.., width, height] = self.window_screen().visible;
+        let size = chat_window::popped_size([width, height]);
+        ui.update(move |w, tx| chat_window::popped_out(w, tx, size));
     }
 
     /// Opens the chat's window in front, with a Dock icon (an accessory app's window is hard
