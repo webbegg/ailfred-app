@@ -774,6 +774,33 @@ mod tests {
         assert!(rt.elements().iter().any(|e| e.label.as_deref() == Some(INTERRUPTED_ASK)), "the question");
     }
 
+    #[test]
+    fn a_long_conversation_offers_show_earlier_at_its_top_and_keeps_its_place_as_they_come() {
+        use crate::history::{Loaded, LoadedMessage, ReplyState, SavedReply};
+        let mut chat = Chat::new(None);
+        chat.place(Insets::default(), [1440.0, 900.0]);
+        chat.open();
+        let said = |i: usize| LoadedMessage { text: format!("m{i}"), files: Vec::new(), pngs: Vec::new(), reply: Some(SavedReply { state: ReplyState::Done, text: "ok".into(), ..SavedReply::default() }) };
+        let messages = (0..chat::PAGE + 3).map(said).collect();
+        chat.load(Loaded { id: "20240101-000000-0002".into(), created: 1, title: None, title_by_user: false, session: None, messages, next_png: 0 });
+        let mut rt = Runtime::new(W { chat }, window, (1440.0, 900.0), Env::new(true, 2.0));
+        settle(&mut rt, 10);
+        assert!(has(&rt, "msg-3") && !has(&rt, "msg-2") && !has(&rt, "msg-0"), "the latest page only");
+        assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("show-earlier") && e.label.as_deref() == Some("Show earlier")));
+        rt.update(|_, tx| tx.scroll_to_instant("messages", 0.0, 0.0));
+        settle(&mut rt, 10);
+        let top = |rt: &Runtime<W>, key: &str| rt.elements().into_iter().find(|e| !e.exiting && e.key.as_deref() == Some(key)).map(|e| e.rect[1]);
+        let before = top(&rt, "msg-3").expect("the first shown");
+        let b = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("show-earlier")).unwrap();
+        let (bx, by) = (b.rect[0] + b.rect[2] / 2.0, b.rect[1] + b.rect[3] / 2.0);
+        rt.pointer_down(bx, by);
+        rt.pointer_up(bx, by);
+        settle(&mut rt, 60);
+        assert!(has(&rt, "msg-0") && !has(&rt, "show-earlier"), "all shown, nothing earlier: {:?}", keys(&rt));
+        let after = top(&rt, "msg-3").unwrap();
+        assert!((after - before).abs() < 2.0, "it stays where it was: {before} → {after}");
+    }
+
     /// S2g, measured: what a frame costs while a long reply streams, early on and near its end.
     /// `cargo test --release --offline streaming_a_long_reply_frame_cost -- --ignored --nocapture`
     #[test]

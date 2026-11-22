@@ -3,7 +3,7 @@
 
 use std::time::Instant;
 
-use super::{Chat, LOCAL_IDS, Message};
+use super::{Chat, LOCAL_IDS, Message, PAGE};
 use crate::history;
 use crate::mock_model;
 use crate::model;
@@ -15,6 +15,7 @@ impl Chat {
     pub(super) fn reset_conversation(&mut self) {
         self.session = None;
         self.messages.clear();
+        self.hidden = 0;
         self.replies.clear();
         self.draft.clear();
         self.shots.clear();
@@ -153,6 +154,8 @@ impl Chat {
             }
             self.messages.push(message);
         }
+        // Long, it opens at its latest page.
+        self.hidden = self.messages.len().saturating_sub(PAGE);
         self.session = loaded.session.and_then(|(session, index)| Some((session, self.messages.get(index)?.id)));
         if let Some(host) = &self.host {
             for (id, pngs) in to_decode {

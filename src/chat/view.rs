@@ -236,7 +236,10 @@ pub fn body<S: 'static>(s: &Chat, header: El, lens: fn(&mut S) -> &mut Chat) -> 
     let divider = || el().w_full().h(1.0).fill(Color::WHITE.alpha(0.06));
     let mut thread = col().key("thread").w_full().gap(14.0).px(14.0).py(14.0).growth(GrowthSpec::default());
     let goes_on = s.continuable();
-    for (i, m) in s.messages.iter().enumerate() {
+    if s.hidden > 0 {
+        thread = thread.child(show_earlier::<S>(s.hidden, &t, lens));
+    }
+    for (i, m) in s.messages.iter().enumerate().skip(s.hidden) {
         thread = thread.child(message(i, m, &t));
         if let Some(r) = s.reply_to(m.id) {
             thread = thread.child(reply_view::view(r, goes_on == Some(r.token), lens));
@@ -303,6 +306,33 @@ pub fn body<S: 'static>(s: &Chat, header: El, lens: fn(&mut S) -> &mut Chat) -> 
     }
     let composer = composer.child(typing);
     col().child(header).child(divider()).child(messages).child(el().w_full().padding(10.0).child(composer))
+}
+
+/// At the thread's top while earlier messages don't show: brings the page before, keeping the
+/// first message shown where it is on screen.
+fn show_earlier<S: 'static>(hidden: usize, t: &tok::Theme, lens: fn(&mut S) -> &mut Chat) -> El {
+    row()
+        .key("show-earlier-row")
+        .w_full()
+        .justify_center()
+        .child(
+            text("Show earlier")
+                .key("show-earlier")
+                .font(TextStyle::new(12.0, 500.0).lh(16.0))
+                .color(t.text_secondary)
+                .px(10.0)
+                .py(4.0)
+                .radius(8.0)
+                .hover(Color::WHITE.alpha(0.08))
+                .press(Color::BLACK.alpha(0.12))
+                .cursor(Cursor::Pointer)
+                .role("button")
+                .label("Show earlier")
+                .on_press_tx(move |s: &mut S, tx: &mut Tx| {
+                    tx.keep_on_screen(format!("msg-{hidden}"));
+                    lens(s).show_earlier();
+                }),
+        )
 }
 
 /// Keys in the window with the chat's field focused and nothing else taking them.
