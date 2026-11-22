@@ -5,7 +5,7 @@ use std::os::fd::AsRawFd;
 
 use objc2_core_graphics::{CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess};
 
-/// The bundle's name, `<BUNDLE_NAME>.app`; `scripts/install-mac` builds it with the same `NAME=`.
+/// The bundle's name, `<BUNDLE_NAME>.app`; `scripts/bundle-mac` builds it with the same `NAME=`.
 pub const BUNDLE_NAME: &str = "Ailfred";
 
 /// Whether this process runs from its installed bundle, `…/Ailfred.app/Contents/MacOS/…`.
@@ -80,9 +80,9 @@ mod tests {
     }
 
     #[test]
-    fn install_script_builds_the_same_bundle_name() {
-        let script = include_str!("../scripts/install-mac");
+    fn the_bundle_script_builds_the_same_bundle_name() {
+        let script = include_str!("../scripts/bundle-mac");
         let name = format!("NAME={BUNDLE_NAME}");
-        assert!(script.lines().any(|l| l == name), "install-mac has no line {name}");
+        assert!(script.lines().any(|l| l == name), "bundle-mac has no line {name}");
     }
 }

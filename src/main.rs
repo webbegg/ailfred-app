@@ -1066,7 +1066,7 @@ impl Drop for Busy {
 
 fn main() {
     // `--app-icon <out.png>`: writes the app's icon, 1024 px, for the bundle's `.icns`
-    // (scripts/install-mac), and exits.
+    // (scripts/bundle-mac), and exits.
     let args: Vec<String> = std::env::args().collect();
     if let [_, flag, out] = args.as_slice()
         && flag == "--app-icon"

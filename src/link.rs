@@ -1,7 +1,7 @@
 //! Links that reach Ailfred (`ailfred://…`, from `open`, a browser, Shortcuts or a script).
 //! They come from anyone who can run `open`: only the exact forms below do anything.
 
-/// The scheme the app's bundle declares (`scripts/install-mac`).
+/// The scheme the app's bundle declares (`scripts/bundle-mac`).
 pub const SCHEME: &str = "ailfred";
 
 /// What a link asks for.
@@ -53,8 +53,8 @@ mod tests {
 
     #[test]
     fn the_installed_app_declares_the_scheme() {
-        let script = include_str!("../scripts/install-mac");
+        let script = include_str!("../scripts/bundle-mac");
         let declared = format!("\"CFBundleURLSchemes\":[\"{SCHEME}\"]");
-        assert!(script.contains(&declared), "install-mac declares no {declared}");
+        assert!(script.contains(&declared), "bundle-mac declares no {declared}");
     }
 }
