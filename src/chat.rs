@@ -870,6 +870,7 @@ pub fn body<S: 'static>(s: &Chat, header: El, lens: fn(&mut S) -> &mut Chat) -> 
     }
     let field = text_input(&s.draft, TextStyle::new(14.0, 400.0).lh(20.0))
         .key("draft")
+        .label("Message")
         .w_full()
         .color(t.text)
         .caret(t.text, ACCENT.alpha(0.35))

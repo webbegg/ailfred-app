@@ -408,6 +408,7 @@ fn question<S: 'static>(token: u64, j: usize, q: &Question, t: &tok::Theme, lens
     };
     let field = text_input(&q.other, SMALL.lh(18.0))
         .key("other")
+        .label("Something else")
         .w_full()
         .color(t.text)
         .caret(t.text, ACCENT.alpha(0.35))
@@ -584,6 +585,28 @@ mod tests {
         settle(&mut rt, 90);
         assert_eq!(rt.scroll_at_bottom("messages"), Some(true), "back at the latest");
         assert!(!has(&rt, "to-latest"));
+    }
+
+    #[test]
+    fn every_text_field_has_a_name_a_screen_reader_can_say() {
+        use crate::quick_input::{self, QuickInput};
+        let mut q = QuickInput::new(None);
+        q.chat.place(Insets::default(), [1440.0, 900.0]);
+        q.open_chat();
+        let id = chat::tests::sent(&mut q.chat, "ask");
+        let token = q.chat.ask(id).unwrap();
+        for (_, event) in mock_model::script("ask") {
+            q.chat.reply_event(token, event, Instant::now());
+        }
+        let mut rt = Runtime::new(q, quick_input::view, (1440.0, 900.0), Env::new(true, 2.0));
+        for _ in 0..30 {
+            rt.frame(1.0 / 60.0);
+        }
+        let elements = rt.elements();
+        for key in ["query", "draft", "other"] {
+            let field = elements.iter().find(|e| e.key.as_deref() == Some(key)).unwrap_or_else(|| panic!("{key} shown"));
+            assert!(field.label.as_deref().is_some_and(|l| !l.trim().is_empty()), "{key} has no name");
+        }
     }
 
     #[test]

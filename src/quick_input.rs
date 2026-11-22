@@ -682,6 +682,7 @@ pub fn view(s: &QuickInput, cx: &mut Cx<QuickInput>) -> El {
 fn input_row(s: &QuickInput, t: &tok::Theme) -> El {
     let field = text_input(&s.query, TextStyle::new(15.0, 400.0).lh(22.0))
         .key("query")
+        .label("Ask anything")
         .single_line()
         .grow(1.0)
         .min_w(FIELD_MIN_W)
