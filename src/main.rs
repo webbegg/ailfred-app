@@ -28,6 +28,7 @@ mod quick_input;
 mod reply;
 mod reply_view;
 mod screens;
+mod link;
 mod settings;
 mod settings_ui;
 mod shot;
@@ -48,7 +49,7 @@ use rune::{
 use crate::quick_input::QuickInput;
 
 use crate::shot::{Mode, Overlay};
-use crate::settings::{CaptureShortcut, Settings};
+use crate::settings::{HotKey, Settings, ShortcutFor};
 use crate::settings_ui::SettingsUi;
 use crate::chat::Chat;
 use crate::chat_place::{ChatPlace, Route, Where};
@@ -66,10 +67,11 @@ pub struct Host {
     installed: bool,
     /// A capture is running on its thread; a second press waits for it.
     capturing: Arc<AtomicBool>,
-    /// The capture shortcut's registration (shared with the settings window).
-    capture_shortcut: CaptureShortcut,
-    /// The saved shortcut, registered at the loop's first turn.
-    initial_shortcut: Option<rune::Shortcut>,
+    /// The capture's and the quick input's shortcuts (shared with the settings window).
+    capture_shortcut: HotKey,
+    quick_shortcut: HotKey,
+    /// The saved shortcuts (capture, quick input), registered at the loop's first turn.
+    initial_shortcuts: Option<(Option<rune::Shortcut>, Option<rune::Shortcut>)>,
     settings_window: Option<WindowHandle>,
     settings_ui: Option<AppHandle<SettingsUi>>,
     /// The quick input's and the chat's window (it covers the display), and whether the input is
@@ -811,15 +813,6 @@ impl Host {
         });
     }
 
-    /// Registers the quick input's fixed chord. Main thread, loop running.
-    fn register_quick_shortcut(&mut self) {
-        let Some(handle) = self.handle.clone() else { return };
-        let Ok(shortcut) = quick_input::SHORTCUT.parse::<rune::Shortcut>() else { return };
-        if let Err(e) = handle.register_shortcut(shortcut, |host: &mut Host, _| host.toggle_quick_input()) {
-            eprintln!("Ailfred: the quick input shortcut {} couldn't be registered: {e}", quick_input::SHORTCUT);
-        }
-    }
-
     pub fn hide_overlay(&self) {
         self.capture_shown.store(false, Ordering::Release);
         // A capture cancelled mid-drag leaves the input tucked; it comes back and takes the keys.
@@ -862,32 +855,36 @@ impl Host {
         }
     }
 
-    /// Registers the saved capture shortcut (main thread, loop running) and shows it in the menu.
-    fn register_saved_shortcut(&mut self) {
+    /// Registers the saved shortcuts (main thread, loop running), each falling back to its
+    /// default when taken, and shows the ones that work in the menu; Settings says what failed.
+    fn register_saved_shortcuts(&mut self) {
         let Some(handle) = self.handle.clone() else { return };
-        let shortcut = self.initial_shortcut.take();
-        let label = shortcut.as_ref().map(|s| s.to_string()).unwrap_or_else(|| "none (menu only)".into());
-        match self.capture_shortcut.replace(&handle, shortcut.as_ref()) {
-            Ok(()) => {
-                eprintln!("Ailfred ready: capture shortcut {label}");
-                self.show_capture_shortcut(shortcut.as_ref());
-            }
-            Err(e) => {
-                eprintln!("Ailfred: the capture shortcut {label} couldn't be registered: {e}");
+        let Some((capture, quick)) = self.initial_shortcuts.take() else { return };
+        let order = [ShortcutFor::Capture, ShortcutFor::QuickInput];
+        let slots = [self.capture_shortcut.clone(), self.quick_shortcut.clone()];
+        let started = settings::start_shortcuts(&[(capture, order[0].default_chord()), (quick, order[1].default_chord())], |i, s| slots[i].replace(&handle, s));
+        for (which, started) in order.into_iter().zip(started) {
+            let label = started.active.as_ref().map(|s| s.to_string()).unwrap_or_else(|| "none (menu only)".into());
+            eprintln!("Ailfred ready: {} shortcut {label}", which.name());
+            self.show_shortcut(which, started.active.as_ref());
+            if let Some(notice) = started.notice {
+                eprintln!("Ailfred: {} shortcut: {notice}", which.name());
                 if let Some(ui) = &self.settings_ui {
-                    let message = format!("The shortcut isn't active: {e}. Record it again or pick another.");
-                    ui.update(move |ui, _| ui.shortcut_failed(message));
+                    let active = started.active.clone();
+                    ui.update(move |ui, _| ui.shortcut_notice(which, active, notice));
                 }
             }
         }
     }
 
-    /// Shows the active capture shortcut (None: unset) in the menu and the input's hint.
-    pub fn show_capture_shortcut(&self, shortcut: Option<&rune::Shortcut>) {
+    /// Shows a shortcut that works (None: none) in the menu; the capture's also in the input's hint.
+    pub fn show_shortcut(&self, which: ShortcutFor, shortcut: Option<&rune::Shortcut>) {
         if let Some(tray) = &self.tray {
-            tray.show_capture_shortcut(shortcut);
+            tray.show_shortcut(which, shortcut);
         }
-        if let Some(quick) = &self.quick {
+        if which == ShortcutFor::Capture
+            && let Some(quick) = &self.quick
+        {
             let chord = shortcut.map(|s| quick_input::chord_symbols(&s.keycaps()));
             quick.update(move |s, _| s.set_capture_chord(chord));
         }
@@ -908,7 +905,7 @@ impl Host {
             Action::CaptureFullScreen => start_capture(self, Duration::from_millis(200), Mode::FullScreen),
             Action::QuickInput => self.show_input_or_chat(),
             Action::OpenFolder => open(&app_env::screenshots_dir()),
-            Action::OpenPermissionSettings => open("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"),
+            Action::OpenPermissionSettings => open(app_env::SCREEN_RECORDING_SETTINGS),
             Action::ToggleLogin => {
                 let (Some(handle), Some(tray)) = (self.handle.clone(), &self.tray) else { return };
                 // muda already flipped the checkmark: its new state is the request. The service
@@ -945,8 +942,16 @@ impl Host {
     }
 }
 
+/// A link the system opened with Ailfred (`ailfred://…`; it comes from anyone who can run `open`).
+fn on_link(host: &mut Host, url: &str, _: &mut Tx) {
+    match link::parse(url) {
+        Some(link::Link::Toggle) => host.toggle_quick_input(),
+        None => eprintln!("Ailfred: ignored a link it doesn't know ({} chars)", url.chars().count()),
+    }
+}
+
 /// Opens a path or URL with its default app (`open`), without waiting for it.
-fn open(target: &str) {
+pub(crate) fn open(target: &str) {
     if let Err(e) = std::process::Command::new("open").arg(target).spawn() {
         eprintln!("Ailfred: open {target} failed: {e}");
     }
@@ -959,8 +964,9 @@ fn host_init() -> Host {
         tray: None,
         installed: false,
         capturing: Arc::default(),
-        capture_shortcut: CaptureShortcut::default(),
-        initial_shortcut: None,
+        capture_shortcut: HotKey::capture(),
+        quick_shortcut: HotKey::quick_input(),
+        initial_shortcuts: None,
         settings_window: None,
         settings_ui: None,
         quick: None,
@@ -1060,7 +1066,7 @@ impl Drop for Busy {
 
 fn main() {
     // `--app-icon <out.png>`: writes the app's icon, 1024 px, for the bundle's `.icns`
-    // (scripts/install-mac), and exits.
+    // (scripts/bundle-mac), and exits.
     let args: Vec<String> = std::env::args().collect();
     if let [_, flag, out] = args.as_slice()
         && flag == "--app-icon"
@@ -1082,7 +1088,7 @@ fn main() {
     }
     // accessory: no Dock icon and no activation at launch.
     rune::run_windows_with(RunOptions { accessory: true }, move |_displays| {
-        let mut app = App::new(AppSpec::new("Ailfred", (1.0, 1.0), host_init, host_view)).windowless();
+        let mut app = App::new(AppSpec::new("Ailfred", (1.0, 1.0), host_init, host_view)).windowless().on_open_url(on_link);
         let handle = app.handle();
         let overlay = app.overlay(
             // The size is replaced by the display's size: FullScreen placement.
@@ -1123,9 +1129,9 @@ fn main() {
             QuickInput::new(Some(handle.clone())),
         );
         let settings = Settings::open(installed);
-        let initial_shortcut = settings.shortcut();
-        let capture_shortcut = CaptureShortcut::default();
-        let ui = SettingsUi::new(settings, handle.clone(), capture_shortcut.clone());
+        let initial_shortcuts = Some((settings.shortcut(), settings.quick_shortcut()));
+        let (capture_shortcut, quick_shortcut) = (HotKey::capture(), HotKey::quick_input());
+        let ui = SettingsUi::new(settings, handle.clone(), capture_shortcut.clone(), quick_shortcut.clone());
         let hidden = WindowOptions { visible: false, resizable: false, min_size: Some((0.0, 0.0)), ..Default::default() };
         let (settings_ui, settings_window) = app.window(
             WindowSpec::new("settings", AppSpec::new("Ailfred Settings", settings_ui::SIZE, SettingsUi::placeholder, settings_ui::view))
@@ -1178,7 +1184,8 @@ fn main() {
             installed,
             capturing: Arc::default(),
             capture_shortcut,
-            initial_shortcut,
+            quick_shortcut,
+            initial_shortcuts,
             settings_window: Some(settings_window),
             settings_ui: Some(settings_ui),
             quick: Some(quick),
@@ -1205,8 +1212,7 @@ fn main() {
         // and runtime shortcut registration needs the host started.
         handle.update(|host, _| {
             host.add_tray();
-            host.register_saved_shortcut();
-            host.register_quick_shortcut();
+            host.register_saved_shortcuts();
         });
         // Off the UI thread: both talk to system services.
         std::thread::spawn(move || {

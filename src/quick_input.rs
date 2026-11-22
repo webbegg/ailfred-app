@@ -1,5 +1,5 @@
 //! The quick input: a floating text field that slides up from the bottom of the display under
-//! the pointer, above every other window. Ctrl+Option+Space or the menu opens it; Esc, a click
+//! the pointer, above every other window. Its shortcut (Ctrl+Option+Space until changed in Settings), `ailfred://toggle` or the menu opens it; Esc, a click
 //! elsewhere closes it, sliding back down. Enter sends: the panel itself turns into the chat
 //! panel (chat.rs), which this window also holds, springing to the right edge as it reshapes.
 //!
@@ -31,8 +31,6 @@ pub use geometry::{Pose, bottom_panel, compact, dock_inset, input_panel, pose, s
 pub use labels::{chord_symbols, hint, sent_log};
 pub use view::{chip, on_focus, on_key, surface, view};
 
-/// The fixed global chord that toggles the panel (Option+Space alone is Claude's quick entry).
-pub const SHORTCUT: &str = "ctrl+alt+space";
 /// The panel's widest and narrowest, its height, and its row's side padding, in points.
 pub const PANEL_W: f32 = 620.0;
 pub const PANEL_H: f32 = 52.0;

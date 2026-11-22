@@ -480,6 +480,6 @@ fn nothing_typed_or_attached_sends_nothing() {
 }
 
 #[test]
-fn the_shortcut_parses() {
-    assert!(SHORTCUT.parse::<rune::Shortcut>().is_ok());
+fn the_default_shortcut_parses() {
+    assert!(crate::settings::DEFAULT_QUICK_SHORTCUT.parse::<rune::Shortcut>().is_ok());
 }

@@ -16,7 +16,8 @@ The full-screen layer over the frozen display where a shot's area is picked and 
 _Avoid_: capture window
 
 **Quick input**:
-The text field that slides up from the bottom of the screen (⌃⌥Space). Sending from it starts or
+The text field that slides up from the bottom of the screen (its shortcut, ⌃⌥Space until changed,
+or `ailfred://toggle`). Sending from it starts or
 continues the conversation.
 _Avoid_: launcher, prompt bar
 

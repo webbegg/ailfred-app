@@ -1366,22 +1366,35 @@ mod tests {
 
     #[test]
     fn one_restart_at_a_time() {
-        let starts = Arc::new(AtomicU32::new(0));
+        // When each start happened. A busy machine only makes the gaps longer: the test checks
+        // the least each one waits, and gives the second start time to come.
+        let starts = Arc::new(Mutex::new(Vec::<std::time::Instant>::new()));
         let counted = starts.clone();
         let engine = PiEngine::supervised(
             move || {
-                counted.fetch_add(1, Ordering::SeqCst);
+                counted.lock().unwrap().push(std::time::Instant::now());
                 sh("exit 1")
             },
             Duration::from_millis(200),
         )
         .expect("spawned");
-        std::thread::sleep(Duration::from_millis(2200));
-        // At 0 s, then 1 s later; the next waits 2 s more (slack for a busy machine).
-        assert_eq!(starts.load(Ordering::SeqCst), 2);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while starts.lock().unwrap().len() < 2 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let second = {
+            let starts = starts.lock().unwrap();
+            assert_eq!(starts.len(), 2, "restarted once");
+            assert!(starts[1] - starts[0] >= Duration::from_millis(900), "after waiting 1 s: {:?}", starts[1] - starts[0]);
+            starts[1]
+        };
+        // The next waits 2 s: none comes within 1.5 s of the second.
+        std::thread::sleep((second + Duration::from_millis(1500)).saturating_duration_since(std::time::Instant::now()));
+        assert_eq!(starts.lock().unwrap().len(), 2, "one restart at a time");
         drop(engine);
+        let dropped = starts.lock().unwrap().len();
         std::thread::sleep(Duration::from_millis(2500));
-        assert_eq!(starts.load(Ordering::SeqCst), 2, "no start once dropped");
+        assert_eq!(starts.lock().unwrap().len(), dropped, "no start once dropped");
     }
 
     #[test]
