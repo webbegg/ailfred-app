@@ -235,10 +235,11 @@ pub fn body<S: 'static>(s: &Chat, header: El, lens: fn(&mut S) -> &mut Chat) -> 
     let t = tok::theme(true);
     let divider = || el().w_full().h(1.0).fill(Color::WHITE.alpha(0.06));
     let mut thread = col().key("thread").w_full().gap(14.0).px(14.0).py(14.0).growth(GrowthSpec::default());
+    let goes_on = s.continuable();
     for (i, m) in s.messages.iter().enumerate() {
         thread = thread.child(message(i, m, &t));
         if let Some(r) = s.reply_to(m.id) {
-            thread = thread.child(reply_view::view(r, lens));
+            thread = thread.child(reply_view::view(r, goes_on == Some(r.token), lens));
         }
     }
     let messages = col()

@@ -24,6 +24,9 @@ pub enum Event {
     Ask { prompt: String, options: Vec<String>, multi: bool },
     /// It broke off.
     Fail(String),
+    /// The model's process ended mid-reply (why): what came stays, and the reply is
+    /// interrupted, as when Ailfred quits during one.
+    Lost(String),
     /// It's finished.
     Done,
     /// A queued message's reply starts: the model read it (pi, steered into its run).
@@ -194,11 +197,14 @@ pub struct Reply {
     pub answer: bool,
     /// Queued, its message is with the model already: steered into pi's run.
     pub steered: bool,
+    /// It ended unfinished without the user stopping it: Ailfred quit, or the model's process
+    /// ended. The conversation's last one offers to go on (`Chat::go_on`).
+    pub interrupted: bool,
 }
 
 impl Reply {
     pub fn new(id: u64, prompt: impl Into<String>) -> Self {
-        Reply { id, parts: Vec::new(), state: State::Streaming, prompt: prompt.into(), token: 0, answer: false, steered: false }
+        Reply { id, parts: Vec::new(), state: State::Streaming, prompt: prompt.into(), token: 0, answer: false, steered: false, interrupted: false }
     }
 
     pub fn streaming(&self) -> bool {
@@ -276,6 +282,10 @@ impl Reply {
                 self.end_steps(StepStatus::Failed);
                 self.parts.push(Part::Error(message));
                 self.state = State::Failed;
+            }
+            Event::Lost(_) => {
+                self.end_steps(StepStatus::Failed);
+                (self.state, self.interrupted) = (State::Stopped, true);
             }
             Event::Done => {
                 self.end_steps(StepStatus::Done);

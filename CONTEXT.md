@@ -69,6 +69,9 @@ interrupted.
 **Reply**:
 The model's answer to one message, streamed in parts: thinking, text (markdown), agent steps, a
 diff, a question with options, an error. A reply is queued, streaming, done, stopped or failed.
+One **interrupted** stopped without the user: Ailfred quit, or the model's process ended, as it
+streamed; what came stays. The conversation's last one asks "I was interrupted. Continue?":
+Continue sends "Continue where you left off." (or asks again when it had said nothing).
 _Avoid_: response, completion
 
 **Model**:

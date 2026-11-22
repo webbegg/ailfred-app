@@ -36,7 +36,8 @@ pub const RECENT: usize = 10;
 const LABEL_CHARS: usize = 40;
 /// What a conversation without text (only a capture) is called.
 const LABEL_CAPTURE: &str = "Screenshot";
-/// Under a reply that was streaming when Ailfred quit.
+/// What earlier saves put under a reply that was streaming when Ailfred quit (it's
+/// `interrupted` now): one with this note loads as interrupted.
 pub const INTERRUPTED: &str = "Interrupted: Ailfred quit before the reply finished.";
 
 /// How a saved reply ended.

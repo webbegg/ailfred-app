@@ -360,7 +360,7 @@ fn streaming_reply() -> Reply {
 }
 
 #[test]
-fn a_reply_still_streaming_is_saved_interrupted_and_loads_as_stopped_with_its_text_and_the_note() {
+fn a_reply_still_streaming_is_saved_interrupted_and_loads_as_stopped_and_interrupted_with_its_text() {
     let saved = saved_reply(&streaming_reply());
     assert_eq!(saved.state, ReplyState::Interrupted);
     assert_eq!((saved.thinking.as_deref(), saved.text.as_str()), (Some("hmm"), "Because of tea."));
@@ -369,9 +369,34 @@ fn a_reply_still_streaming_is_saved_interrupted_and_loads_as_stopped_with_its_te
     let reply = reply_from(&back, 11, "why?", 5);
     assert_eq!((reply.state, reply.id, reply.token), (State::Stopped, 11, 5));
     assert_eq!(reply.history_text().as_deref(), Some("Because of tea."), "later messages still send what it said");
-    let notes: Vec<&str> = reply.parts.iter().filter_map(|p| if let crate::reply::Part::Error(e) = p { Some(e.as_str()) } else { None }).collect();
-    assert_eq!(notes, ["Interrupted: Ailfred quit before the reply finished."]);
+    assert!(reply.interrupted, "it offers to go on");
+    assert!(!reply.parts.iter().any(|p| matches!(p, crate::reply::Part::Error(_))), "no error card: the notice says it");
     assert!(!reply.streaming(), "nothing streams after a launch");
+    // Saved again as it is, it stays interrupted.
+    assert_eq!(saved_reply(&reply).state, ReplyState::Interrupted);
+    assert_eq!(saved_reply(&reply).error, None);
+}
+
+#[test]
+fn a_reply_saved_stopped_with_the_old_interrupted_note_loads_as_interrupted() {
+    let saved = SavedReply { state: ReplyState::Stopped, text: "Half".into(), error: Some("Interrupted: Ailfred quit before the reply finished.".into()), ..SavedReply::default() };
+    let reply = reply_from(&saved, 1, "why?", 2);
+    assert!(reply.interrupted);
+    assert!(!reply.parts.iter().any(|p| matches!(p, crate::reply::Part::Error(_))));
+}
+
+#[test]
+fn a_reply_whose_model_went_away_is_saved_interrupted() {
+    let mut reply = streaming_reply();
+    reply.apply(Event::Lost("The assistant stopped unexpectedly.".into()), Instant::now());
+    assert_eq!((reply.state, reply.interrupted), (State::Stopped, true));
+    assert_eq!(reply.history_text().as_deref(), Some("Because of tea."), "what came stays");
+    assert_eq!(saved_reply(&reply).state, ReplyState::Interrupted);
+    // A reply the user stopped isn't.
+    let mut stopped = streaming_reply();
+    stopped.stop(Instant::now());
+    assert!(!stopped.interrupted);
+    assert_eq!(saved_reply(&stopped).state, ReplyState::Stopped);
 }
 
 #[test]
