@@ -9,9 +9,12 @@ own window) with Claude. Words used here and in the UI: see `CONTEXT.md`.
   the tests with settings in a scratch folder. `scripts/check <filter>` runs some tests only.
 - `cargo run` runs a dev build (settings under `com.ailfred.dev`). `scripts/install-mac` builds,
   signs and installs `~/Applications/Ailfred.app` (`com.ailfred`) and opens it. Quit one before
-  starting the other: they share the global shortcuts.
-- Rune is a path dependency (`../_references/rune`, plus the vendored crates in `[patch]`), so
-  there is no CI: the check script is the gate.
+  starting the other: they share the global shortcuts. `scripts/bundle-mac` only builds and signs
+  the bundle; `scripts/make-dmg` packs it; `scripts/make-signing-identity` makes the local
+  signing identity once per Mac. Installing and removing: `docs/install.md`.
+- Rune is a path dependency (`../_references/rune`, plus the vendored crates in `[patch]`). CI
+  (`.github/workflows/check.yml`) checks Rune out there at `RUNE_REV` and runs `scripts/check` on
+  a Mac; the check script stays the gate before a commit.
 
 ## Layout
 - One module per component in `src/`. A big one is `foo.rs` with child files in `src/foo/`
