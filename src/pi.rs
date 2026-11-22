@@ -1172,6 +1172,46 @@ mod tests {
         assert!(text.to_lowercase().contains("pong"), "{text}");
     }
 
+    /// A message steered in while pi runs a tool gets a reply of its own: `cargo test
+    /// real_pi_takes -- --ignored`.
+    #[test]
+    #[ignore = "talks to the real pi and its model"]
+    fn real_pi_takes_a_steer() {
+        let data = std::env::temp_dir().join("ailfred-real-pi");
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+        let pi = crate::pi_setup::pi_binary(&home).expect("pi installed");
+        let mut engine = crate::pi_setup::start(&pi, &data, &home).expect("pi starts");
+        let (a, a_rx) = channel();
+        engine.send(prompt("Run the shell command `sleep 6; echo ok` with your bash tool, then say what it printed."), a);
+        let mut first = Vec::new();
+        while let Ok(e) = a_rx.recv_timeout(Duration::from_secs(120)) {
+            let step = matches!(e, Event::Step { .. });
+            first.push(e);
+            if step {
+                break;
+            }
+        }
+        let (b, b_rx) = channel();
+        engine.send(steer("Also: end your answer with the word: steered"), b);
+        let drain = |rx: &Receiver<Event>, got: &mut Vec<Event>| {
+            while let Ok(e) = rx.recv_timeout(Duration::from_secs(120)) {
+                let end = matches!(e, Event::Done | Event::Fail(_));
+                got.push(e);
+                if end {
+                    break;
+                }
+            }
+        };
+        drain(&a_rx, &mut first);
+        let mut second = Vec::new();
+        drain(&b_rx, &mut second);
+        eprintln!("first: {first:?}\nsecond: {second:?}");
+        assert_eq!(first.last(), Some(&Event::Done), "{first:?}");
+        assert_eq!(second.last(), Some(&Event::Done), "{second:?}");
+        let text: String = second.iter().filter_map(|e| if let Event::Text(t) = e { Some(t.as_str()) } else { None }).collect();
+        assert!(text.to_lowercase().contains("steered"), "{text}");
+    }
+
     #[test]
     fn the_engine_fails_the_reply_when_the_process_ends() {
         let mut command = Command::new("/bin/sh");
