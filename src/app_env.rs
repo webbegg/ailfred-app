@@ -27,6 +27,18 @@ pub fn log_to_file() {
     unsafe { libc::dup2(file.as_raw_fd(), libc::STDERR_FILENO) };
 }
 
+/// Logs what macOS takes the app for ("Foreground": Dock icon and ⌘Tab; "UIElement": menu bar
+/// only) a second after `what`, off the UI thread: the Dock icon's switch shows in the log.
+pub fn log_app_type_soon(what: &'static str) {
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let pid = std::process::id().to_string();
+        let out = std::process::Command::new("/usr/bin/lsappinfo").args(["info", "-only", "ApplicationType", &pid]).output();
+        let kind = out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_else(|e| e.to_string());
+        eprintln!("Ailfred: {what}; macOS says {kind}");
+    });
+}
+
 /// Where screenshots are saved: the folder chosen in Settings (default ~/Desktop).
 pub fn screenshots_dir() -> String {
     crate::settings::folder_now().to_string_lossy().into_owned()

@@ -198,22 +198,25 @@ impl Host {
     }
 
     /// Opens the chat's window in front, with a Dock icon (an accessory app's window is hard
-    /// to get back to without one).
+    /// to get back to without one). Asked on the window's own handle, so the switch to a
+    /// Dock app and the window's opening apply in one turn, policy first (Rune's tested path).
     fn show_chat_window(&self) {
-        if let Some(handle) = &self.handle {
-            handle.set_dock_icon(true);
+        if let Some(ui) = &self.chat_ui {
+            ui.set_dock_icon(true);
         }
         if let Some(window) = &self.chat_window {
             window.open();
             window.focus();
         }
+        app_env::log_app_type_soon("chat window opened, Dock icon on");
     }
 
     /// Its window closed: the conversation stays in it for next time; the Dock icon goes.
     pub fn chat_window_closed(&mut self) {
-        if let Some(handle) = &self.handle {
-            handle.set_dock_icon(false);
+        if let Some(ui) = &self.chat_ui {
+            ui.set_dock_icon(false);
         }
+        app_env::log_app_type_soon("chat window closed, Dock icon off");
     }
 
     /// The window's dock button: the chat goes back into the side panel, which slides in.
@@ -902,7 +905,7 @@ fn main() {
                 .animate_reveal(),
             QuickInput::new(Some(handle.clone())),
         );
-        let settings = Settings::open();
+        let settings = Settings::open(installed);
         let initial_shortcut = settings.shortcut();
         let capture_shortcut = CaptureShortcut::default();
         let ui = SettingsUi::new(settings, handle.clone(), capture_shortcut.clone());
