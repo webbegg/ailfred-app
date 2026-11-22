@@ -516,7 +516,7 @@ pub fn hint(shots: usize, chord: Option<&str>) -> String {
 /// What the log says of a message sent: its size, never its text (the log is a file on disk).
 pub fn sent_log(text: &str, pngs: &[Vec<u8>]) -> String {
     let bytes: usize = pngs.iter().map(Vec::len).sum();
-    format!("Capibarapp: quick input: {} chars with {} capture(s), {bytes} bytes of PNG", text.chars().count(), pngs.len())
+    format!("Ailfred: quick input: {} chars with {} capture(s), {bytes} bytes of PNG", text.chars().count(), pngs.len())
 }
 
 /// A shortcut's keycaps (`Shortcut::keycaps`, as Settings shows them) as one label: `⇧⌘Space`.

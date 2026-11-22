@@ -21,7 +21,7 @@ macro_rules! mark {
 /// The mark alone, edge to edge.
 #[cfg(test)]
 pub static MARK: Icon = Icon {
-    name: "capibarapp-mark",
+    name: "ailfred-mark",
     view: 256.0,
     body: concat!(r#"<g fill="currentColor">"#, mark!(), "</g>"),
 };
@@ -29,21 +29,21 @@ pub static MARK: Icon = Icon {
 /// The mark in the menu bar: at 80%, centred, so it keeps a margin like the system's icons
 /// (about 16 of the bar's 22 pt).
 pub static MENU_BAR_MARK: Icon = Icon {
-    name: "capibarapp-menu-bar-mark",
+    name: "ailfred-menu-bar-mark",
     view: 256.0,
     body: concat!(r#"<g transform="translate(25.6 25.6) scale(0.8)" fill="currentColor">"#, mark!(), "</g>"),
 };
 
 /// The tile, on macOS's icon grid: 824 of 1024 units, inset 100, corners of 185.
 static TILE: Icon = Icon {
-    name: "capibarapp-tile",
+    name: "ailfred-tile",
     view: 1024.0,
     body: r#"<rect x="100" y="100" width="824" height="824" rx="185" fill="currentColor"/>"#,
 };
 
 /// The mark on the tile's grid: twice its size (about 56% of the tile), centred.
 static MARK_ON_TILE: Icon = Icon {
-    name: "capibarapp-mark-on-tile",
+    name: "ailfred-mark-on-tile",
     view: 1024.0,
     body: concat!(r#"<g transform="translate(256 262) scale(2)" fill="currentColor">"#, mark!(), "</g>"),
 };

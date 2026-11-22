@@ -1,5 +1,5 @@
 //! The user's settings (the capture shortcut and the save folder), stored with Rune's prefs in
-//! `~/Library/Application Support/com.capibarapp/prefs.json`, and the capture shortcut's registration.
+//! `~/Library/Application Support/com.ailfred/prefs.json`, and the capture shortcut's registration.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,7 +10,7 @@ use rune::{AppHandle, Shortcut, ShortcutError, ShortcutId};
 
 use crate::Host;
 
-pub const APP_ID: &str = "com.capibarapp";
+pub const APP_ID: &str = "com.ailfred";
 pub const DEFAULT_SHORTCUT: &str = "cmd+shift+space";
 const SHORTCUT: &str = "shortcut";
 const FOLDER: &str = "folder";
@@ -52,7 +52,7 @@ impl Settings {
     pub fn set_shortcut(&mut self, shortcut: Option<&Shortcut>) {
         let value: Option<String> = shortcut.map(|s| s.to_string());
         if let Err(e) = self.prefs.set(SHORTCUT, &value) {
-            eprintln!("Capibarapp: saving the shortcut failed: {e}");
+            eprintln!("Ailfred: saving the shortcut failed: {e}");
         }
     }
 
@@ -63,7 +63,7 @@ impl Settings {
 
     pub fn set_folder(&mut self, folder: &Path) {
         if let Err(e) = self.prefs.set(FOLDER, &folder.to_string_lossy()) {
-            eprintln!("Capibarapp: saving the folder failed: {e}");
+            eprintln!("Ailfred: saving the folder failed: {e}");
         }
         *FOLDER_NOW.write().unwrap_or_else(|e| e.into_inner()) = Some(folder.to_path_buf());
     }
@@ -77,7 +77,7 @@ impl Settings {
 
     pub fn set_ignore_reduce_motion(&mut self, ignore: bool) {
         if let Err(e) = self.prefs.set(IGNORE_REDUCE_MOTION, &ignore) {
-            eprintln!("Capibarapp: saving the motion setting failed: {e}");
+            eprintln!("Ailfred: saving the motion setting failed: {e}");
         }
         IGNORE_REDUCE_MOTION_NOW.store(ignore, Ordering::Relaxed);
     }
@@ -121,7 +121,7 @@ impl CaptureShortcut {
         if let Some(old) = *current {
             if let Err(e) = host.unregister_shortcut(old) {
                 // Keep tracking the old one rather than lose its id; release the new one instead.
-                eprintln!("Capibarapp: releasing the old shortcut failed: {e}");
+                eprintln!("Ailfred: releasing the old shortcut failed: {e}");
                 if let Some(new) = new {
                     let _ = host.unregister_shortcut(new);
                 }
@@ -161,10 +161,16 @@ mod tests {
     }
 
     #[test]
+    fn the_settings_live_under_ailfreds_id() {
+        assert_eq!(APP_ID, "com.ailfred");
+        assert_eq!(crate::app_env::BUNDLE_NAME, "Ailfred");
+    }
+
+    #[test]
     fn folder_falls_back_when_missing() {
         let mut s = Settings::with(Prefs::memory());
         assert_eq!(s.folder(), default_folder());
-        s.set_folder(Path::new("/no/such/folder/capibarapp"));
+        s.set_folder(Path::new("/no/such/folder/ailfred"));
         assert_eq!(s.folder(), default_folder(), "a folder that's gone falls back");
         let tmp = std::env::temp_dir();
         s.set_folder(&tmp);
