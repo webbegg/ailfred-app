@@ -154,7 +154,7 @@ pub struct Chat {
     conv: history::Meta,
     /// The model of the reply streaming last: a message sent meanwhile steers pi's run, and
     /// waits for any other's.
-    running: String,
+    running_model: String,
     /// The model picker's list shows.
     models_open: bool,
     /// The streams whose runs were cancelled (the host ends their processes), for tests.
@@ -175,7 +175,7 @@ pub struct Chat {
 
 impl Chat {
     pub fn new(host: Option<AppHandle<Host>>) -> Self {
-        Chat { messages: Vec::new(), draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0, replies: Vec::new(), next_token: 0, scratch: TextEdit::new(""), away: false, windowed: false, session: None, conv: history::Meta::fresh(), running: String::new(), models_open: false, #[cfg(test)] cancelled: Vec::new(), #[cfg(test)] saved: Vec::new(), #[cfg(test)] title_asks: Vec::new(), #[cfg(test)] model: None, #[cfg(test)] requests: Vec::new() }
+        Chat { messages: Vec::new(), draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0, replies: Vec::new(), next_token: 0, scratch: TextEdit::new(""), away: false, windowed: false, session: None, conv: history::Meta::fresh(), running_model: String::new(), models_open: false, #[cfg(test)] cancelled: Vec::new(), #[cfg(test)] saved: Vec::new(), #[cfg(test)] title_asks: Vec::new(), #[cfg(test)] model: None, #[cfg(test)] requests: Vec::new() }
     }
 
     pub fn is_open(&self) -> bool {
@@ -370,7 +370,7 @@ impl Chat {
     /// reads it in the run going (a steer), any other model gets it once the reply ends.
     pub fn ask(&mut self, id: u64) -> Option<u64> {
         let prompt = self.messages.iter().find(|m| m.id == id)?.text.clone();
-        if self.replies.iter().any(|r| r.streaming() && r.id != id) {
+        if self.replies.iter().any(|r| r.live() && r.id != id) {
             return Some(self.queue(id, prompt));
         }
         Some(self.start_reply(id, prompt, false))
@@ -417,11 +417,13 @@ impl Chat {
         self.next_token += 1;
         let token = self.next_token;
         let model = self.model();
-        let steer = model == model::PI && self.running == model::PI && !by_mock(false, &model, mock_model::requested());
+        let steer = model == model::PI && self.running_model == model::PI && !by_mock(false, &model, mock_model::requested());
         let mut reply = Reply::new(id, prompt);
-        (reply.token, reply.state, reply.sent) = (token, reply::State::Queued, steer);
+        (reply.token, reply.state, reply.steered) = (token, reply::State::Queued, steer);
         self.replies.retain(|r| r.id != id);
         self.replies.push(reply);
+        // Quitting now keeps it, interrupted.
+        self.save();
         if steer && let Some(request) = self.request_for(id, &model) {
             self.send_request(token, model::Request { steer: true, ..request });
         }
@@ -446,7 +448,7 @@ impl Chat {
         // its own and waits for them; everything is the mock's with `AILFRED_MOCK_MODEL=1`.
         let model = self.model();
         let script = by_mock(answer, &model, mock_model::requested()).then(|| if answer { mock_model::answer_script(&prompt) } else { mock_model::script(&prompt) });
-        self.running = if script.is_some() { String::new() } else { model.clone() };
+        self.running_model = if script.is_some() { String::new() } else { model.clone() };
         let mut reply = Reply::new(id, prompt);
         (reply.token, reply.answer) = (token, answer);
         self.replies.retain(|r| r.id != id);
@@ -469,27 +471,29 @@ impl Chat {
     }
 
     /// The next event of the reply stream `token`; one stopped or replaced takes none. A reply
-    /// ending lets the next queued one go.
+    /// ending lets the next queued one go, unless it asks the user something.
     pub fn reply_event(&mut self, token: u64, event: Event, now: Instant) {
         let Some(reply) = self.reply_mut(token) else { return };
-        let was = reply.streaming();
+        let was = reply.live();
         reply.apply(event, now);
-        if was && !reply.streaming() {
+        if was && !reply.live() {
+            let asks = reply.asks();
             self.reply_ended(token);
-            self.next_queued();
+            if !asks {
+                self.next_queued();
+            }
         }
     }
 
-    /// Nothing streaming: the first message queued and not yet with the model gets its reply.
+    /// Nothing going: the first message queued gets its reply. While pi still has a steered
+    /// one, it waits for pi.
     fn next_queued(&mut self) {
-        if self.streaming() {
+        if self.replies.iter().any(Reply::live) {
             return;
         }
         let Some(r) = self.replies.iter().filter(|r| r.state == reply::State::Queued).min_by_key(|r| r.token) else { return };
-        if !r.sent {
-            let (id, prompt) = (r.id, r.prompt.clone());
-            self.start_reply(id, prompt, false);
-        }
+        let (id, prompt) = (r.id, r.prompt.clone());
+        self.start_reply(id, prompt, false);
     }
 
     /// A reply is streaming.
@@ -501,11 +505,7 @@ impl Chat {
     /// next message queued goes at once (pi drops the ones it hadn't read: they go again). The
     /// conversation is saved with it.
     pub fn stop(&mut self, now: Instant) {
-        let stopped = self.stop_replies(now);
-        for r in &mut self.replies {
-            r.sent &= r.state != reply::State::Queued;
-        }
-        if stopped {
+        if self.stop_replies(now) {
             self.save();
         }
         self.next_queued();
@@ -528,6 +528,10 @@ impl Chat {
         }
         if tokens.is_empty() {
             return false;
+        }
+        // pi drops what was steered into the run with it: those wait to go again on their own.
+        for r in &mut self.replies {
+            r.steered = false;
         }
         #[cfg(test)]
         self.cancelled.extend(&tokens);

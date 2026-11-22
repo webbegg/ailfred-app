@@ -94,11 +94,30 @@ pub struct Core {
     down: bool,
     /// A new session waits for the run going to settle.
     renew: bool,
-    /// Messages steered into the run going, by their command's id, in order: each one's reply
-    /// starts where pi reads it.
-    steers: std::collections::VecDeque<(String, Sink)>,
+    /// Messages steered into the run going, in order: each one's reply starts where pi reads
+    /// it. One pi hadn't answered when the run settled stays: pi runs it on its own.
+    steers: std::collections::VecDeque<Steer>,
+    /// Steers sent while the run aborts: they go into the run of the message queued for it.
+    later: Vec<(Prompt, Sink)>,
     /// The user messages pi has read in the run going (the first is its prompt).
     users: u32,
+}
+
+/// A message steered into pi's run.
+struct Steer {
+    /// Its `prompt` command's id: pi's response names it.
+    id: String,
+    sink: Sink,
+    /// What pi answered: nothing yet, "queued" (into the run) or "started" (a run of its own:
+    /// the one before had ended).
+    answer: SteerAnswer,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum SteerAnswer {
+    Unanswered,
+    Queued,
+    Started,
 }
 
 impl Core {
@@ -120,13 +139,17 @@ impl Core {
             }
             return vec![response];
         }
-        if prompt.steer && self.busy && !self.aborting && self.dialog.is_none() {
-            let mut command = self.prompt_command(&prompt);
-            command["streamingBehavior"] = json!("steer");
-            let command = self.command(command);
-            let id = command["id"].as_str().unwrap_or_default().to_owned();
-            self.steers.push_back((id, sink));
-            return vec![command];
+        if prompt.steer && self.busy && self.dialog.is_none() {
+            if !self.aborting {
+                return vec![self.steer(prompt, sink)];
+            }
+            // Behind the message waiting for the abort, or the message waiting itself.
+            if self.queued.is_some() {
+                self.later.push((prompt, sink));
+            } else {
+                self.queued = Some((Prompt { steer: false, ..prompt }, sink));
+            }
+            return Vec::new();
         }
         let mut out = self.stop();
         if self.busy {
@@ -150,6 +173,7 @@ impl Core {
             out.push(self.command(json!({"type": "abort"})));
         }
         // The chat sends what pi hadn't read yet again, as messages of their own.
+        self.later.clear();
         if !self.steers.is_empty() {
             self.steers.clear();
             out.push(self.command(json!({"type": "clear_queue"})));
@@ -157,27 +181,75 @@ impl Core {
         out
     }
 
+    /// `prompt` goes into the run going; its reply starts where pi reads it.
+    fn steer(&mut self, prompt: Prompt, sink: Sink) -> Value {
+        let mut command = self.prompt_command(&prompt);
+        command["streamingBehavior"] = json!("steer");
+        let command = self.command(command);
+        let id = command["id"].as_str().unwrap_or_default().to_owned();
+        self.steers.push_back(Steer { id, sink, answer: SteerAnswer::Unanswered });
+        command
+    }
+
+    /// pi's response to steer `at`.
+    fn steer_answered(&mut self, at: usize, record: &Value) {
+        if record["success"] == false {
+            if let Some(steer) = self.steers.remove(at) {
+                (steer.sink)(Event::Fail(record["error"].as_str().unwrap_or("The assistant couldn't take that message.").to_owned()));
+            }
+            return;
+        }
+        match record["data"]["disposition"].as_str().unwrap_or_default() {
+            // A command or an extension took it: no run.
+            "handled" => {
+                if let Some(steer) = self.steers.remove(at) {
+                    (steer.sink)(Event::Done);
+                }
+            }
+            "started" if !self.busy => {
+                if let Some(steer) = self.steers.remove(at) {
+                    self.run_of_its_own(steer);
+                }
+            }
+            "started" => self.steers[at].answer = SteerAnswer::Started,
+            _ => self.steers[at].answer = SteerAnswer::Queued,
+        }
+    }
+
+    /// pi runs `steer` on its own, its run having ended as it came: it's the run going now.
+    fn run_of_its_own(&mut self, steer: Steer) {
+        (steer.sink)(Event::Taken);
+        self.sink = Some(steer.sink);
+        self.busy = true;
+        (self.texted, self.error) = (false, None);
+        self.steps.clear();
+        self.next_step = 0;
+        self.users = 0;
+    }
+
     /// A record from pi.
     pub fn record(&mut self, record: &Value) -> Vec<Value> {
         let kind = record["type"].as_str().unwrap_or_default();
         match kind {
-            "response" if record["command"] == "prompt" && self.steers.iter().any(|(id, _)| record["id"] == id.as_str()) => {
-                if record["success"] == false
-                    && let Some(at) = self.steers.iter().position(|(id, _)| record["id"] == id.as_str())
-                    && let Some((_, sink)) = self.steers.remove(at)
-                {
-                    sink(Event::Fail(record["error"].as_str().unwrap_or("The assistant couldn't take that message.").to_owned()));
+            "response" if record["command"] == "prompt" && self.steers.iter().any(|s| record["id"] == s.id.as_str()) => {
+                if let Some(at) = self.steers.iter().position(|s| record["id"] == s.id.as_str()) {
+                    self.steer_answered(at, record);
                 }
             }
             "message_start" if record["message"]["role"] == "user" => {
                 self.users += 1;
                 // Past the run's own prompt, pi reads the steers in order.
                 if self.users > 1
-                    && let Some((_, sink)) = self.steers.pop_front()
+                    && let Some(steer) = self.steers.pop_front()
                 {
-                    self.emit(Event::Done);
-                    self.sink = Some(sink);
-                    (self.texted, self.error) = (false, None);
+                    // Its reply starts before the one before ends: the chat never sees neither going.
+                    (steer.sink)(Event::Taken);
+                    match self.error.take() {
+                        Some(error) => self.emit(Event::Fail(error)),
+                        None => self.emit(Event::Done),
+                    }
+                    self.sink = Some(steer.sink);
+                    self.texted = false;
                 }
             }
             "response" if record["command"] == "prompt" => {
@@ -265,7 +337,10 @@ impl Core {
         if let Some((_, sink)) = self.queued.take() {
             sink(Event::Fail(STOPPED.into()));
         }
-        for (_, sink) in self.steers.drain(..) {
+        for steer in self.steers.drain(..) {
+            (steer.sink)(Event::Fail(STOPPED.into()));
+        }
+        for (_, sink) in self.later.drain(..) {
             sink(Event::Fail(STOPPED.into()));
         }
         self.down = true;
@@ -284,15 +359,29 @@ impl Core {
         self.aborting = false;
         self.dialog = None;
         self.sink = None;
-        for (_, sink) in self.steers.drain(..) {
-            sink(Event::Fail("pi ended its run before reading this message. Send it again.".into()));
+        // Queued into the run, but pi never read it: it fails. Not answered yet: pi reads it
+        // after the run, as one of its own (its response says so).
+        let mut started = None;
+        for steer in std::mem::take(&mut self.steers) {
+            match steer.answer {
+                SteerAnswer::Queued => (steer.sink)(Event::Fail("pi ended its run before reading this message. Send it again.".into())),
+                SteerAnswer::Started if started.is_none() => started = Some(steer),
+                _ => self.steers.push_back(steer),
+            }
         }
         let mut out = Vec::new();
         if std::mem::take(&mut self.renew) {
             out.push(self.command(json!({"type": "new_session"})));
         }
+        if let Some(steer) = started {
+            self.run_of_its_own(steer);
+            return out;
+        }
         if let Some((prompt, sink)) = self.queued.take() {
             out.push(self.prompt(prompt, sink));
+            for (prompt, sink) in std::mem::take(&mut self.later) {
+                out.push(self.steer(prompt, sink));
+            }
         }
         out
     }
@@ -693,7 +782,82 @@ mod tests {
         let two = user("two");
         feed(&mut core, &[&queued, r#"{"type":"queue_update","steering":["two"],"followUp":[]}"#, END_OK, &two, ASSISTANT, TEXT_START, &b_text, END_OK, SETTLED]);
         assert_eq!(a_rx.try_iter().collect::<Vec<_>>(), [Event::Text("Hi".into()), Event::Done], "the first reply ends where pi takes the second");
-        assert_eq!(b_rx.try_iter().collect::<Vec<_>>(), [Event::Text("Sure".into()), Event::Done], "no paragraph break: a reply of its own");
+        assert_eq!(b_rx.try_iter().collect::<Vec<_>>(), [Event::Taken, Event::Text("Sure".into()), Event::Done], "no paragraph break: a reply of its own");
+    }
+
+    #[test]
+    fn a_steer_while_a_message_waits_for_the_abort_goes_in_after_it() {
+        let mut core = Core::default();
+        let (a, _a_rx) = channel();
+        core.send(prompt("one"), a);
+        let one = user("one");
+        feed(&mut core, &[STARTED, &one]);
+        core.stop();
+        let (b, b_rx) = channel();
+        assert!(core.send(prompt("two"), b).is_empty(), "waits for the abort");
+        let (c, c_rx) = channel();
+        assert!(core.send(steer("three"), c).is_empty(), "waits behind it");
+        let wrote = feed(&mut core, &[r#"{"type":"agent_settled","aborted":true}"#]);
+        let sent: Vec<(&str, Option<&str>)> = wrote.iter().map(|c| (c["message"].as_str().unwrap_or(""), c["streamingBehavior"].as_str())).collect();
+        assert_eq!(sent, [("two", None), ("three", Some("steer"))]);
+        let (two, three, hi) = (user("two"), user("three"), text("Hi"));
+        feed(&mut core, &[STARTED, &two, &three, &hi, SETTLED]);
+        assert_eq!(b_rx.try_iter().collect::<Vec<_>>(), [Event::Done]);
+        assert_eq!(c_rx.try_iter().collect::<Vec<_>>(), [Event::Taken, Event::Text("Hi".into()), Event::Done]);
+    }
+
+    #[test]
+    fn a_steer_pi_handles_itself_is_done_and_the_next_gets_its_own_reply() {
+        let mut core = Core::default();
+        let (a, _a_rx) = channel();
+        core.send(prompt("one"), a);
+        let one = user("one");
+        feed(&mut core, &[STARTED, &one]);
+        let (b, b_rx) = channel();
+        let id = core.send(steer("/cmd"), b)[0]["id"].clone();
+        let handled = format!(r#"{{"type":"response","id":{id},"command":"prompt","success":true,"data":{{"disposition":"handled"}}}}"#);
+        feed(&mut core, &[&handled]);
+        assert_eq!(b_rx.try_iter().collect::<Vec<_>>(), [Event::Done]);
+        let (c, c_rx) = channel();
+        core.send(steer("three"), c);
+        let (three, hi) = (user("three"), text("Hi"));
+        feed(&mut core, &[&three, &hi, SETTLED]);
+        assert_eq!(c_rx.try_iter().collect::<Vec<_>>(), [Event::Taken, Event::Text("Hi".into()), Event::Done]);
+    }
+
+    #[test]
+    fn the_runs_error_is_its_replys_where_pi_takes_a_steer() {
+        let mut core = Core::default();
+        let (a, a_rx) = channel();
+        core.send(prompt("one"), a);
+        let one = user("one");
+        feed(&mut core, &[STARTED, &one]);
+        let (b, _b_rx) = channel();
+        core.send(steer("two"), b);
+        let failed = r#"{"type":"message_end","message":{"role":"assistant","stopReason":"error","errorMessage":"overloaded"}}"#;
+        let two = user("two");
+        feed(&mut core, &[ASSISTANT, failed, &two]);
+        assert_eq!(a_rx.try_iter().collect::<Vec<_>>(), [Event::Fail("overloaded".into())]);
+    }
+
+    #[test]
+    fn a_steer_pi_reads_after_its_run_settled_is_a_run_of_its_own() {
+        let mut core = Core::default();
+        let (a, a_rx) = channel();
+        core.send(prompt("one"), a);
+        let one = user("one");
+        feed(&mut core, &[STARTED, &one]);
+        let (b, b_rx) = channel();
+        let id = core.send(steer("two"), b)[0]["id"].clone();
+        feed(&mut core, &[SETTLED]);
+        assert_eq!(a_rx.try_iter().collect::<Vec<_>>(), [Event::Done]);
+        assert_eq!(b_rx.try_iter().count(), 0, "pi hasn't answered it yet");
+        let started = format!(r#"{{"type":"response","id":{id},"command":"prompt","success":true,"data":{{"disposition":"started"}}}}"#);
+        let (two, hi) = (user("two"), text("Hi"));
+        feed(&mut core, &[&started, &two, &hi, SETTLED]);
+        assert_eq!(b_rx.try_iter().collect::<Vec<_>>(), [Event::Taken, Event::Text("Hi".into()), Event::Done]);
+        let (c, _c_rx) = channel();
+        assert_eq!(types(&core.send(prompt("three"), c)), ["prompt"], "idle again");
     }
 
     #[test]
@@ -711,8 +875,9 @@ mod tests {
         assert_eq!(a_rx.try_iter().count(), 0, "the run goes on");
 
         let (c, c_rx) = channel();
-        core.send(steer("three"), c);
-        feed(&mut core, &[SETTLED]);
+        let id = core.send(steer("three"), c)[0]["id"].clone();
+        let queued = format!(r#"{{"type":"response","id":{id},"command":"prompt","success":true,"data":{{"disposition":"queued"}}}}"#);
+        feed(&mut core, &[&queued, SETTLED]);
         assert_eq!(a_rx.try_iter().collect::<Vec<_>>(), [Event::Done]);
         assert_eq!(c_rx.try_iter().collect::<Vec<_>>(), [Event::Fail("pi ended its run before reading this message. Send it again.".into())]);
 
@@ -739,6 +904,7 @@ mod tests {
         feed(&mut core, &[STARTED, &two, ASSISTANT, TEXT_START, &hi, SETTLED]);
         assert_eq!(b_rx.try_iter().collect::<Vec<_>>(), [Event::Text("Hi".into()), Event::Done]);
     }
+
 
     #[test]
     fn a_messages_shots_go_with_it_as_images() {

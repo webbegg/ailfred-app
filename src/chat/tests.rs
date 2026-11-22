@@ -295,6 +295,78 @@ fn with_pi_replying_a_message_sent_meanwhile_steers_its_run_and_its_reply_starts
 }
 
 #[test]
+fn a_steer_pi_dropped_for_a_retry_goes_again_after_it() {
+    let mut c = Chat::new(None);
+    c.model = Some(crate::model::PI.into());
+    let a = sent(&mut c, "one");
+    let ta = c.ask(a).unwrap();
+    c.reply_event(ta, Event::Done, Instant::now());
+    let b = sent(&mut c, "two");
+    c.ask(b);
+    let d = sent(&mut c, "three");
+    c.ask(d);
+    assert!(c.requests.last().unwrap().1.steer);
+    let again = c.retry(ta).unwrap();
+    assert_eq!(state(&c, d), Some(reply::State::Queued), "pi dropped it with the run: it waits");
+    c.reply_event(again, Event::Done, Instant::now());
+    let (td, request) = c.requests.last().cloned().unwrap();
+    assert_eq!((request.text.as_str(), request.steer, state(&c, d)), ("three", false, Some(reply::State::Streaming)));
+    assert_eq!(c.reply_to(d).map(|r| r.token), Some(td));
+}
+
+#[test]
+fn a_steered_reply_that_fails_at_once_lets_the_queue_go_on_and_is_saved() {
+    let mut c = Chat::new(None);
+    c.model = Some(crate::model::PI.into());
+    let a = sent(&mut c, "one");
+    let ta = c.ask(a).unwrap();
+    let b = sent(&mut c, "two");
+    let tb = c.ask(b).unwrap();
+    c.model = Some(crate::model::DEFAULT_MODEL.into());
+    let d = sent(&mut c, "three");
+    c.ask(d);
+    c.reply_event(ta, Event::Done, Instant::now());
+    assert_eq!(state(&c, d), Some(reply::State::Queued), "behind the one pi has");
+    let saves = c.saved.len();
+    c.reply_event(tb, Event::Fail("Not now".into()), Instant::now());
+    assert_eq!((state(&c, b), state(&c, d)), (Some(reply::State::Failed), Some(reply::State::Streaming)));
+    assert!(c.saved.len() > saves, "its end is saved");
+}
+
+#[test]
+fn a_queued_message_is_saved_at_once_and_leaving_the_conversation_drops_the_queue() {
+    let mut c = Chat::new(None);
+    c.model = Some(crate::model::DEFAULT_MODEL.into());
+    let a = sent(&mut c, "one");
+    c.ask(a);
+    let b = sent(&mut c, "two");
+    c.ask(b);
+    let saved = &c.saved.last().unwrap().saved;
+    assert_eq!(saved.messages.len(), 2, "quitting now keeps it");
+    let requests = c.requests.len();
+    c.start_over();
+    assert_eq!(c.requests.len(), requests, "Cmd+N sends nothing queued");
+    assert!(c.reply_to(b).is_none());
+}
+
+#[test]
+fn a_reply_ending_in_a_question_holds_the_queue_until_its_answered() {
+    let mut c = Chat::new(None);
+    c.model = Some(crate::model::DEFAULT_MODEL.into());
+    let a = sent(&mut c, "one");
+    let ta = c.ask(a).unwrap();
+    let b = sent(&mut c, "two");
+    c.ask(b);
+    c.reply_event(ta, Event::Ask { prompt: "Which?".into(), options: vec!["A".into(), "B".into()], multi: false }, Instant::now());
+    c.reply_event(ta, Event::Done, Instant::now());
+    assert_eq!(state(&c, b), Some(reply::State::Queued), "the question first");
+    c.pick(ta, 0, 1);
+    let answer = c.answer(ta, 0).unwrap();
+    c.reply_event(answer, Event::Done, Instant::now());
+    assert_eq!(state(&c, b), Some(reply::State::Streaming));
+}
+
+#[test]
 fn a_reply_claude_streams_is_waited_for_even_with_pi_picked_meanwhile() {
     let mut c = Chat::new(None);
     c.model = Some(crate::model::DEFAULT_MODEL.into());

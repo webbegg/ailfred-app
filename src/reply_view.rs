@@ -9,7 +9,7 @@ use rune_kit::{CodeFrame, Markdown, MarkdownStyle, glyphs};
 
 use crate::chat::Chat;
 use crate::quick_input::ACCENT;
-use crate::reply::{Agent, Diff, Part, Question, Reply, State, Status, Step, Thinking};
+use crate::reply::{Agent, Diff, Part, Question, Reply, State, Step, StepStatus, Thinking};
 
 const BODY: TextStyle = TextStyle::new(13.5, 400.0).lh(20.0);
 const SMALL: TextStyle = TextStyle::new(12.0, 400.0).lh(16.0);
@@ -41,7 +41,8 @@ pub fn view<S: 'static>(r: &Reply, lens: Lens<S>) -> El {
     let token = r.token;
     let mut out = col().key(format!("reply-{token}")).w_full().gap(10.0).hover_group().transition(Transition::opacity());
     if r.state == State::Queued {
-        return out.child(text("Queued").key("queued").font(SMALL_MEDIUM).color(t.text_secondary).label("Queued: it goes once the reply before it ends"));
+        let why = if r.steered { "Queued: pi reads it as it works" } else { "Queued: it goes once the reply before it ends" };
+        return out.child(text("Queued").key("queued").font(SMALL_MEDIUM).color(t.text_secondary).label(why));
     }
     let last = r.parts.len().saturating_sub(1);
     for (j, part) in r.parts.iter().enumerate() {
@@ -196,32 +197,32 @@ fn code_frame<S: 'static>(code: El, frame: &CodeFrame<'_>, t: &tok::Theme) -> El
     col().w_full().radius(10.0).continuous_corners().clip_rounded(10.0).fill(CODE_BG).border(1.0, EDGE).child(head).child(code)
 }
 
-fn step_glyph(status: Status, t: &tok::Theme) -> El {
+fn step_glyph(status: StepStatus, t: &tok::Theme) -> El {
     let slot = el().size(14.0, 14.0).center();
     match status {
-        Status::Running => slot.child(el().size(7.0, 7.0).radius(3.5).fill(ACCENT.mix(Color::WHITE, 0.2)).cycle(PULSE)),
-        Status::Done => slot.child(icon(&glyphs::CHECK_SMALL, 13.0).color(green())),
-        Status::Failed => slot.child(icon(&glyphs::CLOSE, 10.0).color(red())),
+        StepStatus::Running => slot.child(el().size(7.0, 7.0).radius(3.5).fill(ACCENT.mix(Color::WHITE, 0.2)).cycle(PULSE)),
+        StepStatus::Done => slot.child(icon(&glyphs::CHECK_SMALL, 13.0).color(green())),
+        StepStatus::Failed => slot.child(icon(&glyphs::CLOSE, 10.0).color(red())),
     }
     .key("status")
     .label(match status {
-        Status::Running => "Running",
-        Status::Done => "Done",
-        Status::Failed => "Failed",
+        StepStatus::Running => "Running",
+        StepStatus::Done => "Done",
+        StepStatus::Failed => "Failed",
     })
     .color(t.text)
 }
 
 fn agent<S: 'static>(token: u64, j: usize, a: &Agent, t: &tok::Theme, lens: Lens<S>) -> El {
-    let running = a.steps.iter().any(|s| s.status == Status::Running);
-    let failed = a.steps.iter().filter(|s| s.status == Status::Failed).count();
+    let running = a.steps.iter().any(|s| s.status == StepStatus::Running);
+    let failed = a.steps.iter().filter(|s| s.status == StepStatus::Failed).count();
     let title = a.summary();
     let status = if running {
-        Status::Running
+        StepStatus::Running
     } else if failed > 0 {
-        Status::Failed
+        StepStatus::Failed
     } else {
-        Status::Done
+        StepStatus::Done
     };
     let head = row()
         .key("head")

@@ -26,6 +26,8 @@ pub enum Event {
     Fail(String),
     /// It's finished.
     Done,
+    /// A queued message's reply starts: the model read it (pi, steered into its run).
+    Taken,
 }
 
 /// What an agent step does.
@@ -74,7 +76,7 @@ impl Tool {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Status {
+pub enum StepStatus {
     Running,
     Done,
     Failed,
@@ -104,7 +106,7 @@ pub struct Step {
     pub tool: Tool,
     pub target: String,
     pub output: String,
-    pub status: Status,
+    pub status: StepStatus,
     pub open: bool,
 }
 
@@ -118,7 +120,7 @@ impl Agent {
     /// One line: what it does now ("Running cargo test…"), or what it did, by kind in the
     /// order they came ("Read 2 files · Ran 1 command · 1 failed").
     pub fn summary(&self) -> String {
-        if let Some(s) = self.steps.iter().rev().find(|s| s.status == Status::Running) {
+        if let Some(s) = self.steps.iter().rev().find(|s| s.status == StepStatus::Running) {
             return format!("{}…", doing(s.tool, &s.target));
         }
         let mut kinds: Vec<(Tool, usize)> = Vec::new();
@@ -129,7 +131,7 @@ impl Agent {
             }
         }
         let mut parts: Vec<String> = kinds.into_iter().map(|(tool, n)| format!("{} {n} {}", tool.verb(), tool.noun(n))).collect();
-        let failed = self.steps.iter().filter(|s| s.status == Status::Failed).count();
+        let failed = self.steps.iter().filter(|s| s.status == StepStatus::Failed).count();
         if failed > 0 {
             parts.push(format!("{failed} failed"));
         }
@@ -190,17 +192,27 @@ pub struct Reply {
     pub token: u64,
     /// It answers the user's answer to a question.
     pub answer: bool,
-    /// Queued, its message is with the model already (steered into pi's run).
-    pub sent: bool,
+    /// Queued, its message is with the model already: steered into pi's run.
+    pub steered: bool,
 }
 
 impl Reply {
     pub fn new(id: u64, prompt: impl Into<String>) -> Self {
-        Reply { id, parts: Vec::new(), state: State::Streaming, prompt: prompt.into(), token: 0, answer: false, sent: false }
+        Reply { id, parts: Vec::new(), state: State::Streaming, prompt: prompt.into(), token: 0, answer: false, steered: false }
     }
 
     pub fn streaming(&self) -> bool {
         self.state == State::Streaming
+    }
+
+    /// Streaming, or steered into pi's run going: what the model says next is its own.
+    pub fn live(&self) -> bool {
+        self.streaming() || (self.state == State::Queued && self.steered)
+    }
+
+    /// It ended with a question the user hasn't answered.
+    pub fn asks(&self) -> bool {
+        self.parts.iter().any(|p| matches!(p, Part::Question(q) if q.answered.is_none()))
     }
 
     /// What the model is told it answered, in a later message's history: its text, if it
@@ -217,7 +229,7 @@ impl Reply {
     /// Takes in the next event (`now`: when it arrived); none once it's over.
     pub fn apply(&mut self, event: Event, now: Instant) {
         // A queued reply starts with what the model says to it.
-        if self.state == State::Queued && self.sent {
+        if self.state == State::Queued && self.steered {
             self.state = State::Streaming;
         }
         if !self.streaming() {
@@ -236,7 +248,7 @@ impl Reply {
                 _ => self.parts.push(Part::Text(more)),
             },
             Event::Step { id, tool, target } => {
-                let step = Step { id, tool, target, output: String::new(), status: Status::Running, open: false };
+                let step = Step { id, tool, target, output: String::new(), status: StepStatus::Running, open: false };
                 match self.parts.last_mut() {
                     Some(Part::Agent(agent)) => agent.steps.push(step),
                     _ => self.parts.push(Part::Agent(Agent { steps: vec![step], open: true })),
@@ -249,7 +261,7 @@ impl Reply {
             }
             Event::StepEnd { id, ok } => {
                 if let Some(step) = self.step_mut(id) {
-                    step.status = if ok { Status::Done } else { Status::Failed };
+                    step.status = if ok { StepStatus::Done } else { StepStatus::Failed };
                 }
             }
             Event::Diff { path, patch } => {
@@ -261,14 +273,15 @@ impl Reply {
                 self.parts.push(Part::Question(Question { prompt, options, multi, picked: Vec::new(), other: TextEdit::new(""), answered: None }));
             }
             Event::Fail(message) => {
-                self.end_steps(Status::Failed);
+                self.end_steps(StepStatus::Failed);
                 self.parts.push(Part::Error(message));
                 self.state = State::Failed;
             }
             Event::Done => {
-                self.end_steps(Status::Done);
+                self.end_steps(StepStatus::Done);
                 self.state = State::Done;
             }
+            Event::Taken => {}
         }
     }
 
@@ -276,7 +289,7 @@ impl Reply {
     pub fn stop(&mut self, now: Instant) {
         if self.streaming() {
             self.end_thinking(now);
-            self.end_steps(Status::Failed);
+            self.end_steps(StepStatus::Failed);
             self.state = State::Stopped;
         }
     }
@@ -291,10 +304,10 @@ impl Reply {
         }
     }
 
-    fn end_steps(&mut self, status: Status) {
+    fn end_steps(&mut self, status: StepStatus) {
         for part in &mut self.parts {
             if let Part::Agent(agent) = part {
-                for step in agent.steps.iter_mut().filter(|s| s.status == Status::Running) {
+                for step in agent.steps.iter_mut().filter(|s| s.status == StepStatus::Running) {
                     step.status = status;
                 }
             }
@@ -407,14 +420,14 @@ pub fn diff_counts(patch: &str) -> (usize, usize) {
 mod tests {
     use super::*;
 
-    fn steps(list: &[(Tool, &str, Status)]) -> Agent {
+    fn steps(list: &[(Tool, &str, StepStatus)]) -> Agent {
         let steps = list.iter().enumerate().map(|(i, (tool, target, status))| Step { id: i as u32, tool: *tool, target: (*target).into(), output: String::new(), status: *status, open: false }).collect();
         Agent { steps, open: false }
     }
 
     #[test]
     fn a_run_of_steps_sums_up_in_one_line_by_kind_in_the_order_they_came() {
-        use Status::{Done, Failed, Running};
+        use StepStatus::{Done, Failed, Running};
         let a = steps(&[(Tool::Read, "a.rs", Done), (Tool::Run, "ls", Done), (Tool::Read, "b.rs", Done)]);
         assert_eq!(a.summary(), "Read 2 files · Ran 1 command");
         let a = steps(&[(Tool::Search, "fn", Done), (Tool::Edit, "a.rs", Failed), (Tool::Other, "mem", Done), (Tool::Other, "x", Done)]);
@@ -469,16 +482,16 @@ mod tests {
             Event::Done,
         ]);
         let [Part::Agent(a), Part::Text(_), Part::Agent(b)] = r.parts.as_slice() else { panic!("agent, text, agent") };
-        assert_eq!(a.steps.iter().map(|s| (s.id, s.status)).collect::<Vec<_>>(), [(1, Status::Done), (2, Status::Done)]);
+        assert_eq!(a.steps.iter().map(|s| (s.id, s.status)).collect::<Vec<_>>(), [(1, StepStatus::Done), (2, StepStatus::Done)]);
         assert_eq!(a.steps[0].output, "fn a()");
-        assert_eq!(b.steps[0].status, Status::Done);
+        assert_eq!(b.steps[0].status, StepStatus::Done);
     }
 
     #[test]
     fn a_failure_shows_an_error_and_fails_running_steps() {
         let r = run(vec![Event::Step { id: 1, tool: Tool::Run, target: "x".into() }, Event::Fail("overloaded".into()), Event::Text("late".into())]);
         let [Part::Agent(a), Part::Error(e)] = r.parts.as_slice() else { panic!("agent, error") };
-        assert_eq!((a.steps[0].status, e.as_str(), r.state), (Status::Failed, "overloaded", State::Failed));
+        assert_eq!((a.steps[0].status, e.as_str(), r.state), (StepStatus::Failed, "overloaded", State::Failed));
     }
 
     #[test]

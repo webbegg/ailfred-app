@@ -56,10 +56,16 @@ impl SettingsUi {
         self.status = if self.model == model::PI { pi_status() } else { model::status_now() };
     }
 
-    /// A model picked on the chat's chip.
+    /// A model picked in the chat's composer: kept, and shown here. The status line is looked
+    /// up again only if Settings showed it (it asks the Keychain).
     pub fn choose_model(&mut self, id: &str) {
-        if let Some(index) = model::MODELS.iter().position(|(m, _)| *m == id) {
-            self.pick_model(index);
+        if !model::MODELS.iter().any(|(m, _)| *m == id) {
+            return;
+        }
+        self.settings.set_model(id);
+        self.model = self.settings.model();
+        if !self.status.is_empty() {
+            self.refresh_status();
         }
     }
 
@@ -269,6 +275,7 @@ mod tests {
         assert_eq!((s.model.as_str(), s.settings.model().as_str()), ("claude-opus-5-5", "claude-opus-5-5"));
         s.choose_model("nope");
         assert_eq!(s.model, "claude-opus-5-5");
+        assert!(s.status.is_empty(), "Settings not opened: no Keychain lookup");
         s.choose_model(crate::model::DEFAULT_MODEL);
         assert_eq!(crate::settings::model_now(), crate::model::DEFAULT_MODEL);
     }

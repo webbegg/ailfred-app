@@ -126,7 +126,7 @@ impl Chat {
             self.over = false;
             return;
         }
-        self.stop(Instant::now());
+        self.end_replies(Instant::now());
         // pi keeps a session of its own: it starts a new one, not the one it had.
         self.new_conversation();
         self.reset_conversation();

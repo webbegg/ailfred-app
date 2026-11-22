@@ -66,8 +66,12 @@ impl Tracker {
 
     /// The next event of reply `token`.
     pub fn event(&mut self, token: u64, event: &Event) {
+        // A steered reply takes over once the model starts on it; one refused never does.
         if let Some(at) = self.steered.iter().position(|&t| t == token) {
             self.steered.remove(at);
+            if matches!(event, Event::Done | Event::Fail(_)) {
+                return;
+            }
             self.start(token, false);
         }
         if self.current != Some(token) {
@@ -247,13 +251,28 @@ mod tests {
         t.event(1, &step(1, Tool::Read, "a"));
         t.steered(2);
         assert_eq!(t.status(), Status::Working("Reading a".into()), "the run goes on");
+        t.event(2, &Event::Taken);
         t.event(1, &Event::Done);
+        assert_eq!(t.status(), Status::Thinking, "pi read it: its reply is the one going");
         t.event(2, &step(1, Tool::Run, "ls"));
         assert_eq!(t.status(), Status::Working("Running ls".into()));
         t.steered(3);
         t.stop();
         t.event(3, &Event::Text("late".into()));
         assert_eq!(t.status(), Status::Idle);
+    }
+
+    #[test]
+    fn a_refused_steer_leaves_the_run_going_on_the_icon() {
+        let mut t = Tracker::default();
+        t.shown(true);
+        t.start(1, false);
+        t.event(1, &step(1, Tool::Run, "cargo test"));
+        t.steered(2);
+        t.event(2, &Event::Fail("Not now".into()));
+        assert_eq!(t.status(), Status::Working("Running cargo test".into()));
+        t.event(2, &Event::Taken);
+        assert_eq!(t.status(), Status::Working("Running cargo test".into()), "it's over: nothing to follow");
     }
 
     #[test]

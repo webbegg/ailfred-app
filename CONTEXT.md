@@ -61,8 +61,10 @@ _Avoid_: name, subject
 
 **Message**:
 What the user sent: text and its shots. One sent while a reply streams is **queued**: pi reads it
-in the run going (steered), its reply starting there; Claude gets it once the reply ends. Stop
-sends the first queued one at once.
+in the run going (steered), its reply starting there; Claude gets it once the reply ends (a reply
+ending in a question waits for the answer first). Stop sends the first queued one at once, and
+what pi hadn't read goes again on its own. A queued message is saved; quitting leaves it
+interrupted.
 
 **Reply**:
 The model's answer to one message, streamed in parts: thinking, text (markdown), agent steps, a
