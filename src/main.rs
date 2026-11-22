@@ -646,8 +646,12 @@ impl Host {
     pub fn ask_model(&mut self, token: u64, request: model::Request) {
         let Some(handle) = self.handle.clone() else { return };
         let sink: model::Sink = Arc::new(move |item| handle.update(move |host, _| host.model_said(token, item)));
-        let is_pi = request.model == model::PI;
+        let (is_pi, steer) = (request.model == model::PI, request.steer);
         self.model(is_pi).send(request, sink);
+        if steer {
+            self.status.steered(token);
+            return;
+        }
         self.status.start(token, is_pi && self.pi.as_ref().is_some_and(pi_setup::Pi::starting));
         self.show_status();
     }

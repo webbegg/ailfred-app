@@ -40,6 +40,9 @@ pub fn view<S: 'static>(r: &Reply, lens: Lens<S>) -> El {
     let t = tok::theme(true);
     let token = r.token;
     let mut out = col().key(format!("reply-{token}")).w_full().gap(10.0).hover_group().transition(Transition::opacity());
+    if r.state == State::Queued {
+        return out.child(text("Queued").key("queued").font(SMALL_MEDIUM).color(t.text_secondary).label("Queued: it goes once the reply before it ends"));
+    }
     let last = r.parts.len().saturating_sub(1);
     for (j, part) in r.parts.iter().enumerate() {
         let live = r.streaming() && j == last;
@@ -694,6 +697,14 @@ mod tests {
         let k = keys(&rt);
         assert!(k.iter().any(|k| k == "stop") && k.iter().any(|k| k == "waiting"), "{k:?}");
         rt.update(|s, _| {
+            let id = chat::tests::sent(&mut s.chat, "meanwhile");
+            s.chat.ask(id);
+        });
+        rt.frame(1.0 / 60.0);
+        assert!(keys(&rt).iter().any(|k| k == "queued"), "sent while it streams: queued");
+        rt.update(|s, _| {
+            s.chat.stop(Instant::now());
+            s.chat.stop(Instant::now());
             let id = chat::tests::sent(&mut s.chat, "error");
             let token = s.chat.ask(id).unwrap();
             for (_, event) in mock_model::script("error") {

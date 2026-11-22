@@ -51,6 +51,8 @@ pub struct Tracker {
     starting: bool,
     /// The chat shows: a reply ending there needs no mark.
     shown: bool,
+    /// Replies steered into the run going: each takes over when its events come.
+    steered: Vec<u64>,
 }
 
 impl Tracker {
@@ -64,6 +66,10 @@ impl Tracker {
 
     /// The next event of reply `token`.
     pub fn event(&mut self, token: u64, event: &Event) {
+        if let Some(at) = self.steered.iter().position(|&t| t == token) {
+            self.steered.remove(at);
+            self.start(token, false);
+        }
         if self.current != Some(token) {
             return;
         }
@@ -94,8 +100,14 @@ impl Tracker {
         }
     }
 
+    /// Reply `token` was steered into the run going: it's followed once it starts.
+    pub fn steered(&mut self, token: u64) {
+        self.steered.push(token);
+    }
+
     /// Stop, Retry or a new conversation: nothing streams, and what was left shown goes.
     pub fn stop(&mut self) {
+        self.steered.clear();
         self.current = None;
         self.steps.clear();
         self.after = None;
@@ -230,6 +242,23 @@ mod tests {
         t.start(3, false);
         t.event(2, &Event::Done);
         assert_eq!(t.status(), Status::Thinking, "2 was replaced by 3");
+    }
+
+    #[test]
+    fn a_reply_steered_into_the_run_is_followed_once_it_starts() {
+        let mut t = Tracker::default();
+        t.shown(true);
+        t.start(1, false);
+        t.event(1, &step(1, Tool::Read, "a"));
+        t.steered(2);
+        assert_eq!(t.status(), Status::Working("Reading a".into()), "the run goes on");
+        t.event(1, &Event::Done);
+        t.event(2, &step(1, Tool::Run, "ls"));
+        assert_eq!(t.status(), Status::Working("Running ls".into()));
+        t.steered(3);
+        t.stop();
+        t.event(3, &Event::Text("late".into()));
+        assert_eq!(t.status(), Status::Idle);
     }
 
     #[test]

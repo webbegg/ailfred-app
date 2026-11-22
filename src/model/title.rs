@@ -23,7 +23,7 @@ pub fn request(first: &str, reply: &str) -> Request {
     let cap = |text: &str| text.trim().chars().take(INPUT_CAP).collect::<String>();
     let first = if first.trim().is_empty() { "(only a screenshot)".to_owned() } else { cap(first) };
     let text = format!("The conversation's first message:\n{first}\n\nThe reply:\n{}\n\nGive the conversation a title.", cap(reply));
-    Request { model: MODEL.into(), history: Vec::new(), text, pngs: Vec::new(), session: None, answer: false }
+    Request { model: MODEL.into(), history: Vec::new(), text, pngs: Vec::new(), session: None, answer: false, steer: false }
 }
 
 /// Quotes, periods and blanks around a title go.

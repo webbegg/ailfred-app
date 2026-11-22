@@ -71,6 +71,8 @@ pub enum Status {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
+    /// Sent while another reply streamed: it waits for that one (or for pi to read it).
+    Queued,
     Streaming,
     Done,
     /// The user stopped it.
@@ -145,11 +147,13 @@ pub struct Reply {
     pub token: u64,
     /// It answers the user's answer to a question.
     pub answer: bool,
+    /// Queued, its message is with the model already (steered into pi's run).
+    pub sent: bool,
 }
 
 impl Reply {
     pub fn new(id: u64, prompt: impl Into<String>) -> Self {
-        Reply { id, parts: Vec::new(), state: State::Streaming, prompt: prompt.into(), token: 0, answer: false }
+        Reply { id, parts: Vec::new(), state: State::Streaming, prompt: prompt.into(), token: 0, answer: false, sent: false }
     }
 
     pub fn streaming(&self) -> bool {
@@ -169,6 +173,10 @@ impl Reply {
 
     /// Takes in the next event (`now`: when it arrived); none once it's over.
     pub fn apply(&mut self, event: Event, now: Instant) {
+        // A queued reply starts with what the model says to it.
+        if self.state == State::Queued && self.sent {
+            self.state = State::Streaming;
+        }
         if !self.streaming() {
             return;
         }

@@ -60,11 +60,13 @@ the start of the first message instead.
 _Avoid_: name, subject
 
 **Message**:
-What the user sent: text and its shots.
+What the user sent: text and its shots. One sent while a reply streams is **queued**: pi reads it
+in the run going (steered), its reply starting there; Claude gets it once the reply ends. Stop
+sends the first queued one at once.
 
 **Reply**:
 The model's answer to one message, streamed in parts: thinking, text (markdown), agent steps, a
-diff, a question with options, an error. A reply is streaming, done, stopped or failed.
+diff, a question with options, an error. A reply is queued, streaming, done, stopped or failed.
 _Avoid_: response, completion
 
 **Model**:
