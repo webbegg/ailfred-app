@@ -33,6 +33,15 @@ pub struct SettingsUi {
     error: Option<String>,
 }
 
+/// Where replies come from with pi picked.
+fn pi_status() -> String {
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    match crate::pi_setup::pi_binary(&home) {
+        Some(_) => "Replies come from pi, on your pi setup's model and sign-ins".into(),
+        None => "pi isn't installed: install it, or set AILFRED_PI".into(),
+    }
+}
+
 impl SettingsUi {
     pub fn new(settings: Settings, host: AppHandle<Host>, capture: CaptureShortcut) -> SettingsUi {
         let recorder = ShortcutRecorderState::new(settings.shortcut());
@@ -44,14 +53,15 @@ impl SettingsUi {
 
     /// Settings opened: says where replies come from now.
     pub fn refresh_status(&mut self) {
-        self.status = model::status_now();
+        self.status = if self.model == model::PI { pi_status() } else { model::status_now() };
     }
 
-    /// A model's segment clicked.
+    /// A model's segment clicked: it's kept, and the status says where replies come from.
     fn pick_model(&mut self, index: usize) {
         let Some((id, _)) = model::MODELS.get(index) else { return };
         self.settings.set_model(id);
         self.model = self.settings.model();
+        self.refresh_status();
     }
 
     /// Save: the typed key goes to the Keychain and the field empties.
@@ -231,6 +241,17 @@ mod tests {
         assert_eq!(s.model, "claude-opus-5-5", "no such segment");
         s.pick_model(0);
         assert_eq!(crate::settings::model_now(), "claude-sonnet-5-5");
+    }
+
+    #[test]
+    fn picking_pi_says_replies_come_from_it_and_claude_says_its_own() {
+        let _turn = MODEL_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = ui();
+        s.pick_model(2);
+        assert_eq!(s.model, "pi");
+        assert!(s.status.contains("pi"), "{}", s.status);
+        s.pick_model(0);
+        assert_eq!(s.status, model::status_now());
     }
 
     // The Keychain here is the test build's, in memory: no test touches the real one.

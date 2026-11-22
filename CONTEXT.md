@@ -49,8 +49,11 @@ diff, a question with options, an error. A reply is streaming, done, stopped or 
 _Avoid_: response, completion
 
 **Model**:
-What writes the replies: Claude, through the Anthropic API with the user's key, else through the
-installed Claude Code; the mock model (`mock_model.rs`) in tests and until Claude is connected.
+What writes the replies, picked in Settings: Claude, through the Anthropic API with the user's
+key, else through the installed Claude Code; or **pi**, Ailfred's own pi (`pi.rs`, `pi_setup.rs`)
+on the model and sign-ins of the user's pi setup, which runs tools and asks its own questions.
+Each is a `model::Model`. The mock model (`mock_model.rs`) in tests and with
+`AILFRED_MOCK_MODEL=1`.
 _Avoid_: agent, backend
 
 **Host**:

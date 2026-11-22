@@ -69,6 +69,12 @@ pub fn on_dock(has_messages: bool) -> Toggle {
     if has_messages { Toggle::ShowChat } else { Toggle::ShowInput }
 }
 
+/// The mock writes this reply (`answer`: to a question; `model`: the one picked;
+/// `requested`: `AILFRED_MOCK_MODEL=1`).
+pub fn by_mock(answer: bool, model: &str, requested: bool) -> bool {
+    requested || (answer && model != model::PI)
+}
+
 pub fn toggle(quick_open: bool, started: bool, chat_open: bool, windowed: bool) -> Toggle {
     // The chat in its window: the shortcut is the input's, to send to it.
     let started = started && !windowed;
@@ -175,6 +181,7 @@ impl Chat {
     /// Cmd+N in its window: the conversation goes at once; what still streams feeds nothing.
     pub fn clear(&mut self) {
         self.stop(Instant::now());
+        self.new_conversation();
         self.session = None;
         self.messages.clear();
         self.replies.clear();
@@ -246,6 +253,13 @@ impl Chat {
         }
     }
 
+    /// The conversation is over: the model starts the next afresh (pi's session).
+    fn new_conversation(&self) {
+        if let Some(host) = &self.host {
+            host.update(|host, _| host.new_conversation());
+        }
+    }
+
     /// The request that asks the model message `id` (None: no such message): the earlier
     /// messages whose reply came (done, or stopped with something) as the history.
     pub fn request_for(&self, id: u64, model: &str) -> Option<model::Request> {
@@ -263,7 +277,7 @@ impl Chat {
         let session = self.session.as_ref().filter(|(_, ends_at)| Some(*ends_at) == last).map(|(s, _)| s.clone());
         let history = turns.into_iter().map(|(_, turn)| turn).collect();
         let message = &self.messages[at];
-        Some(model::Request { model: model.into(), history, text: message.text.clone(), pngs: message.pngs.clone(), session })
+        Some(model::Request { model: model.into(), history, text: message.text.clone(), pngs: message.pngs.clone(), session, answer: false })
     }
 
     /// Reply `token` reports Claude Code's session: the next message resumes it. A stream that's
@@ -325,6 +339,7 @@ impl Chat {
     /// Cmd+N: slides out, the conversation over (see `over`).
     pub fn start_over(&mut self) {
         self.stop(Instant::now());
+        self.new_conversation();
         self.open = false;
         self.over = true;
         self.preview = None;
@@ -342,9 +357,10 @@ impl Chat {
         self.stop(Instant::now());
         self.next_token += 1;
         let token = self.next_token;
-        // Questions with options come from the mock only (so do their answers), and everything
-        // when `AILFRED_MOCK_MODEL=1`.
-        let script = (answer || mock_model::requested()).then(|| if answer { mock_model::answer_script(&prompt) } else { mock_model::script(&prompt) });
+        // Claude's questions with options come from the mock only (so do their answers); pi asks
+        // its own and waits for them; everything is the mock's with `AILFRED_MOCK_MODEL=1`.
+        let model = settings::model_now();
+        let script = by_mock(answer, &model, mock_model::requested()).then(|| if answer { mock_model::answer_script(&prompt) } else { mock_model::script(&prompt) });
         let mut reply = Reply::new(id, prompt);
         (reply.token, reply.answer) = (token, answer);
         self.replies.retain(|r| r.id != id);
@@ -353,7 +369,8 @@ impl Chat {
             match script {
                 Some(script) => host.update(move |host, _| host.stream_reply(token, script)),
                 None => {
-                    if let Some(request) = self.request_for(id, &settings::model_now()) {
+                    if let Some(request) = self.request_for(id, &model) {
+                        let request = model::Request { answer, ..request };
                         host.update(move |host, _| host.ask_model(token, request));
                     }
                 }

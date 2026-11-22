@@ -22,8 +22,10 @@ mod tests;
 pub use process::Run;
 
 pub const DEFAULT_MODEL: &str = "claude-sonnet-5-5";
+/// Ailfred's own pi (`pi.rs`), on the model of the user's pi setup.
+pub const PI: &str = "pi";
 /// The models to pick from: id and label.
-pub const MODELS: [(&str, &str); 2] = [(DEFAULT_MODEL, "Sonnet 5.5"), ("claude-opus-5-5", "Opus 5.5")];
+pub const MODELS: [(&str, &str); 3] = [(DEFAULT_MODEL, "Sonnet 5.5"), ("claude-opus-5-5", "Opus 5.5"), (PI, "pi")];
 pub const MAX_TOKENS: u32 = 8192;
 pub const SYSTEM_PROMPT: &str = "You are Ailfred, a concise personal assistant on the user's Mac. \
 Answer briefly, in plain markdown, and say so when you don't know.";
@@ -111,6 +113,8 @@ pub struct Request {
     pub pngs: Vec<Arc<Vec<u8>>>,
     /// Claude Code's session of this conversation, once it has one.
     pub session: Option<String>,
+    /// The user's answer to the model's question (pi waits for it), not a new message.
+    pub answer: bool,
 }
 
 /// What a run reports.
@@ -119,6 +123,46 @@ pub enum Item {
     Event(Event),
     /// Claude Code's session id, to resume it with the next message.
     Session(String),
+}
+
+/// Where a reply's items go (any thread).
+pub type Sink = Arc<dyn Fn(Item) + Send + Sync>;
+
+/// What writes the replies, one at a time: [`Claude`], or Ailfred's pi (`pi_setup::Pi`).
+pub trait Model: Send {
+    /// Starts the reply to `request`, its items going to `sink` until `Done` or `Fail`; a reply
+    /// streaming is stopped first.
+    fn send(&mut self, request: Request, sink: Sink);
+    /// Stop: the reply streaming ends, and what it still had goes nowhere.
+    fn stop(&mut self);
+    /// Cmd+N: what comes next starts afresh (Claude is told the history each time).
+    fn new_conversation(&mut self) {}
+}
+
+/// Claude, through the API or Claude Code (chosen at each send): a run per reply.
+#[derive(Default)]
+pub struct Claude {
+    run: Option<Run>,
+}
+
+impl Claude {
+    /// The reply ended: its run is over, so a later Stop has nothing to end.
+    pub fn finished(&mut self) {
+        self.run = None;
+    }
+}
+
+impl Model for Claude {
+    fn send(&mut self, request: Request, sink: Sink) {
+        self.stop();
+        self.run = Some(start(request, move |item| sink(item)));
+    }
+
+    fn stop(&mut self) {
+        if let Some(run) = self.run.take() {
+            run.cancel();
+        }
+    }
 }
 
 /// Runs `request` on `backend` in the calling thread, reporting to `sink`: `Done` or `Fail` ends

@@ -35,6 +35,8 @@ pub enum Tool {
     Search,
     Run,
     Edit,
+    /// Any other tool (memory, a helper, an extension's): its target is its name.
+    Other,
 }
 
 impl Tool {
@@ -44,6 +46,7 @@ impl Tool {
             Tool::Search => "Searched",
             Tool::Run => "Ran",
             Tool::Edit => "Edited",
+            Tool::Other => "Used",
         }
     }
 }
