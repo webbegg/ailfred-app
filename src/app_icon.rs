@@ -24,12 +24,12 @@ pub static MARK: Icon = Icon {
     body: concat!(r#"<g fill="currentColor">"#, mark!(), "</g>"),
 };
 
-/// The mark in the menu bar: at 80%, centred, so it keeps a margin like the system's icons
-/// (about 16 of the bar's 22 pt).
+/// The mark in the menu bar: at 90%, centred, so it keeps a margin of about 2 of the bar's 22 pt
+/// (about 18 pt wide, like the larger system icons).
 pub static MENU_BAR_MARK: Icon = Icon {
     name: "ailfred-menu-bar-mark",
     view: 256.0,
-    body: concat!(r#"<g transform="translate(25.6 25.6) scale(0.8)" fill="currentColor">"#, mark!(), "</g>"),
+    body: concat!(r#"<g transform="translate(12.8 12.8) scale(0.9)" fill="currentColor">"#, mark!(), "</g>"),
 };
 
 /// The tile, on macOS's icon grid: 824 of 1024 units, inset 100, corners of 185.

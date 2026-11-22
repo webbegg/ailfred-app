@@ -222,9 +222,13 @@ impl Tray {
     }
 }
 
-/// The menu-bar icon's side in pixels: tray-icon treats pixels as points (scaling down only past
-/// 22 pt), so it shows at 22 pt.
-const SIZE: usize = 36;
+/// How tall tray-icon shows the icon, in points: it scales any taller icon down to that.
+const MENU_BAR_PT: usize = 22;
+/// The menu-bar icon's side in pixels: twice its points, so each lands on one of a Retina
+/// screen's pixels, sharp, rather than stretched.
+const SIZE: usize = 2 * MENU_BAR_PT;
+/// Pixels per point.
+const PX: f32 = (SIZE / MENU_BAR_PT) as f32;
 
 /// A template icon: the app's mark, black with alpha; macOS tints it.
 fn icon() -> Result<Icon, String> {
@@ -272,13 +276,13 @@ impl Glyph {
 
 /// The badge (the dot of a reply waiting to be seen): its centre and radius, in pixels, at the
 /// top right.
-const DOT: [f32; 3] = [SIZE as f32 - 7.0, 7.0, 5.0];
+const DOT: [f32; 3] = [SIZE as f32 - 4.25 * PX, 4.25 * PX, 3.0 * PX];
 /// The clear ring between the badge and the mark, in pixels.
-const DOT_GAP: f32 = 2.0;
+const DOT_GAP: f32 = PX;
 /// Half the ring's and the cross's strokes; the working dot's radius.
-const RING_HALF: f32 = 0.9;
-const CROSS_HALF: f32 = 1.1;
-const CENTRE_DOT_R: f32 = 1.6;
+const RING_HALF: f32 = 0.5 * PX;
+const CROSS_HALF: f32 = 0.6 * PX;
+const CENTRE_DOT_R: f32 = PX;
 
 fn glyph_rgba(glyph: Glyph) -> Vec<u8> {
     let mut alpha = rune::text::icon_coverage(&crate::app_icon::MENU_BAR_MARK, SIZE as u32);
@@ -334,7 +338,8 @@ mod tests {
         let whole = rune::text::icon_coverage(&crate::app_icon::MARK, SIZE as u32);
         let ink = |c: &[u8]| c.iter().map(|&a| u32::from(a)).sum::<u32>();
         let ratio = ink(&want) as f32 / ink(&whole) as f32;
-        assert!((0.55..0.75).contains(&ratio), "the mark at about 80% (64% of its ink): {ratio}");
+        assert!((0.75..0.87).contains(&ratio), "the mark at about 90% (81% of its ink): {ratio}");
+        assert_eq!(SIZE, 2 * MENU_BAR_PT, "one pixel to each of a Retina screen's: tray-icon shows it {MENU_BAR_PT} pt tall");
         assert_eq!(rgba.len(), SIZE * SIZE * 4);
         assert!(rgba.as_chunks::<4>().0.iter().all(|p| p[..3] == [0, 0, 0]), "black: a template icon");
         let alpha: Vec<u8> = rgba.as_chunks::<4>().0.iter().map(|p| p[3]).collect();
@@ -385,14 +390,16 @@ mod tests {
         let [thinking, working, asking, replied, failed] = [Glyph::Thinking, Glyph::Working, Glyph::Asking, Glyph::Replied, Glyph::Failed].map(alpha);
         assert_eq!([&thinking, &working, &asking, &replied, &failed].map(|a| at(a, cx, cy)), [0, 255, 255, 255, 255], "the centre");
         assert_eq!([&thinking, &working, &replied].map(|a| at(a, cx + r - 1.0, cy) > 200), [true, true, true], "the rim");
-        assert!(at(&working, cx + 2.0, cy) < 60, "a ring round a dot");
-        assert!(at(&asking, cx + 3.0, cy + 2.0) < 60 && at(&replied, cx + 3.0, cy + 2.0) > 200, "a diamond, not a dot");
-        assert!(at(&failed, cx + 2.5, cy) < 60 && at(&failed, cx + 2.0, cy + 2.0) > 200, "a cross, not a dot");
+        // Offsets in points.
+        let (x, y) = (|pt: f32| cx + pt * PX, |pt: f32| cy + pt * PX);
+        assert!(at(&working, x(1.5), cy) < 60, "a ring round a dot");
+        assert!(at(&asking, x(1.75), y(1.25)) < 60 && at(&replied, x(1.75), y(1.25)) > 200, "a diamond, not a dot");
+        assert!(at(&failed, x(1.25), cy) < 60 && at(&failed, x(1.0), y(1.0)) > 200, "a cross, not a dot");
         for a in [&thinking, &working, &asking, &replied, &failed] {
-            // A pixel about r + gap/2 from the centre.
-            assert_eq!(at(a, cx - r - DOT_GAP / 4.0, cy + DOT_GAP), 0, "the gap around the badge");
+            // The pixel r + gap/2 left of the centre.
+            assert_eq!(at(a, cx - r - DOT_GAP / 2.0, cy), 0, "the gap around the badge");
         }
-        let bottom = SIZE * 18;
+        let bottom = SIZE * SIZE / 2;
         assert_eq!(&thinking[bottom..], &mark[bottom..], "the mark's bottom half stays");
     }
 
