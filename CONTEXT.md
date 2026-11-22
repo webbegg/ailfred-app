@@ -75,5 +75,11 @@ Each is a `model::Model`. The mock model (`mock_model.rs`) in tests and with
 `AILFRED_MOCK_MODEL=1`.
 _Avoid_: agent, backend
 
+**Status**:
+What Ailfred is doing, app-wide (`status.rs`): idle, starting, thinking, working (on a tool),
+needs you (a question), an error, or replied (while the chat was hidden). The menu-bar icon
+shows it with a badge, its tooltip in words.
+_Avoid_: agent state, activity
+
 **Host**:
 The windowless app at the root (`main.rs`) that owns every window, the tray and the shortcuts.

@@ -192,6 +192,11 @@ impl Pi {
         self.state.lock().unwrap().became(started);
     }
 
+    /// It isn't up yet: a message waits for it.
+    pub fn starting(&self) -> bool {
+        matches!(*self.state.lock().unwrap_or_else(|e| e.into_inner()), PiState::Starting(_))
+    }
+
     /// It couldn't start: the host starts it again for the next message.
     pub fn failed(&self) -> bool {
         matches!(*self.state.lock().unwrap_or_else(|e| e.into_inner()), PiState::Failed(_))

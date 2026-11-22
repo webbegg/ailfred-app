@@ -49,6 +49,17 @@ impl Tool {
             Tool::Other => "Used",
         }
     }
+
+    /// The same, while it runs.
+    pub fn doing(self) -> &'static str {
+        match self {
+            Tool::Read => "Reading",
+            Tool::Search => "Searching",
+            Tool::Run => "Running",
+            Tool::Edit => "Editing",
+            Tool::Other => "Using",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

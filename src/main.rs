@@ -32,6 +32,7 @@ mod settings;
 mod settings_ui;
 mod shot;
 mod spawn;
+mod status;
 mod tray;
 
 use std::sync::Arc;
@@ -106,6 +107,10 @@ pub struct Host {
     writer: Option<history::Writer>,
     /// The most recent conversations, as the menu lists them.
     recent: Vec<history::Entry>,
+    /// What Ailfred is doing, for the menu-bar icon.
+    status: status::Tracker,
+    /// The chat's own window is open.
+    chat_window_open: bool,
 }
 
 /// Something for the chat, wherever it is.
@@ -214,7 +219,9 @@ impl Host {
     /// Opens the chat's window in front, with a Dock icon (an accessory app's window is hard
     /// to get back to without one). Asked on the window's own handle, so the switch to a
     /// Dock app and the window's opening apply in one turn, policy first (Rune's tested path).
-    fn show_chat_window(&self) {
+    fn show_chat_window(&mut self) {
+        self.chat_window_open = true;
+        self.show_status();
         if let Some(ui) = &self.chat_ui {
             ui.set_dock_icon(true);
         }
@@ -227,6 +234,8 @@ impl Host {
 
     /// Its window closed: the conversation stays in it for next time; the Dock icon goes.
     pub fn chat_window_closed(&mut self) {
+        self.chat_window_open = false;
+        self.show_status();
         if let Some(ui) = &self.chat_ui {
             ui.set_dock_icon(false);
         }
@@ -520,6 +529,7 @@ impl Host {
             return;
         }
         self.chat_open = true;
+        self.show_status();
         let screen = self.window_screen();
         Host::place_chat(&quick, screen);
         self.reveal(screen);
@@ -542,10 +552,11 @@ impl Host {
     /// Esc or the close button: the chat slides out past the right edge (the window hides after,
     /// unless the input is up). The conversation stays for next time.
     pub fn hide_chat(&mut self) {
-        let Some(quick) = &self.quick else { return };
+        let Some(quick) = self.quick.clone() else { return };
         if !std::mem::replace(&mut self.chat_open, false) {
             return;
         }
+        self.show_status();
         quick.update(|s, tx| {
             s.chat.close();
             tx.animated();
@@ -599,19 +610,34 @@ impl Host {
 
     /// Streams a reply (`token`) into the chat off the main thread, each event after its wait.
     /// A stopped or replaced reply ignores what still comes.
-    pub fn stream_reply(&self, token: u64, script: mock_model::Script) {
+    pub fn stream_reply(&mut self, token: u64, script: mock_model::Script) {
         let Some(handle) = self.handle.clone() else { return };
+        self.status.start(token, false);
+        self.show_status();
         std::thread::spawn(move || {
             for (wait, event) in script {
                 std::thread::sleep(wait);
-                handle.update(move |host, _| {
-                    host.with_chat(move |c, tx| {
-                        c.reply_event(token, event, std::time::Instant::now());
-                        tx.animated();
-                    })
-                });
+                handle.update(move |host, _| host.reply_said(token, event));
             }
         });
+    }
+
+    /// The next event of reply `token`: into the chat, and the menu-bar icon.
+    fn reply_said(&mut self, token: u64, event: reply::Event) {
+        self.status.event(token, &event);
+        self.show_status();
+        self.with_chat(move |c, tx| {
+            c.reply_event(token, event, std::time::Instant::now());
+            tx.animated();
+        });
+    }
+
+    /// The menu-bar icon and its tooltip say what Ailfred is doing.
+    fn show_status(&mut self) {
+        self.status.shown(self.chat_open || self.chat_window_open);
+        if let Some(tray) = &mut self.tray {
+            tray.set_status(&self.status.status());
+        }
     }
 
     /// Asks the model `request` for the reply `token`, off the main thread: what it streams
@@ -622,6 +648,8 @@ impl Host {
         let sink: model::Sink = Arc::new(move |item| handle.update(move |host, _| host.model_said(token, item)));
         let is_pi = request.model == model::PI;
         self.model(is_pi).send(request, sink);
+        self.status.start(token, is_pi && self.pi.as_ref().is_some_and(pi_setup::Pi::starting));
+        self.show_status();
     }
 
     /// pi (started the first time it's asked for, and again after it failed to) or Claude.
@@ -641,6 +669,8 @@ impl Host {
 
     /// Cmd+N: pi starts a new session (Claude is told the history each time).
     pub fn new_conversation(&mut self) {
+        self.status.stop();
+        self.show_status();
         if let Some(pi) = &mut self.pi {
             model::Model::new_conversation(pi);
         }
@@ -654,10 +684,7 @@ impl Host {
                 if matches!(event, reply::Event::Done | reply::Event::Fail(_)) {
                     self.claude.finished();
                 }
-                self.with_chat(move |c, tx| {
-                    c.reply_event(token, event, std::time::Instant::now());
-                    tx.animated();
-                });
+                self.reply_said(token, event);
             }
         }
     }
@@ -665,6 +692,8 @@ impl Host {
     /// Stop, Retry, a new message or Cmd+N: the reply streaming (one at a time; the chat names
     /// it by `_tokens`) ends, with the process behind it.
     pub fn cancel_runs(&mut self, _tokens: &[u64]) {
+        self.status.stop();
+        self.show_status();
         model::Model::stop(&mut self.claude);
         if let Some(pi) = &mut self.pi {
             model::Model::stop(pi);
@@ -933,6 +962,8 @@ fn host_init() -> Host {
         pi: None,
         writer: None,
         recent: Vec::new(),
+        status: status::Tracker::default(),
+        chat_window_open: false,
     }
 }
 
@@ -1149,6 +1180,8 @@ fn main() {
             pi: None,
             writer: Some(writer),
             recent: Vec::new(),
+            status: status::Tracker::default(),
+            chat_window_open: false,
         });
         // Runs on the main thread at the loop's first turn: the status item needs a running NSApp,
         // and runtime shortcut registration needs the host started.
