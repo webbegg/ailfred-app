@@ -860,8 +860,10 @@ impl Host {
     fn register_saved_shortcuts(&mut self) {
         let Some(handle) = self.handle.clone() else { return };
         let Some((capture, quick)) = self.initial_shortcuts.take() else { return };
-        for (which, slot, saved) in [(ShortcutFor::Capture, self.capture_shortcut.clone(), capture), (ShortcutFor::QuickInput, self.quick_shortcut.clone(), quick)] {
-            let started = settings::start_shortcut(saved, which.default_chord(), |s| slot.replace(&handle, s));
+        let order = [ShortcutFor::Capture, ShortcutFor::QuickInput];
+        let slots = [self.capture_shortcut.clone(), self.quick_shortcut.clone()];
+        let started = settings::start_shortcuts(&[(capture, order[0].default_chord()), (quick, order[1].default_chord())], |i, s| slots[i].replace(&handle, s));
+        for (which, started) in order.into_iter().zip(started) {
             let label = started.active.as_ref().map(|s| s.to_string()).unwrap_or_else(|| "none (menu only)".into());
             eprintln!("Ailfred ready: {} shortcut {label}", which.name());
             self.show_shortcut(which, started.active.as_ref());

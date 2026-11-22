@@ -16,7 +16,7 @@ use crate::model;
 use crate::settings::{HotKey, Settings, ShortcutFor};
 
 /// The window's size in points.
-pub const SIZE: (f32, f32) = (480.0, 540.0);
+pub const SIZE: (f32, f32) = (480.0, 620.0);
 
 pub struct SettingsUi {
     settings: Settings,
@@ -154,10 +154,11 @@ impl SettingsUi {
             ShortcutFor::Capture => (&mut self.recorder, &mut self.capture_notice),
             ShortcutFor::QuickInput => (&mut self.quick_recorder, &mut self.quick_notice),
         };
-        match active {
-            Some(active) => *recorder = ShortcutRecorderState::new(Some(active)),
-            None => recorder.mark_unregistered(),
+        if let Some(active) = active {
+            *recorder = ShortcutRecorderState::new(Some(active));
         }
+        // Recording the chord shown keeps it (saved, the notice gone), even the one that works.
+        recorder.mark_unregistered();
         *slot = Some(notice);
     }
 
@@ -203,7 +204,7 @@ pub fn view(s: &SettingsUi, cx: &mut Cx<SettingsUi>) -> El {
     crate::settings::apply_motion(cx);
     let k = kit(cx.system_dark());
     let label = |t: &str| text(t).font(k.ty.ui_medium).color(k.c.text_strong);
-    let notice = |key: &str, notice: &Option<String>| notice.as_ref().map(|n| text(n.clone()).key(key).font(k.ty.small).color(k.c.text_weak));
+    let notice = |key: &str, notice: &Option<String>| notice.as_ref().map(|n| text(n.clone()).key(key).wrap().font(k.ty.small).color(k.c.text_weak));
     let mut shortcuts = col()
         .gap(8.0)
         .child(label("Shortcuts"))
@@ -266,12 +267,12 @@ pub fn view(s: &SettingsUi, cx: &mut Cx<SettingsUi>) -> El {
         .child(
             Checkbox::new(s.ignore_reduce_motion)
                 .label("Show animations even with Reduce Motion on")
-                .description("Ignores the Reduce Motion setting in System Settings › Accessibility › Display.")
+                .description("Ignores Reduce Motion in System Settings › Accessibility › Display.")
                 .on_toggle(|s: &mut SettingsUi| s.toggle_reduce_motion())
                 .build(k),
         );
     if let Some(error) = &s.error {
-        page = page.child(text(error.clone()).font(k.ty.small).color(k.c.text_weak));
+        page = page.child(text(error.clone()).wrap().font(k.ty.small).color(k.c.text_weak));
     }
     page
 }
@@ -283,11 +284,12 @@ fn permissions(allowed: bool, k: &Kit, title: El) -> El {
     } else {
         "Screen Recording: Off. Turn on Ailfred there, then quit and reopen it."
     };
-    let mut status = row().gap(10.0).items_center().child(text(line).key("screen-recording").font(k.ty.ui).color(k.c.text_weak));
+    let mut section = col().key("permissions").gap(8.0).child(title).child(text(line).key("screen-recording").wrap().font(k.ty.ui).color(k.c.text_weak));
     if !allowed {
-        status = status.child(Button::new("Open System Settings…").on_press(|_: &mut SettingsUi| crate::open(crate::app_env::SCREEN_RECORDING_SETTINGS)).build(k));
+        let open = Button::new("Open System Settings…").on_press(|_: &mut SettingsUi| crate::open(crate::app_env::SCREEN_RECORDING_SETTINGS)).build(k);
+        section = section.child(row().child(open));
     }
-    col().key("permissions").gap(8.0).child(title).child(status)
+    section
 }
 
 /// `~/Desktop` rather than `/Users/name/Desktop`.
@@ -421,6 +423,34 @@ mod tests {
 
     fn shown(rt: &Runtime<SettingsUi>) -> Vec<rune::ElementInfo> {
         rt.elements().into_iter().filter(|e| !e.exiting).collect()
+    }
+
+    /// Everything drawn lies inside the window, clear of its padding on the right.
+    fn inside(rt: &Runtime<SettingsUi>) {
+        for e in shown(rt).into_iter().filter(|e| e.rect[2] < SIZE.0 - 1.0) {
+            let right = e.rect[0] + e.rect[2];
+            assert!(right <= SIZE.0 - 24.0 + 0.5, "{:?} {:?} ends at x {right}", e.key, e.text.as_deref().or(e.label.as_deref()));
+        }
+    }
+
+    #[test]
+    fn the_worst_case_fits_screen_recording_off_and_both_shortcuts_taken() {
+        let mut s = ui();
+        s.check_screen_recording = || false;
+        s.refresh_status();
+        let taken = |s: &str| -> Shortcut { s.parse().unwrap() };
+        let started = crate::settings::start_shortcuts(
+            &[(Some(taken("ctrl+alt+shift+cmd+j")), crate::settings::DEFAULT_SHORTCUT), (Some(taken("ctrl+alt+shift+cmd+k")), crate::settings::DEFAULT_QUICK_SHORTCUT)],
+            |_, s| if s.is_some_and(|s| s.to_string().contains('j') || s.to_string().contains('k')) { Err(rune::ShortcutError::Conflict) } else { Ok(()) },
+        );
+        for (which, started) in [ShortcutFor::Capture, ShortcutFor::QuickInput].into_iter().zip(started) {
+            s.shortcut_notice(which, started.active, started.notice.expect("taken"));
+        }
+        s.error = Some("Couldn't save the key in the Keychain: The user name or passphrase you entered is not correct.".into());
+        let rt = frames(s);
+        inside(&rt);
+        let low = shown(&rt).iter().filter(|e| e.key.is_some() || !e.role.is_empty()).filter(|e| e.rect[3] < SIZE.1 - 1.0).map(|e| e.rect[1] + e.rect[3]).fold(0.0, f32::max);
+        assert!(low + 24.0 <= SIZE.1, "the lowest ends at {low}");
     }
 
     #[test]

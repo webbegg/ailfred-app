@@ -1,5 +1,5 @@
 //! The quick input: a floating text field that slides up from the bottom of the display under
-//! the pointer, above every other window. Ctrl+Option+Space or the menu opens it; Esc, a click
+//! the pointer, above every other window. Its shortcut (Ctrl+Option+Space until changed in Settings), `ailfred://toggle` or the menu opens it; Esc, a click
 //! elsewhere closes it, sliding back down. Enter sends: the panel itself turns into the chat
 //! panel (chat.rs), which this window also holds, springing to the right edge as it reshapes.
 //!

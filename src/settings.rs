@@ -203,20 +203,28 @@ pub struct Started {
     pub notice: Option<String>,
 }
 
-/// Registers `saved` (None: cleared, nothing); refused, the `default` instead, saying so.
-pub fn start_shortcut(saved: Option<Shortcut>, default: &str, mut register: impl FnMut(Option<&Shortcut>) -> Result<(), ShortcutError>) -> Started {
-    let Some(saved) = saved else {
-        let _ = register(None);
-        return Started { active: None, notice: None };
-    };
-    let error = match register(Some(&saved)) {
-        Ok(()) => return Started { active: Some(saved), notice: None },
-        Err(e) => e,
-    };
+/// Registers each shortcut's saved chord (`register(index, chord)`; None: cleared, nothing), then
+/// each refused one's default instead, saying so. The saved chords go first, so a fallback can't
+/// take another shortcut's own chord.
+pub fn start_shortcuts(slots: &[(Option<Shortcut>, &str)], mut register: impl FnMut(usize, Option<&Shortcut>) -> Result<(), ShortcutError>) -> Vec<Started> {
+    let tried: Vec<_> = slots.iter().enumerate().map(|(i, (saved, _))| register(i, saved.as_ref())).collect();
+    let mut started = Vec::with_capacity(slots.len());
+    for (i, ((saved, default), result)) in slots.iter().zip(tried).enumerate() {
+        started.push(match (saved, result) {
+            (None, _) => Started { active: None, notice: None },
+            (Some(saved), Ok(())) => Started { active: Some(saved.clone()), notice: None },
+            (Some(saved), Err(error)) => fall_back(saved, error, default, |s| register(i, Some(s))),
+        });
+    }
+    started
+}
+
+/// `saved` was refused with `error`: the `default` instead, if it's another chord and it can be had.
+fn fall_back(saved: &Shortcut, error: ShortcutError, default: &str, mut register: impl FnMut(&Shortcut) -> Result<(), ShortcutError>) -> Started {
     let name = |s: &Shortcut| crate::quick_input::chord_symbols(&s.keycaps());
-    let gone = format!("{} isn't available ({error})", name(&saved));
-    if let Some(default) = default.parse::<Shortcut>().ok().filter(|d| *d != saved)
-        && register(Some(&default)).is_ok()
+    let gone = format!("{} isn't available ({error})", name(saved));
+    if let Some(default) = default.parse::<Shortcut>().ok().filter(|d| d != saved)
+        && register(&default).is_ok()
     {
         let notice = format!("{gone}: {} works instead. Record another to change it.", name(&default));
         return Started { active: Some(default), notice: Some(notice) };
@@ -228,7 +236,8 @@ pub fn start_shortcut(saved: Option<Shortcut>, default: &str, mut register: impl
 /// window. Main thread only (registration is called from the app's own updates and windows).
 #[derive(Clone)]
 pub struct HotKey {
-    current: Arc<Mutex<Option<ShortcutId>>>,
+    /// The registration held, and its chord.
+    current: Arc<Mutex<Option<(ShortcutId, Shortcut)>>>,
     action: fn(&mut Host, &mut Tx),
 }
 
@@ -244,19 +253,25 @@ impl HotKey {
     }
 
     /// Registers `shortcut` (None: no shortcut) and only then releases the previous one, so a
-    /// refused chord leaves the old one working.
+    /// refused chord leaves the old one working. The chord already held stays as it is (the
+    /// system would refuse holding it twice).
     pub fn replace(&self, host: &AppHandle<Host>, shortcut: Option<&Shortcut>) -> Result<(), ShortcutError> {
+        let mut current = self.current.lock().unwrap_or_else(|e| e.into_inner());
+        if let (Some((_, held)), Some(s)) = (&*current, shortcut)
+            && held == s
+        {
+            return Ok(());
+        }
         let new = match shortcut {
-            Some(s) => Some(host.register_shortcut(s.clone(), self.action)?),
+            Some(s) => Some((host.register_shortcut(s.clone(), self.action)?, s.clone())),
             None => None,
         };
-        let mut current = self.current.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(old) = *current
-            && let Err(e) = host.unregister_shortcut(old)
+        if let Some((old, _)) = &*current
+            && let Err(e) = host.unregister_shortcut(*old)
         {
             // Keep tracking the old one rather than lose its id; release the new one instead.
             eprintln!("Ailfred: releasing the old shortcut failed: {e}");
-            if let Some(new) = new {
+            if let Some((new, _)) = new {
                 let _ = host.unregister_shortcut(new);
             }
             return Err(e);
@@ -297,7 +312,7 @@ mod tests {
         s.parse().unwrap()
     }
 
-    /// Registers what `taken` doesn't hold, recording each try.
+    /// Registers what `taken` doesn't hold, recording each try (one shortcut).
     fn registrar<'a>(taken: &'a [&'a str], tried: &'a mut Vec<Option<String>>) -> impl FnMut(Option<&Shortcut>) -> Result<(), ShortcutError> + 'a {
         move |s| {
             tried.push(s.map(|s| s.to_string()));
@@ -306,6 +321,31 @@ mod tests {
                 _ => Ok(()),
             }
         }
+    }
+
+    /// One shortcut started alone.
+    fn start_shortcut(saved: Option<Shortcut>, default: &str, mut register: impl FnMut(Option<&Shortcut>) -> Result<(), ShortcutError>) -> Started {
+        start_shortcuts(&[(saved, default)], |_, s| register(s)).remove(0)
+    }
+
+    #[test]
+    fn a_fallback_never_takes_the_other_shortcuts_saved_chord() {
+        // Capture's saved chord is held by another app; the quick input's saved chord is the
+        // capture's default. Ailfred holds what it registers (Rune refuses a second hold).
+        let mut held: Vec<(usize, Shortcut)> = Vec::new();
+        let other_app = chord("ctrl+alt+shift+j");
+        let started = start_shortcuts(&[(Some(other_app.clone()), DEFAULT_SHORTCUT), (Some(chord(DEFAULT_SHORTCUT)), DEFAULT_QUICK_SHORTCUT)], |i, s| {
+            let Some(s) = s else { return Ok(()) };
+            if *s == other_app || held.iter().any(|(_, h)| h == s) {
+                return Err(ShortcutError::Conflict);
+            }
+            held.push((i, s.clone()));
+            Ok(())
+        });
+        assert_eq!(started[1], Started { active: Some(chord(DEFAULT_SHORTCUT)), notice: None }, "the quick input keeps its own");
+        assert_eq!(started[0].active, None, "the capture's default was the quick input's");
+        assert!(started[0].notice.is_some());
+        assert_eq!(held, vec![(1, chord(DEFAULT_SHORTCUT))]);
     }
 
     #[test]
