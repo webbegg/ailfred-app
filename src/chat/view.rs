@@ -22,6 +22,55 @@ fn close_button<S: 'static>(t: &tok::Theme, lens: fn(&mut S) -> &mut Chat) -> El
         .on_press(move |s: &mut S| lens(s).dismiss())
 }
 
+/// The model writing the replies, beside Send: it lists the models to pick from.
+fn model_picker<S: 'static>(s: &Chat, t: &tok::Theme, lens: fn(&mut S) -> &mut Chat) -> El {
+    let label = s.model_label();
+    row()
+        .key("model-picker")
+        .h(28.0)
+        .px(8.0)
+        .gap(4.0)
+        .radius(8.0)
+        .continuous_corners()
+        .center_y()
+        .hover(Color::WHITE.alpha(0.08))
+        .press(Color::WHITE.alpha(0.05))
+        .cursor(Cursor::Pointer)
+        .role("button")
+        .label(format!("Model: {label}"))
+        .expanded(s.models_open)
+        .child(text(label).font(TextStyle::new(12.0, 500.0)).color(t.text_secondary).single_line())
+        .child(icon(if s.models_open { &glyphs::CHEVRON_DOWN } else { &glyphs::CHEVRON_UP }, 10.0).color(t.text_secondary))
+        .on_press(move |s: &mut S| lens(s).toggle_models())
+}
+
+/// The models, the one writing marked: a pick closes the list.
+fn model_list<S: 'static>(s: &Chat, t: &tok::Theme, lens: fn(&mut S) -> &mut Chat) -> El {
+    let now = s.model();
+    let mut list = row().key("models").w_full().gap(6.0).center_y();
+    for (id, label) in model::MODELS {
+        let on = id == now;
+        let b = el()
+            .key(format!("model-{id}"))
+            .h(26.0)
+            .px(10.0)
+            .radius(7.0)
+            .continuous_corners()
+            .center()
+            .fill(if on { ACCENT.alpha(0.25) } else { Color::WHITE.alpha(0.06) })
+            .border(1.0, if on { ACCENT.alpha(0.6) } else { Color::WHITE.alpha(0.08) })
+            .hover(Color::WHITE.alpha(0.10))
+            .cursor(Cursor::Pointer)
+            .role("radio")
+            .label(label)
+            .checked(on)
+            .child(text(label).font(TextStyle::new(12.0, 500.0)).color(t.text))
+            .on_press(move |s: &mut S| lens(s).pick_model(id));
+        list = list.child(b);
+    }
+    list
+}
+
 fn send_button<S: 'static>(ready: bool, streaming: bool, t: &tok::Theme, lens: fn(&mut S) -> &mut Chat) -> El {
     if streaming && !ready {
         return reply_view::stop_button(lens);
@@ -224,6 +273,7 @@ pub fn body<S: 'static>(s: &Chat, header: El, lens: fn(&mut S) -> &mut Chat) -> 
         .items_end()
         .gap(8.0)
         .child(col().grow(1.0).min_w(0.0).py(4.0).child(auto_grow(field, 1, 6)))
+        .child(model_picker(s, &t, lens))
         .child(send_button(s.send_ready(), s.streaming(), &t, lens));
     let mut composer = col()
         .key("composer")
@@ -246,6 +296,9 @@ pub fn body<S: 'static>(s: &Chat, header: El, lens: fn(&mut S) -> &mut Chat) -> 
             chips = chips.child(quick_input::chip(shot, compact, remove, open));
         }
         composer = composer.child(chips);
+    }
+    if s.models_open {
+        composer = composer.child(model_list(s, &t, lens));
     }
     let composer = composer.child(typing);
     col().child(header).child(divider()).child(messages).child(el().w_full().padding(10.0).child(composer))

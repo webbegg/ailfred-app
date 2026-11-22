@@ -678,6 +678,21 @@ mod tests {
     }
 
     #[test]
+    fn the_composer_has_the_model_picker_and_it_lists_the_models() {
+        let mut chat = Chat::new(None);
+        chat.place(Insets::default(), [1440.0, 900.0]);
+        chat.open();
+        let mut rt = Runtime::new(W { chat }, window, (1440.0, 900.0), Env::new(true, 2.0));
+        rt.frame(1.0 / 60.0);
+        let k = keys(&rt);
+        assert!(k.iter().any(|k| k == "model-picker") && !k.iter().any(|k| k == "models"), "{k:?}");
+        rt.update(|s, _| s.chat.toggle_models());
+        rt.frame(1.0 / 60.0);
+        let k = keys(&rt);
+        assert!(k.iter().any(|k| k == "models") && k.iter().any(|k| k == "model-pi"), "{k:?}");
+    }
+
+    #[test]
     fn while_it_streams_send_is_stop_and_an_error_offers_retry() {
         let mut chat = Chat::new(None);
         chat.place(Insets::default(), [1440.0, 900.0]);

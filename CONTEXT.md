@@ -70,7 +70,8 @@ diff, a question with options, an error. A reply is queued, streaming, done, sto
 _Avoid_: response, completion
 
 **Model**:
-What writes the replies, picked in Settings: Claude, through the Anthropic API with the user's
+What writes the replies, picked in Settings or with the composer's model picker (beside Send;
+not a chip): Claude, through the Anthropic API with the user's
 key, else through the installed Claude Code; or **pi**, Ailfred's own pi (`pi.rs`, `pi_setup.rs`)
 on the model and sign-ins of the user's pi setup, which runs tools and asks its own questions.
 Each is a `model::Model`. The mock model (`mock_model.rs`) in tests and with

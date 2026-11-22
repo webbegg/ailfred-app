@@ -56,6 +56,13 @@ impl SettingsUi {
         self.status = if self.model == model::PI { pi_status() } else { model::status_now() };
     }
 
+    /// A model picked on the chat's chip.
+    pub fn choose_model(&mut self, id: &str) {
+        if let Some(index) = model::MODELS.iter().position(|(m, _)| *m == id) {
+            self.pick_model(index);
+        }
+    }
+
     /// A model's segment clicked: it's kept, and the status says where replies come from.
     fn pick_model(&mut self, index: usize) {
         let Some((id, _)) = model::MODELS.get(index) else { return };
@@ -252,6 +259,18 @@ mod tests {
         assert!(s.status.contains("pi"), "{}", s.status);
         s.pick_model(0);
         assert_eq!(s.status, model::status_now());
+    }
+
+    #[test]
+    fn a_model_chosen_in_the_chat_is_kept_and_shown_here() {
+        let _turn = MODEL_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = ui();
+        s.choose_model("claude-opus-5-5");
+        assert_eq!((s.model.as_str(), s.settings.model().as_str()), ("claude-opus-5-5", "claude-opus-5-5"));
+        s.choose_model("nope");
+        assert_eq!(s.model, "claude-opus-5-5");
+        s.choose_model(crate::model::DEFAULT_MODEL);
+        assert_eq!(crate::settings::model_now(), crate::model::DEFAULT_MODEL);
     }
 
     // The Keychain here is the test build's, in memory: no test touches the real one.

@@ -155,6 +155,8 @@ pub struct Chat {
     /// The model of the reply streaming last: a message sent meanwhile steers pi's run, and
     /// waits for any other's.
     running: String,
+    /// The model picker's list shows.
+    models_open: bool,
     /// The streams whose runs were cancelled (the host ends their processes), for tests.
     #[cfg(test)]
     cancelled: Vec<u64>,
@@ -173,7 +175,7 @@ pub struct Chat {
 
 impl Chat {
     pub fn new(host: Option<AppHandle<Host>>) -> Self {
-        Chat { messages: Vec::new(), draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0, replies: Vec::new(), next_token: 0, scratch: TextEdit::new(""), away: false, windowed: false, session: None, conv: history::Meta::fresh(), running: String::new(), #[cfg(test)] cancelled: Vec::new(), #[cfg(test)] saved: Vec::new(), #[cfg(test)] title_asks: Vec::new(), #[cfg(test)] model: None, #[cfg(test)] requests: Vec::new() }
+        Chat { messages: Vec::new(), draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0, replies: Vec::new(), next_token: 0, scratch: TextEdit::new(""), away: false, windowed: false, session: None, conv: history::Meta::fresh(), running: String::new(), models_open: false, #[cfg(test)] cancelled: Vec::new(), #[cfg(test)] saved: Vec::new(), #[cfg(test)] title_asks: Vec::new(), #[cfg(test)] model: None, #[cfg(test)] requests: Vec::new() }
     }
 
     pub fn is_open(&self) -> bool {
@@ -372,6 +374,34 @@ impl Chat {
             return Some(self.queue(id, prompt));
         }
         Some(self.start_reply(id, prompt, false))
+    }
+
+    /// The model picker: its list opens or closes.
+    pub fn toggle_models(&mut self) {
+        self.models_open = !self.models_open;
+    }
+
+    /// A model picked in the composer: it writes the next replies (kept in the settings, by the
+    /// settings window). Anything not a model is ignored.
+    pub fn pick_model(&mut self, id: &str) {
+        if !model::MODELS.iter().any(|(m, _)| *m == id) {
+            return;
+        }
+        self.models_open = false;
+        #[cfg(test)]
+        {
+            self.model = Some(id.to_owned());
+        }
+        if let Some(host) = &self.host {
+            let id = id.to_owned();
+            host.update(move |host, _| host.pick_model(id));
+        }
+    }
+
+    /// The model the picker names.
+    pub fn model_label(&self) -> &'static str {
+        let id = self.model();
+        model::MODELS.iter().find(|(m, _)| *m == id).map_or("", |(_, label)| label)
     }
 
     fn model(&self) -> String {

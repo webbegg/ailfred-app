@@ -307,6 +307,26 @@ fn a_reply_claude_streams_is_waited_for_even_with_pi_picked_meanwhile() {
 }
 
 #[test]
+fn the_model_picker_lists_the_models_and_a_pick_closes_it_and_writes_the_next_reply() {
+    let mut c = Chat::new(None);
+    c.model = Some(crate::model::DEFAULT_MODEL.into());
+    assert_eq!(c.model_label(), "Sonnet 5.5");
+    c.toggle_models();
+    assert!(c.models_open);
+    c.pick_model(crate::model::PI);
+    assert!(!c.models_open);
+    assert_eq!(c.model_label(), "pi");
+    let id = sent(&mut c, "hi");
+    c.ask(id);
+    assert_eq!(c.requests.last().map(|(_, r)| r.model.as_str()), Some(crate::model::PI));
+    c.pick_model("no-such-model");
+    assert_eq!(c.model_label(), "pi", "ignored");
+    c.toggle_models();
+    c.toggle_models();
+    assert!(!c.models_open);
+}
+
+#[test]
 fn retrying_stops_the_reply_streaming_and_its_old_events_go_nowhere() {
     let mut c = Chat::new(None);
     let first = sent(&mut c, "one");

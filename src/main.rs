@@ -671,6 +671,17 @@ impl Host {
         })
     }
 
+    /// The chat's model picker picked `id`: the settings keep it (and show it); the chat shows it
+    /// once kept.
+    pub fn pick_model(&mut self, id: String) {
+        let (Some(ui), Some(handle)) = (&self.settings_ui, self.handle.clone()) else { return };
+        ui.update(move |s, tx| {
+            s.choose_model(&id);
+            tx.animated();
+            handle.update(|host, _| host.with_chat(|_, tx| tx.animated()));
+        });
+    }
+
     /// Cmd+N: pi starts a new session (Claude is told the history each time).
     pub fn new_conversation(&mut self) {
         self.status.stop();
