@@ -18,11 +18,20 @@ macro_rules! mark {
     };
 }
 
-/// The mark alone (the menu bar's template icon).
+/// The mark alone, edge to edge.
+#[cfg(test)]
 pub static MARK: Icon = Icon {
     name: "capibarapp-mark",
     view: 256.0,
     body: concat!(r#"<g fill="currentColor">"#, mark!(), "</g>"),
+};
+
+/// The mark in the menu bar: at 80%, centred, so it keeps a margin like the system's icons
+/// (about 16 of the bar's 22 pt).
+pub static MENU_BAR_MARK: Icon = Icon {
+    name: "capibarapp-menu-bar-mark",
+    view: 256.0,
+    body: concat!(r#"<g transform="translate(25.6 25.6) scale(0.8)" fill="currentColor">"#, mark!(), "</g>"),
 };
 
 /// The tile, on macOS's icon grid: 824 of 1024 units, inset 100, corners of 185.
