@@ -196,7 +196,7 @@ pub fn decode_pasted(host: &Option<AppHandle<Host>>, field: Field, id: u64, past
         };
         match png.and_then(|png| Image::from_png(&png).map(|image| (png, image))) {
             Some((png, image)) => host.update(move |host, _| host.pasted(field, id, png, image)),
-            None => eprintln!("Capibarapp: the pasted image couldn't be read"),
+            None => eprintln!("Ailfred: the pasted image couldn't be read"),
         }
     });
 }
@@ -1256,7 +1256,7 @@ pub(crate) mod tests {
 
     #[test]
     fn too_large_an_image_file_is_not_read() {
-        let dir = std::env::temp_dir().join(format!("capibarapp-large-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ailfred-large-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let png = dir.join("a.png");
         std::fs::write(&png, a_png()).unwrap();
@@ -1273,7 +1273,7 @@ pub(crate) mod tests {
 
     #[test]
     fn an_image_file_is_read_as_a_png() {
-        let dir = std::env::temp_dir().join(format!("capibarapp-paste-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("ailfred-paste-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let png = dir.join("a.png");
         std::fs::write(&png, a_png()).unwrap();

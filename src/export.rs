@@ -24,14 +24,14 @@ pub struct Frozen {
 pub fn export(frozen: Arc<Frozen>, sel: [f32; 4], marks: Vec<Mark>, host: AppHandle<Host>) {
     let (mut rgba, width, height) = match crop(&frozen, sel) {
         Ok(out) => out,
-        Err(e) => return eprintln!("Capibarapp: crop failed: {e}"),
+        Err(e) => return eprintln!("Ailfred: crop failed: {e}"),
     };
     if let Err(e) = apply(&mut rgba, width, height, frozen.scale, &marks) {
-        eprintln!("Capibarapp: drawing the marks failed: {e}");
+        eprintln!("Ailfred: drawing the marks failed: {e}");
     }
     let png = match encode_png(width, height, frozen.scale, &rgba) {
         Ok(png) => png,
-        Err(e) => return eprintln!("Capibarapp: encoding failed: {e}"),
+        Err(e) => return eprintln!("Ailfred: encoding failed: {e}"),
     };
     match ClipboardImage::from_png(png.clone()) {
         Some(image) => {
@@ -42,12 +42,12 @@ pub fn export(frozen: Arc<Frozen>, sel: [f32; 4], marks: Vec<Mark>, host: AppHan
                 }
             });
         }
-        None => eprintln!("Capibarapp: image too large for the clipboard; saved to disk only"),
+        None => eprintln!("Ailfred: image too large for the clipboard; saved to disk only"),
     }
     let dir = std::path::PathBuf::from(crate::app_env::screenshots_dir());
     match crate::output::save(&dir, &png) {
-        Ok(path) => eprintln!("Capibarapp saved {} ({width}x{height}, {} marks)", path.display(), marks.len()),
-        Err(e) => eprintln!("Capibarapp: {e}"),
+        Ok(path) => eprintln!("Ailfred saved {} ({width}x{height}, {} marks)", path.display(), marks.len()),
+        Err(e) => eprintln!("Ailfred: {e}"),
     }
 }
 
@@ -147,7 +147,7 @@ fn apply(rgba: &mut [u8], width: u32, height: u32, scale: f32, all: &[Mark]) -> 
             Mark::Text { at, text, style } => {
                 let color = ink(style);
                 if let Err(e) = draw_text(&context, *at, text, style.size.text(), &color) {
-                    eprintln!("Capibarapp: a text mark couldn't be drawn: {e}");
+                    eprintln!("Ailfred: a text mark couldn't be drawn: {e}");
                 }
             }
             Mark::Pixelate(_) => {}
@@ -228,7 +228,7 @@ mod tests {
         assert!(*red_rows.first().unwrap() >= 4 && *red_rows.last().unwrap() <= 4 + 30, "within the line below `at`: {red_rows:?}");
     }
 
-    /// Renders every kind of mark on a gradient to /tmp/capibarapp-marks.png, for a look by eye:
+    /// Renders every kind of mark on a gradient to /tmp/ailfred-marks.png, for a look by eye:
     /// `cargo test sample_render -- --ignored`.
     #[test]
     #[ignore]
@@ -250,7 +250,7 @@ mod tests {
             Mark::Text { at: [10.0, 75.0], text: "small white".into(), style: Style { ink: Ink::White, size: Size::S } },
         ];
         apply(&mut rgba, w, h, scale, &all).unwrap();
-        std::fs::write("/tmp/capibarapp-marks.png", encode_png(w, h, scale, &rgba).unwrap()).unwrap();
+        std::fs::write("/tmp/ailfred-marks.png", encode_png(w, h, scale, &rgba).unwrap()).unwrap();
     }
 
     #[test]

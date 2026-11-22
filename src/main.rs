@@ -1,4 +1,4 @@
-//! Capibarapp: an area screenshot tool. The hotkey captures the display under the pointer, then
+//! Ailfred: an area screenshot tool. The hotkey captures the display under the pointer, then
 //! shows it frozen in a frameless, transparent overlay above every other window. Drag to select;
 //! on release the area goes to the clipboard and to ~/Desktop as a PNG.
 //!
@@ -55,7 +55,7 @@ pub struct Host {
     /// For work that finishes on another thread and reports back.
     handle: Option<AppHandle<Host>>,
     tray: Option<Tray>,
-    /// Running from ~/Applications/Capibarapp.app (login item and log file only there).
+    /// Running from ~/Applications/Ailfred.app (login item and log file only there).
     installed: bool,
     /// A capture is running on its thread; a second press waits for it.
     capturing: Arc<AtomicBool>,
@@ -615,7 +615,7 @@ impl Host {
         let Some(handle) = self.handle.clone() else { return };
         let Ok(shortcut) = quick_input::SHORTCUT.parse::<rune::Shortcut>() else { return };
         if let Err(e) = handle.register_shortcut(shortcut, |host: &mut Host, _| host.toggle_quick_input()) {
-            eprintln!("Capibarapp: the quick input shortcut {} couldn't be registered: {e}", quick_input::SHORTCUT);
+            eprintln!("Ailfred: the quick input shortcut {} couldn't be registered: {e}", quick_input::SHORTCUT);
         }
     }
 
@@ -654,7 +654,7 @@ impl Host {
         // The checkmark starts off; the startup thread reads the real state off the UI thread.
         match Tray::new(handle, self.installed, false) {
             Ok(tray) => self.tray = Some(tray),
-            Err(e) => eprintln!("Capibarapp: menu-bar icon failed: {e}"),
+            Err(e) => eprintln!("Ailfred: menu-bar icon failed: {e}"),
         }
     }
 
@@ -665,11 +665,11 @@ impl Host {
         let label = shortcut.as_ref().map(|s| s.to_string()).unwrap_or_else(|| "none (menu only)".into());
         match self.capture_shortcut.replace(&handle, shortcut.as_ref()) {
             Ok(()) => {
-                eprintln!("Capibarapp ready: capture shortcut {label}");
+                eprintln!("Ailfred ready: capture shortcut {label}");
                 self.show_capture_shortcut(shortcut.as_ref());
             }
             Err(e) => {
-                eprintln!("Capibarapp: the capture shortcut {label} couldn't be registered: {e}");
+                eprintln!("Ailfred: the capture shortcut {label} couldn't be registered: {e}");
                 if let Some(ui) = &self.settings_ui {
                     let message = format!("The shortcut isn't active: {e}. Record it again or pick another.");
                     ui.update(move |ui, _| ui.shortcut_failed(message));
@@ -734,7 +734,7 @@ impl Host {
 /// Opens a path or URL with its default app (`open`), without waiting for it.
 fn open(target: &str) {
     if let Err(e) = std::process::Command::new("open").arg(target).spawn() {
-        eprintln!("Capibarapp: open {target} failed: {e}");
+        eprintln!("Ailfred: open {target} failed: {e}");
     }
 }
 
@@ -803,7 +803,7 @@ fn start_capture(host: &mut Host, delay: Duration, mode: Mode) {
                 }),
                 None => show_capture(&overlay, &capture_shown, shot, mode, target),
             },
-            Err(e) => eprintln!("Capibarapp: {e}"),
+            Err(e) => eprintln!("Ailfred: {e}"),
         }
     });
 }
@@ -846,7 +846,7 @@ fn main() {
         && flag == "--app-icon"
     {
         if let Err(e) = std::fs::write(out, app_icon::png(1024)) {
-            eprintln!("Capibarapp: writing the icon to {out} failed: {e}");
+            eprintln!("Ailfred: writing the icon to {out} failed: {e}");
             std::process::exit(1);
         }
         return;
@@ -854,7 +854,7 @@ fn main() {
     // The Dock's and app switcher's icon while the chat's window shows one (a dev build has no
     // bundle to take it from).
     if let Err(e) = rune::set_app_icon(app_icon::png(512)) {
-        eprintln!("Capibarapp: {e}");
+        eprintln!("Ailfred: {e}");
     }
     let installed = app_env::in_bundle();
     if installed {
@@ -862,11 +862,11 @@ fn main() {
     }
     // accessory: no Dock icon and no activation at launch.
     rune::run_windows_with(RunOptions { accessory: true }, move |_displays| {
-        let mut app = App::new(AppSpec::new("Capibarapp", (1.0, 1.0), host_init, host_view)).windowless();
+        let mut app = App::new(AppSpec::new("Ailfred", (1.0, 1.0), host_init, host_view)).windowless();
         let handle = app.handle();
         let overlay = app.overlay(
             // The size is replaced by the display's size: FullScreen placement.
-            OverlaySpec::new("Capibarapp overlay", (0.0, 0.0), shot::view)
+            OverlaySpec::new("Ailfred overlay", (0.0, 0.0), shot::view)
                 .options(OverlayOptions {
                     display: DisplayTarget::UnderPointer,
                     placement: Some(OverlayPlacement::FullScreen),
@@ -884,7 +884,7 @@ fn main() {
         let quick = app.overlay(
             // The input and the chat in one window over the whole display (FullScreen replaces
             // the size): the input's panel turns into the chat's wherever it is on it.
-            OverlaySpec::new("Capibarapp quick input", (0.0, 0.0), quick_input::view)
+            OverlaySpec::new("Ailfred quick input", (0.0, 0.0), quick_input::view)
                 .options(OverlayOptions {
                     display: DisplayTarget::UnderPointer,
                     placement: Some(OverlayPlacement::FullScreen),
@@ -908,7 +908,7 @@ fn main() {
         let ui = SettingsUi::new(settings, handle.clone(), capture_shortcut.clone());
         let hidden = WindowOptions { visible: false, resizable: false, min_size: Some((0.0, 0.0)), ..Default::default() };
         let (settings_ui, settings_window) = app.window(
-            WindowSpec::new("settings", AppSpec::new("Capibarapp Settings", (460.0, 260.0), SettingsUi::placeholder, settings_ui::view))
+            WindowSpec::new("settings", AppSpec::new("Ailfred Settings", (460.0, 260.0), SettingsUi::placeholder, settings_ui::view))
                 .state(ui)
                 .options(hidden),
         );

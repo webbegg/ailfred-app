@@ -6,7 +6,7 @@
 use objc2::rc::autoreleasepool;
 use objc2_service_management::{SMAppService, SMAppServiceStatus};
 
-/// Registers Capibarapp as a login item if it never was. Blocking (a call to the service manager):
+/// Registers Ailfred as a login item if it never was. Blocking (a call to the service manager):
 /// run it off the UI thread, and only from the installed bundle.
 pub fn register_if_needed() {
     // A background thread has no autorelease pool of its own.
@@ -15,17 +15,17 @@ pub fn register_if_needed() {
         let service = unsafe { SMAppService::mainAppService() };
         let status = unsafe { service.status() };
         if status != SMAppServiceStatus::NotRegistered {
-            eprintln!("Capibarapp login item: {}", name(status));
+            eprintln!("Ailfred login item: {}", name(status));
             return;
         }
         match unsafe { service.registerAndReturnError() } {
-            Ok(()) => eprintln!("Capibarapp login item: registered, now {}", name(unsafe { service.status() })),
-            Err(e) => eprintln!("Capibarapp login item: registering failed: {e:?}"),
+            Ok(()) => eprintln!("Ailfred login item: registered, now {}", name(unsafe { service.status() })),
+            Err(e) => eprintln!("Ailfred login item: registering failed: {e:?}"),
         }
     });
 }
 
-/// Whether Capibarapp opens at login now.
+/// Whether Ailfred opens at login now.
 pub fn enabled() -> bool {
     // SAFETY: as above.
     autoreleasepool(|_| unsafe { SMAppService::mainAppService().status() } == SMAppServiceStatus::Enabled)
@@ -38,10 +38,10 @@ pub fn set(on: bool) -> bool {
         let service = unsafe { SMAppService::mainAppService() };
         let result = if on { unsafe { service.registerAndReturnError() } } else { unsafe { service.unregisterAndReturnError() } };
         if let Err(e) = result {
-            eprintln!("Capibarapp login item: turning it {} failed: {e:?}", if on { "on" } else { "off" });
+            eprintln!("Ailfred login item: turning it {} failed: {e:?}", if on { "on" } else { "off" });
         }
         let now = unsafe { service.status() };
-        eprintln!("Capibarapp login item: {}", name(now));
+        eprintln!("Ailfred login item: {}", name(now));
         now == SMAppServiceStatus::Enabled
     })
 }

@@ -6,16 +6,16 @@ use std::path::{Path, PathBuf};
 /// The system's screenshot sound (macOS 13+ location).
 const SOUND: &str = "/System/Library/Components/CoreAudio.component/Contents/SharedSupport/SystemSounds/system/Screen Capture.aif";
 
-/// `Capibarapp 2026-11-15 at 18.05.23.png` in local time, like macOS's own screenshots.
+/// `Ailfred 2026-11-15 at 18.05.23.png` in local time, like macOS's own screenshots.
 fn file_name(unix_secs: i64) -> String {
     let t: libc::time_t = unix_secs as libc::time_t;
     // SAFETY: localtime_r writes only into `tm`, which outlives the call.
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     if unsafe { libc::localtime_r(&t, &mut tm) }.is_null() {
-        return format!("Capibarapp {unix_secs}");
+        return format!("Ailfred {unix_secs}");
     }
     format!(
-        "Capibarapp {:04}-{:02}-{:02} at {:02}.{:02}.{:02}",
+        "Ailfred {:04}-{:02}-{:02} at {:02}.{:02}.{:02}",
         tm.tm_year + 1900,
         tm.tm_mon + 1,
         tm.tm_mday,
@@ -70,10 +70,10 @@ mod tests {
     #[test]
     fn name_has_the_macos_shape() {
         let name = file_name(1_794_762_000);
-        // "Capibarapp YYYY-MM-DD at HH.MM.SS"
-        assert!(name.starts_with("Capibarapp 20"), "{name}");
-        assert_eq!(name.len(), "Capibarapp 2026-11-15 at 18.05.23".len(), "{name}");
-        let at = "Capibarapp YYYY-MM-DD".len();
+        // "Ailfred YYYY-MM-DD at HH.MM.SS"
+        assert!(name.starts_with("Ailfred 20"), "{name}");
+        assert_eq!(name.len(), "Ailfred 2026-11-15 at 18.05.23".len(), "{name}");
+        let at = "Ailfred YYYY-MM-DD".len();
         assert_eq!(&name[at..at + 4], " at ", "{name}");
     }
 
