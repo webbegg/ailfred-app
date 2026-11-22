@@ -42,13 +42,13 @@ fn at_rest_it_takes_the_right_edge_past_the_menu_bar_and_dock() {
 }
 
 fn msg(id: u64, text: &str) -> Message {
-    Message { id, text: text.into(), images: Vec::new() }
+    Message::text(id, text)
 }
 
 #[test]
 fn landing_gives_its_field_the_keys_though_it_lost_them_while_hidden() {
     let mut c = Chat::new(None);
-    c.morph(Message { id: 0, text: "hi".into(), images: Vec::new() });
+    c.morph(Message::text(0, "hi"));
     // Its content is transparent while the panel reshapes, so the window's focus passes it
     // by and the field's model is told it's not focused.
     c.draft.focused = false;
@@ -162,9 +162,9 @@ fn in_its_window_it_stays_open_esc_leaves_it_and_cmd_n_clears_it_at_once() {
 #[test]
 fn a_message_typed_after_one_from_the_input_gets_an_id_of_its_own() {
     let mut c = Chat::new(None);
-    c.push(Message { id: 0, text: "from the input".into(), images: Vec::new() });
+    c.push(Message::text(0, "from the input"));
     let typed = sent(&mut c, "typed");
-    c.push(Message { id: 1, text: "from the input again".into(), images: Vec::new() });
+    c.push(Message::text(1, "from the input again"));
     let again = sent(&mut c, "typed again");
     let ids: Vec<u64> = c.messages.iter().map(|m| m.id).collect();
     assert!(again != typed && again != 0 && again != 1, "{ids:?}");
@@ -453,4 +453,128 @@ fn a_capture_png_decodes_back_to_its_pixels() {
     let png = crate::export::encode_png(3, 2, 2.0, &rgba).unwrap();
     assert_eq!(decode_png(&png), Some((3, 2, rgba)));
     assert_eq!(decode_png(b"not a png"), None);
+}
+
+// What goes to the model.
+
+/// Message `id`'s reply streams `text` and ends with `end`.
+fn answered(c: &mut Chat, id: u64, text: &str, end: Event) -> u64 {
+    let token = c.ask(id).expect("a reply");
+    if !text.is_empty() {
+        c.reply_event(token, Event::Text(text.into()), Instant::now());
+    }
+    c.reply_event(token, end, Instant::now());
+    token
+}
+
+#[test]
+fn a_second_messages_request_carries_the_first_message_its_capture_and_its_reply_as_history() {
+    let mut c = Chat::new(None);
+    c.attach(0, vec![1, 2, 3], tiny());
+    c.draft = TextEdit::new("what is this?");
+    let (first, _) = c.send().expect("sent");
+    answered(&mut c, first, "A cat.", Event::Done);
+    let second = sent(&mut c, "and its name?");
+    let request = c.request_for(second, "claude-opus-5-5").expect("a request");
+    assert_eq!((request.model.as_str(), request.text.as_str()), ("claude-opus-5-5", "and its name?"));
+    assert_eq!(request.history, vec![model::Turn { text: "what is this?".into(), pngs: vec![Arc::new(vec![1, 2, 3])], reply: "A cat.".into() }]);
+    assert!(request.pngs.is_empty());
+    let again = c.request_for(first, "m").expect("the first one's own");
+    assert!(again.history.is_empty(), "nothing came before it");
+    assert_eq!(again.pngs, vec![Arc::new(vec![1, 2, 3])], "its capture goes to the model");
+    assert_eq!(c.request_for(99, "m"), None);
+}
+
+#[test]
+fn failed_unfinished_and_empty_replies_stay_out_of_the_history_but_a_stopped_one_keeps_what_came() {
+    let mut c = Chat::new(None);
+    for (text, reply, end) in [("a", "one", Event::Done), ("b", "oops", Event::Fail("broke".into())), ("c", "", Event::Done)] {
+        let id = sent(&mut c, text);
+        answered(&mut c, id, reply, end);
+    }
+    let d = sent(&mut c, "d");
+    let token = c.ask(d).unwrap();
+    c.reply_event(token, Event::Text("part".into()), Instant::now());
+    c.stop(Instant::now());
+    let e = sent(&mut c, "e");
+    c.ask(e).unwrap();
+    let f = sent(&mut c, "f");
+    let history: Vec<(String, String)> = c.request_for(f, "m").unwrap().history.into_iter().map(|t| (t.text, t.reply)).collect();
+    assert_eq!(history, [("a".into(), "one".into()), ("d".into(), "part".into())]);
+}
+
+#[test]
+fn a_new_conversation_starts_without_history_or_session() {
+    let mut c = Chat::new(None);
+    let first = sent(&mut c, "one");
+    let token = answered(&mut c, first, "uno", Event::Done);
+    c.set_session(token, "sess-1".into());
+    let second = sent(&mut c, "two");
+    let request = c.request_for(second, "m").unwrap();
+    assert_eq!((request.history.len(), request.session.as_deref()), (1, Some("sess-1")), "the conversation goes on");
+    // Cmd+N in its window.
+    c.clear();
+    let fresh = sent(&mut c, "new");
+    let request = c.request_for(fresh, "m").unwrap();
+    assert_eq!((request.history.len(), request.session), (0, None));
+    // Cmd+N in the side panel: the next message starts it.
+    let token = answered(&mut c, fresh, "ok", Event::Done);
+    c.set_session(token, "sess-2".into());
+    c.start_over();
+    let after = sent(&mut c, "again");
+    let request = c.request_for(after, "m").unwrap();
+    assert_eq!((request.history.len(), request.session), (0, None));
+}
+
+#[test]
+fn a_retried_reply_starts_afresh_instead_of_resuming_the_session_that_already_holds_it() {
+    let mut c = Chat::new(None);
+    let first = sent(&mut c, "one");
+    let token = answered(&mut c, first, "uno", Event::Done);
+    c.set_session(token, "sess-1".into());
+    // Retry "one": the session already has it and its old reply.
+    assert_eq!(c.request_for(first, "m").unwrap().session, None, "retry");
+    let second = sent(&mut c, "two");
+    assert_eq!(c.request_for(second, "m").unwrap().session.as_deref(), Some("sess-1"), "the next message resumes it");
+    let token = answered(&mut c, second, "dos", Event::Done);
+    c.set_session(token, "sess-1".into());
+    // Retry "one" again, now further back: no session holds just what came before it.
+    assert_eq!(c.request_for(first, "m").unwrap().session, None, "retry further back");
+}
+
+#[test]
+fn only_a_reply_still_there_gives_the_conversation_its_session() {
+    let mut c = Chat::new(None);
+    let id = sent(&mut c, "one");
+    let token = c.ask(id).unwrap();
+    c.set_session(token + 5, "stray".into());
+    let next = sent(&mut c, "two");
+    assert_eq!(c.request_for(next, "m").unwrap().session, None);
+    c.set_session(token, "real".into());
+    // Once its reply is in, the session goes on with the next message.
+    c.reply_event(token, Event::Text("uno".into()), std::time::Instant::now());
+    c.reply_event(token, Event::Done, std::time::Instant::now());
+    assert_eq!(c.request_for(next, "m").unwrap().session.as_deref(), Some("real"));
+}
+
+#[test]
+fn stopping_asking_again_retrying_and_starting_over_cancel_the_run_of_the_reply_streaming() {
+    let mut c = Chat::new(None);
+    let (a, b) = (sent(&mut c, "a"), sent(&mut c, "b"));
+    let first = c.ask(a).unwrap();
+    c.stop(Instant::now());
+    assert_eq!(c.cancelled, [first], "Stop");
+    c.stop(Instant::now());
+    assert_eq!(c.cancelled, [first], "nothing streaming, nothing to cancel");
+    let second = c.ask(b).unwrap();
+    let third = c.ask(a).unwrap();
+    assert_eq!(c.cancelled, [first, second], "a new reply replaces the streaming one");
+    let fourth = c.retry(third).unwrap();
+    assert_eq!(c.cancelled, [first, second, third], "Retry");
+    c.start_over();
+    assert_eq!(c.cancelled, [first, second, third, fourth], "Cmd+N");
+    let id = sent(&mut c, "c");
+    let fifth = c.ask(id).unwrap();
+    c.clear();
+    assert_eq!(c.cancelled.last(), Some(&fifth), "Cmd+N in its window");
 }

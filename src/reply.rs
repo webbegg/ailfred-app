@@ -142,6 +142,17 @@ impl Reply {
         self.state == State::Streaming
     }
 
+    /// What the model is told it answered, in a later message's history: its text, if it
+    /// finished or was stopped with some. A failed or empty reply has none.
+    pub fn history_text(&self) -> Option<String> {
+        if !matches!(self.state, State::Done | State::Stopped) {
+            return None;
+        }
+        let texts: Vec<&str> = self.parts.iter().filter_map(|p| if let Part::Text(t) = p { Some(t.as_str()) } else { None }).collect();
+        let text = texts.join("\n\n");
+        (!text.trim().is_empty()).then_some(text)
+    }
+
     /// Takes in the next event (`now`: when it arrived); none once it's over.
     pub fn apply(&mut self, event: Event, now: Instant) {
         if !self.streaming() {

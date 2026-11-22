@@ -110,10 +110,13 @@ dependencies = [
  "objc2-core-text",
  "objc2-foundation 0.3.2",
  "objc2-screen-capture-kit",
+ "objc2-security",
  "objc2-service-management",
  "png 0.18.1",
  "rune",
  "rune-kit",
+ "serde",
+ "serde_json",
  "tray-icon",
 ]
 

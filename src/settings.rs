@@ -22,9 +22,17 @@ pub const DEFAULT_SHORTCUT: &str = "cmd+shift+space";
 const SHORTCUT: &str = "shortcut";
 const FOLDER: &str = "folder";
 const IGNORE_REDUCE_MOTION: &str = "ignore_reduce_motion";
+const MODEL: &str = "model";
 
 /// Whether the views animate even under the system's Reduce Motion, as last set (any thread).
 static IGNORE_REDUCE_MOTION_NOW: AtomicBool = AtomicBool::new(true);
+
+/// The model as last set, read when a message is sent (any thread).
+static MODEL_NOW: RwLock<Option<String>> = RwLock::new(None);
+
+/// Tests that pick a model publish it for the whole process: they take turns.
+#[cfg(test)]
+pub(crate) static MODEL_TEST: Mutex<()> = Mutex::new(());
 
 /// The save folder as last set, for the export thread.
 static FOLDER_NOW: RwLock<Option<PathBuf>> = RwLock::new(None);
@@ -39,6 +47,7 @@ impl Settings {
         let settings = Settings::with(Prefs::open(app_id(installed)));
         *FOLDER_NOW.write().unwrap_or_else(|e| e.into_inner()) = Some(settings.folder());
         IGNORE_REDUCE_MOTION_NOW.store(settings.ignore_reduce_motion(), Ordering::Relaxed);
+        *MODEL_NOW.write().unwrap_or_else(|e| e.into_inner()) = Some(settings.model());
         settings
     }
 
@@ -74,6 +83,33 @@ impl Settings {
         }
         *FOLDER_NOW.write().unwrap_or_else(|e| e.into_inner()) = Some(folder.to_path_buf());
     }
+}
+
+impl Settings {
+    /// The model that writes the replies: Sonnet until Opus is picked; the pick is kept.
+    pub fn model(&self) -> String {
+        self.prefs.get::<String>(MODEL).filter(|m| is_model(m)).unwrap_or_else(|| crate::model::DEFAULT_MODEL.into())
+    }
+
+    /// Picks `model` (one of `model::MODELS`; anything else is ignored) for the next messages.
+    pub fn set_model(&mut self, model: &str) {
+        if !is_model(model) {
+            return;
+        }
+        if let Err(e) = self.prefs.set(MODEL, &model) {
+            eprintln!("Ailfred: saving the model failed: {e}");
+        }
+        *MODEL_NOW.write().unwrap_or_else(|e| e.into_inner()) = Some(model.to_owned());
+    }
+}
+
+fn is_model(id: &str) -> bool {
+    crate::model::MODELS.iter().any(|(m, _)| *m == id)
+}
+
+/// The model to ask now (any thread): the setting's, as last set.
+pub fn model_now() -> String {
+    MODEL_NOW.read().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(|| crate::model::DEFAULT_MODEL.into())
 }
 
 impl Settings {
@@ -153,6 +189,21 @@ mod tests {
         let chord: Shortcut = "ctrl+alt+k".parse().unwrap();
         s.set_shortcut(Some(&chord));
         assert_eq!(s.shortcut(), Some(chord));
+    }
+
+    #[test]
+    fn the_model_is_sonnet_until_opus_is_picked_and_the_pick_is_kept() {
+        let _turn = MODEL_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = Settings::with(Prefs::memory());
+        assert_eq!(s.model(), "claude-sonnet-5-5");
+        s.set_model("claude-opus-5-5");
+        assert_eq!(s.model(), "claude-opus-5-5");
+        assert_eq!(model_now(), "claude-opus-5-5", "the next message asks the one picked");
+        s.set_model("gpt-4");
+        assert_eq!(s.model(), "claude-opus-5-5", "only the listed models can be picked");
+        s.set_model("claude-sonnet-5-5");
+        assert_eq!(s.model(), "claude-sonnet-5-5");
+        assert_eq!(model_now(), "claude-sonnet-5-5");
     }
 
     #[test]
