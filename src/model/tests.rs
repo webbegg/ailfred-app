@@ -11,7 +11,7 @@ use super::*;
 use crate::reply::Event;
 
 /// A fresh empty folder under the system's temp folder.
-fn scratch(name: &str) -> PathBuf {
+pub(super) fn scratch(name: &str) -> PathBuf {
     static N: AtomicU32 = AtomicU32::new(0);
     let dir = std::env::temp_dir().join(format!("ailfred-test-{}-{}-{name}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)));
     let _ = std::fs::remove_dir_all(&dir);
@@ -19,7 +19,7 @@ fn scratch(name: &str) -> PathBuf {
     dir
 }
 
-fn script(path: &Path, body: &str, mode: u32) {
+pub(super) fn script(path: &Path, body: &str, mode: u32) {
     std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
 }

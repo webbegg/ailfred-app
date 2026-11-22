@@ -18,8 +18,12 @@ mod process;
 mod stream;
 #[cfg(test)]
 mod tests;
+mod title;
+#[cfg(test)]
+mod title_tests;
 
 pub use process::Run;
+pub use title::{TIMEOUT as TITLE_TIMEOUT, request as title_request, start as ask_title};
 
 pub const DEFAULT_MODEL: &str = "claude-sonnet-5-5";
 /// The models to pick from: id and label.
