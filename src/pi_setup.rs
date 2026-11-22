@@ -1,0 +1,388 @@
+//! Ailfred's own pi: its config folder, home, working folder and sessions under
+//! `~/Library/Application Support/com.ailfred`, so none of the user's own pi extensions,
+//! skills, hooks or settings load. It shares the user's sign-ins (`auth.json` is a link to
+//! theirs: pi writes and locks it through the link) and starts on their default model.
+
+use std::ffi::OsString;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Arc, Mutex};
+
+/// Where Ailfred's pi keeps its things.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Layout {
+    /// pi's config folder (`PI_CODING_AGENT_DIR`).
+    pub agent: PathBuf,
+    /// Its `HOME`, so what pi writes on a first run stays out of the user's.
+    pub home: PathBuf,
+    /// Where it works (its current folder).
+    pub workspace: PathBuf,
+    pub sessions: PathBuf,
+}
+
+impl Layout {
+    pub fn under(data: &Path) -> Self {
+        Layout { agent: data.join("agent"), home: data.join("home"), workspace: data.join("workspace"), sessions: data.join("sessions") }
+    }
+}
+
+/// The settings it takes from the user's pi: which model, and how hard it thinks.
+const SEEDED: [&str; 3] = ["defaultProvider", "defaultModel", "defaultThinkingLevel"];
+
+/// Makes `layout`'s folders, links the user's sign-ins from `user_agent` (their `~/.pi/agent`),
+/// and, the first time, seeds its settings with their default model.
+pub fn prepare(layout: &Layout, user_agent: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    for dir in [&layout.agent, &layout.home, &layout.workspace, &layout.sessions] {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::set_permissions(&layout.home, std::fs::Permissions::from_mode(0o700))?;
+    let auth = user_agent.join("auth.json");
+    let link = layout.agent.join("auth.json");
+    if auth.is_file() && std::fs::symlink_metadata(&link).is_err() {
+        std::os::unix::fs::symlink(&auth, &link)?;
+    }
+    let own = layout.agent.join("settings.json");
+    if !own.exists()
+        && let Ok(text) = std::fs::read_to_string(user_agent.join("settings.json"))
+        && let Ok(serde_json::Value::Object(theirs)) = serde_json::from_str(&text)
+    {
+        let seeded: serde_json::Map<String, serde_json::Value> = theirs.into_iter().filter(|(k, _)| SEEDED.contains(&k.as_str())).collect();
+        if !seeded.is_empty() {
+            std::fs::write(&own, serde_json::Value::Object(seeded).to_string())?;
+        }
+    }
+    Ok(())
+}
+
+/// The command that starts pi (`pi`) in RPC mode with `layout`, its environment the app's
+/// (`inherited`) without pi's own variables, `path` as its `PATH`, and the user's real home
+/// (`real_home`) named to it.
+pub fn command(pi: &Path, layout: &Layout, real_home: &Path, path: &OsString, inherited: impl IntoIterator<Item = (OsString, OsString)>) -> Command {
+    let note = format!(
+        "You are Ailfred, the user's personal assistant on their Mac. The user's home folder is {}: their own files are there. Use absolute paths for them.",
+        real_home.display()
+    );
+    let mut command = Command::new(pi);
+    command.arg("--mode").arg("rpc").arg("--session-dir").arg(&layout.sessions).arg("--append-system-prompt").arg(note).current_dir(&layout.workspace);
+    let mut data_home = real_home.join(".local/share");
+    for (key, value) in inherited {
+        if key == "XDG_DATA_HOME" && !value.is_empty() {
+            data_home = value.into();
+        } else if key.to_string_lossy().starts_with("PI_") {
+            command.env_remove(key);
+        }
+    }
+    // pi's installer puts its node here and on no shell's PATH; its launcher finds it through
+    // HOME or XDG_DATA_HOME, both Ailfred's for pi.
+    let node = data_home.join("pi-node/current/bin");
+    let path = if node.is_dir() {
+        let mut joined = node.into_os_string();
+        if !path.is_empty() {
+            joined.push(":");
+            joined.push(path);
+        }
+        joined
+    } else {
+        path.clone()
+    };
+    let home = &layout.home;
+    command
+        .env("PI_CODING_AGENT_DIR", &layout.agent)
+        .env("HOME", home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_CACHE_HOME", home.join(".cache"))
+        .env("XDG_STATE_HOME", home.join(".local/state"))
+        .env("PATH", path);
+    let git = real_home.join(".gitconfig");
+    if git.is_file() {
+        command.env("GIT_CONFIG_GLOBAL", git);
+    }
+    command
+}
+
+/// The text after `marker` in a shell's output, up to the next `marker` (an interactive shell
+/// may print around it).
+pub fn marked(output: &str, marker: &str) -> Option<String> {
+    let (_, after) = output.split_once(marker)?;
+    let (inside, _) = after.split_once(marker)?;
+    (!inside.is_empty()).then(|| inside.to_owned())
+}
+
+/// pi itself: `$AILFRED_PI`, else the managed install's `~/.pi/agent/bin/pi` when it's there.
+pub fn pi_binary(real_home: &Path) -> Option<PathBuf> {
+    if let Some(pi) = std::env::var_os("AILFRED_PI") {
+        return Some(pi.into());
+    }
+    let managed = real_home.join(".pi/agent/bin/pi");
+    managed.is_file().then_some(managed)
+}
+
+/// Ailfred's pi, ready to talk to, kept running: its folders under `data`, the user's sign-ins
+/// and default model from `real_home`'s `~/.pi/agent`. Runs their login shell once (for
+/// `PATH`), so not on the main thread.
+pub fn start(pi: &Path, data: &Path, real_home: &Path) -> io::Result<crate::pi::PiEngine> {
+    let layout = Layout::under(data);
+    prepare(&layout, &real_home.join(".pi/agent"))?;
+    let path = login_path(&std::env::var_os("PATH").unwrap_or_default());
+    let (pi, real_home) = (pi.to_owned(), real_home.to_owned());
+    crate::pi::PiEngine::supervised(move || command(&pi, &layout, &real_home, &path, std::env::vars_os()), crate::pi::SHUTDOWN_GRACE)
+}
+
+/// Ailfred's pi as a [`Model`](crate::model::Model): started (off the main thread) when it's
+/// first picked; a message before it's up fails with a note.
+pub struct Pi {
+    state: Arc<Mutex<PiState>>,
+}
+
+enum PiState {
+    Starting,
+    Up(crate::pi::PiEngine),
+    Failed(String),
+}
+
+impl Pi {
+    /// Starts pi (`pi_binary`) with its folders under `data` and the user's setup in `real_home`.
+    pub fn start(pi: Option<PathBuf>, data: PathBuf, real_home: PathBuf) -> Pi {
+        let Some(pi) = pi else {
+            return Pi::with(PiState::Failed("pi isn't installed (~/.pi/agent/bin/pi, or set AILFRED_PI).".into()));
+        };
+        let state = Arc::new(Mutex::new(PiState::Starting));
+        let up = state.clone();
+        std::thread::spawn(move || {
+            let now = match start(&pi, &data, &real_home) {
+                Ok(engine) => PiState::Up(engine),
+                Err(e) => {
+                    eprintln!("Ailfred: pi couldn't start: {e}");
+                    PiState::Failed(format!("pi couldn't start: {e}"))
+                }
+            };
+            *up.lock().unwrap_or_else(|e| e.into_inner()) = now;
+        });
+        Pi { state }
+    }
+
+    fn with(state: PiState) -> Pi {
+        Pi { state: Arc::new(Mutex::new(state)) }
+    }
+}
+
+impl crate::model::Model for Pi {
+    fn send(&mut self, request: crate::model::Request, sink: crate::model::Sink) {
+        use crate::model::Item;
+        use crate::reply::Event;
+        match &mut *self.state.lock().unwrap_or_else(|e| e.into_inner()) {
+            PiState::Up(engine) => {
+                let prompt = crate::pi::Prompt { text: request.text, pngs: request.pngs, answer: request.answer };
+                engine.send(prompt, Arc::new(move |event| sink(Item::Event(event))));
+            }
+            PiState::Starting => sink(Item::Event(Event::Fail("pi is starting. Try again in a moment.".into()))),
+            PiState::Failed(why) => sink(Item::Event(Event::Fail(why.clone()))),
+        }
+    }
+
+    fn stop(&mut self) {
+        if let PiState::Up(engine) = &mut *self.state.lock().unwrap_or_else(|e| e.into_inner()) {
+            engine.stop();
+        }
+    }
+
+    fn new_conversation(&mut self) {
+        if let PiState::Up(engine) = &mut *self.state.lock().unwrap_or_else(|e| e.into_inner()) {
+            engine.new_conversation();
+        }
+    }
+}
+
+const MARKER: &str = "__AILFRED_PATH__";
+
+/// The `PATH` the user's login shell sets up (where nvm or Homebrew put `node`), joined before
+/// the app's own: an app opened from Finder gets only the system's. Runs their shell once.
+pub fn login_path(app_path: &OsString) -> OsString {
+    let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/zsh".into());
+    login_path_with(Path::new(&shell), app_path, LOGIN_SHELL_WAIT)
+}
+
+/// How long the user's login shell gets to tell its `PATH`.
+const LOGIN_SHELL_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// [`login_path`] with `shell`, given up on after `wait`.
+fn login_path_with(shell: &Path, app_path: &OsString, wait: std::time::Duration) -> OsString {
+    use std::io::Read;
+    use std::process::Stdio;
+    let script = format!("printf '{MARKER}%s{MARKER}' \"$PATH\"");
+    let theirs = Command::new(shell).arg("-ilc").arg(script).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok().and_then(|mut child| {
+        let mut stdout = child.stdout.take()?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        // Read on a thread of its own: a job the shell started may keep its stdout open.
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            let mut chunk = [0u8; 4096];
+            while let Ok(n) = stdout.read(&mut chunk) {
+                if n == 0 {
+                    break;
+                }
+                out.extend_from_slice(&chunk[..n]);
+                if marked(&String::from_utf8_lossy(&out), MARKER).is_some() {
+                    break;
+                }
+            }
+            let _ = tx.send(out);
+        });
+        let out = rx.recv_timeout(wait).ok();
+        let _ = child.kill();
+        let _ = child.wait();
+        out.and_then(|out| marked(&String::from_utf8_lossy(&out), MARKER))
+    });
+    match theirs {
+        Some(theirs) if app_path.is_empty() => theirs.into(),
+        Some(theirs) => format!("{theirs}:{}", app_path.to_string_lossy()).into(),
+        None => app_path.clone(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use super::*;
+
+    /// A fresh folder for one test.
+    fn scratch(name: &str) -> PathBuf {
+        static N: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!("ailfred-setup-{}-{name}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn settings(path: &Path) -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn its_folders_are_made_the_sign_ins_linked_and_the_model_seeded_once() {
+        let root = scratch("seed");
+        let user = root.join("user-agent");
+        std::fs::create_dir_all(&user).unwrap();
+        std::fs::write(user.join("auth.json"), "{\"x\":{}}").unwrap();
+        std::fs::write(
+            user.join("settings.json"),
+            r#"{"defaultProvider":"anthropic","defaultModel":"m1","defaultThinkingLevel":"high","packages":["npm:x"],"extensions":["/a.ts"]}"#,
+        )
+        .unwrap();
+        let layout = Layout::under(&root.join("data"));
+        prepare(&layout, &user).unwrap();
+        for dir in [&layout.agent, &layout.home, &layout.workspace, &layout.sessions] {
+            assert!(dir.is_dir(), "{dir:?}");
+        }
+        assert_eq!(std::fs::metadata(&layout.home).unwrap().permissions().mode() & 0o777, 0o700);
+        assert_eq!(std::fs::read_link(layout.agent.join("auth.json")).unwrap(), user.join("auth.json"));
+        assert_eq!(settings(&layout.agent.join("settings.json")), serde_json::json!({"defaultProvider":"anthropic","defaultModel":"m1","defaultThinkingLevel":"high"}));
+
+        // Its own model choice later is kept.
+        std::fs::write(layout.agent.join("settings.json"), r#"{"defaultModel":"m2"}"#).unwrap();
+        prepare(&layout, &user).unwrap();
+        assert_eq!(settings(&layout.agent.join("settings.json"))["defaultModel"], "m2");
+        assert!(std::fs::symlink_metadata(layout.agent.join("auth.json")).unwrap().file_type().is_symlink());
+    }
+
+    #[test]
+    fn without_a_pi_setup_of_the_users_it_starts_empty() {
+        let root = scratch("empty");
+        let layout = Layout::under(&root.join("data"));
+        prepare(&layout, &root.join("nowhere")).unwrap();
+        assert!(layout.agent.is_dir());
+        assert!(std::fs::symlink_metadata(layout.agent.join("auth.json")).is_err());
+        assert!(!layout.agent.join("settings.json").exists());
+    }
+
+    fn env_of(command: &Command) -> Vec<(String, Option<String>)> {
+        command.get_envs().map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned()))).collect()
+    }
+
+    #[test]
+    fn pi_runs_in_rpc_mode_with_its_own_folders_and_none_of_pis_inherited_variables() {
+        let layout = Layout::under(Path::new("/data"));
+        let inherited = [("PI_SESSION_ID", "s1"), ("PI_CODING_AGENT_DIR", "/Users/me/.pi/agent"), ("LANG", "en_US.UTF-8")].map(|(k, v)| (OsString::from(k), OsString::from(v)));
+        let command = command(Path::new("/bin/pi"), &layout, Path::new("/Users/me"), &OsString::from("/opt/node/bin:/usr/bin"), inherited);
+        let args: Vec<String> = command.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(&args[..4], ["--mode", "rpc", "--session-dir", "/data/sessions"]);
+        let at = args.iter().position(|a| a == "--append-system-prompt").expect("a note for the model");
+        assert!(args[at + 1].contains("/Users/me"), "{}", args[at + 1]);
+        assert_eq!(command.get_current_dir(), Some(Path::new("/data/workspace")));
+        let env = env_of(&command);
+        let set = |k: &str| env.iter().find(|(key, _)| key == k).and_then(|(_, v)| v.clone());
+        assert_eq!(set("PI_CODING_AGENT_DIR").as_deref(), Some("/data/agent"));
+        assert_eq!(set("HOME").as_deref(), Some("/data/home"));
+        assert_eq!(set("XDG_CONFIG_HOME").as_deref(), Some("/data/home/.config"));
+        assert_eq!(set("XDG_DATA_HOME").as_deref(), Some("/data/home/.local/share"));
+        assert_eq!(set("PATH").as_deref(), Some("/opt/node/bin:/usr/bin"));
+        assert!(env.contains(&("PI_SESSION_ID".to_owned(), None)), "inherited PI_ variables removed: {env:?}");
+        assert!(!env.iter().any(|(k, _)| k == "LANG"), "the rest is inherited as is");
+    }
+
+    #[test]
+    fn the_users_git_identity_follows_when_they_have_one() {
+        let root = scratch("git");
+        std::fs::write(root.join(".gitconfig"), "[user]\n").unwrap();
+        let layout = Layout::under(&root.join("data"));
+        let with = command(Path::new("pi"), &layout, &root, &OsString::new(), []);
+        let git = env_of(&with).into_iter().find(|(k, _)| k == "GIT_CONFIG_GLOBAL").and_then(|(_, v)| v);
+        assert_eq!(git, Some(root.join(".gitconfig").to_string_lossy().into_owned()));
+        let without = command(Path::new("pi"), &layout, &root.join("nobody"), &OsString::new(), []);
+        assert!(!env_of(&without).iter().any(|(k, _)| k == "GIT_CONFIG_GLOBAL"));
+    }
+
+    #[test]
+    fn pis_own_node_is_on_its_path() {
+        // pi's installer puts node here and adds it to no shell profile; its launcher looks
+        // for it under HOME, which is Ailfred's for pi.
+        let root = scratch("node");
+        std::fs::create_dir_all(root.join(".local/share/pi-node/current/bin")).unwrap();
+        let layout = Layout::under(&root.join("data"));
+        let with = command(Path::new("pi"), &layout, &root, &OsString::from("/usr/bin"), []);
+        let path = env_of(&with).into_iter().find(|(k, _)| k == "PATH").and_then(|(_, v)| v);
+        assert_eq!(path, Some(format!("{}:/usr/bin", root.join(".local/share/pi-node/current/bin").display())));
+    }
+
+    #[test]
+    fn a_login_shell_that_hangs_is_given_up_on() {
+        let root = scratch("shell");
+        let shell = root.join("slow-shell");
+        std::fs::write(&shell, "#!/bin/sh\nsleep 10\n").unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = std::time::Instant::now();
+        let path = login_path_with(&shell, &OsString::from("/usr/bin"), std::time::Duration::from_millis(500));
+        assert!(started.elapsed() < std::time::Duration::from_secs(3), "{:?}", started.elapsed());
+        assert_eq!(path, OsString::from("/usr/bin"));
+    }
+
+    #[test]
+    fn until_pi_is_up_a_message_fails_with_why() {
+        use crate::model::{Item, Model};
+        let request = crate::model::Request { model: crate::model::PI.into(), history: Vec::new(), text: "hi".into(), pngs: Vec::new(), session: None, answer: false };
+        for (mut pi, why) in [
+            (Pi::with(PiState::Starting), "pi is starting. Try again in a moment."),
+            (Pi::start(None, PathBuf::new(), PathBuf::new()), "pi isn't installed (~/.pi/agent/bin/pi, or set AILFRED_PI)."),
+        ] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let tx = Mutex::new(tx);
+            pi.send(request.clone(), Arc::new(move |item| drop(tx.lock().unwrap().send(item))));
+            assert_eq!(rx.try_recv(), Ok(Item::Event(crate::reply::Event::Fail(why.into()))));
+            pi.stop();
+            pi.new_conversation();
+        }
+    }
+
+    #[test]
+    fn the_login_shells_path_is_read_between_markers() {
+        let m = "__AILFRED__";
+        assert_eq!(marked("motd\n__AILFRED__/a:/b__AILFRED__\nbye", m).as_deref(), Some("/a:/b"));
+        assert_eq!(marked("no markers", m), None);
+        assert_eq!(marked("__AILFRED____AILFRED__", m), None, "an empty PATH is no PATH");
+    }
+}

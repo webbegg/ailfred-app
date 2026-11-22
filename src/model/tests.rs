@@ -25,7 +25,7 @@ fn script(path: &Path, body: &str, mode: u32) {
 }
 
 fn request(text: &str) -> Request {
-    Request { model: DEFAULT_MODEL.into(), history: Vec::new(), text: text.into(), pngs: Vec::new(), session: None }
+    Request { model: DEFAULT_MODEL.into(), history: Vec::new(), text: text.into(), pngs: Vec::new(), session: None, answer: false }
 }
 
 fn png(bytes: &[u8]) -> Arc<Vec<u8>> {

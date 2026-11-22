@@ -207,6 +207,16 @@ mod tests {
     }
 
     #[test]
+    fn pi_can_be_picked_to_write_the_replies() {
+        let _turn = MODEL_TEST.lock().unwrap_or_else(|e| e.into_inner());
+        let mut s = Settings::with(Prefs::memory());
+        s.set_model(crate::model::PI);
+        assert_eq!((s.model().as_str(), model_now().as_str()), ("pi", "pi"));
+        s.set_model(crate::model::DEFAULT_MODEL);
+        assert_eq!(model_now(), crate::model::DEFAULT_MODEL);
+    }
+
+    #[test]
     fn animations_ignore_reduce_motion_until_turned_off() {
         let mut s = Settings::with(Prefs::memory());
         assert!(s.ignore_reduce_motion(), "on by default");
