@@ -12,8 +12,13 @@ use rune::{
 };
 use rune_kit::glyphs;
 
+use std::time::Instant;
+
 use crate::Host;
 use crate::icons;
+use crate::mock_model;
+use crate::reply::{self, Event, Reply};
+use crate::reply_view;
 use crate::quick_input::{self, ACCENT, Attached, Escape};
 
 /// The panel's width and its gap to the screen's edges, in points. Its corners are the input's
@@ -298,11 +303,20 @@ pub struct Chat {
     host: Option<AppHandle<Host>>,
     /// The next pasted image's id.
     next_shot: u64,
+    /// The model's replies, one per message at most (by its id).
+    replies: Vec<Reply>,
+    /// The last reply stream started: its events come back with it.
+    next_token: u64,
+    /// A text field for a question gone meanwhile.
+    scratch: TextEdit,
+    /// The user scrolled back from the latest: what comes keeps their place, and a button
+    /// takes them back down.
+    away: bool,
 }
 
 impl Chat {
     pub fn new(host: Option<AppHandle<Host>>) -> Self {
-        Chat { messages: Vec::new(), draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0 }
+        Chat { messages: Vec::new(), draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0, replies: Vec::new(), next_token: 0, scratch: TextEdit::new(""), away: false }
     }
 
     pub fn is_open(&self) -> bool {
@@ -411,10 +425,104 @@ impl Chat {
         self.preview = None;
     }
 
+    /// Message `id` gets a reply from the (fake) model, which the host streams in; the reply's
+    /// token, which its events carry. A reply streaming is stopped first.
+    pub fn ask(&mut self, id: u64) -> Option<u64> {
+        let prompt = self.messages.iter().find(|m| m.id == id)?.text.clone();
+        Some(self.start_reply(id, prompt, false))
+    }
+
+    /// Asks message `id` again: from `prompt` (`answer`: the user's answer to a question).
+    fn start_reply(&mut self, id: u64, prompt: String, answer: bool) -> u64 {
+        self.stop(Instant::now());
+        self.next_token += 1;
+        let token = self.next_token;
+        let script = if answer { mock_model::answer_script(&prompt) } else { mock_model::script(&prompt) };
+        let mut reply = Reply::new(id, prompt);
+        (reply.token, reply.answer) = (token, answer);
+        self.replies.retain(|r| r.id != id);
+        self.replies.push(reply);
+        if let Some(host) = &self.host {
+            host.update(move |host, _| host.stream_reply(token, script));
+        }
+        token
+    }
+
+    /// The next event of the reply stream `token`; one stopped or replaced takes none.
+    pub fn reply_event(&mut self, token: u64, event: Event, now: Instant) {
+        if let Some(reply) = self.reply_mut(token) {
+            reply.apply(event, now);
+        }
+    }
+
+    /// A reply is streaming.
+    pub fn streaming(&self) -> bool {
+        self.replies.iter().any(Reply::streaming)
+    }
+
+    /// Stop: the reply streaming keeps what came.
+    pub fn stop(&mut self, now: Instant) {
+        for reply in &mut self.replies {
+            reply.stop(now);
+        }
+    }
+
+    /// Retry: the reply `token` starts over; its new token.
+    pub fn retry(&mut self, token: u64) -> Option<u64> {
+        let r = self.replies.iter().find(|r| r.token == token)?;
+        let (id, prompt, answer) = (r.id, r.prompt.clone(), r.answer);
+        Some(self.start_reply(id, prompt, answer))
+    }
+
+    /// The reply to message `id`.
+    pub fn reply_to(&self, id: u64) -> Option<&Reply> {
+        self.replies.iter().find(|r| r.id == id)
+    }
+
+    pub fn reply_mut(&mut self, token: u64) -> Option<&mut Reply> {
+        self.replies.iter_mut().find(|r| r.token == token)
+    }
+
+    fn question_mut(&mut self, token: u64, part: usize) -> Option<&mut reply::Question> {
+        match self.reply_mut(token)?.parts.get_mut(part)? {
+            reply::Part::Question(q) => Some(q),
+            _ => None,
+        }
+    }
+
+    /// Option `option` of question `part` in reply `token` clicked.
+    pub fn pick(&mut self, token: u64, part: usize, option: usize) {
+        if let Some(q) = self.question_mut(token, part) {
+            q.pick(option);
+        }
+    }
+
+    /// The "something else" field of question `part` in reply `token`.
+    pub fn question_other(&mut self, token: u64, part: usize) -> &mut TextEdit {
+        if self.question_mut(token, part).is_none() {
+            return &mut self.scratch;
+        }
+        &mut self.question_mut(token, part).expect("just found").other
+    }
+
+    /// The user answers question `part` of reply `token`: the answer goes as their message and
+    /// gets its reply (its token). None if nothing is picked or written.
+    pub fn answer(&mut self, token: u64, part: usize) -> Option<u64> {
+        let text = self.reply_mut(token)?.answer(part)?;
+        let id = self.next_id();
+        self.push(Message { id, text: text.clone(), images: Vec::new() });
+        Some(self.start_reply(id, text, true))
+    }
+
+    fn next_id(&self) -> u64 {
+        self.messages.last().map_or(0, |m| m.id + 1).max(LOCAL_IDS)
+    }
+
     /// Adds a message at the end of the conversation, the field focused for the next.
     pub fn push(&mut self, message: Message) {
         if std::mem::replace(&mut self.over, false) {
             self.messages.clear();
+            self.replies.clear();
             self.draft.clear();
             self.shots.clear();
         }
@@ -475,7 +583,7 @@ impl Chat {
         self.draft.clear();
         self.preview = None;
         let pngs = std::mem::take(&mut self.shots).into_iter().map(|a| a.png).collect();
-        let id = self.messages.last().map_or(0, |m| m.id + 1).max(LOCAL_IDS);
+        let id = self.next_id();
         self.push(Message { id, text, images: Vec::new() });
         Some((id, pngs))
     }
@@ -489,6 +597,11 @@ impl Chat {
     /// Esc closes an enlarged capture, then slides the panel out (`escape`); Backspace in an
     /// empty field drops the last capture; Cmd+N starts a new chat (`Host::new_chat`).
     fn field_key(&mut self, ev: &KeyEvent) -> bool {
+        // Esc while a reply streams stops it; the next Esc closes.
+        if ev.key == Key::Escape && self.streaming() {
+            self.stop(Instant::now());
+            return true;
+        }
         if ev.key == Key::Escape {
             if self.escape() == Escape::Close {
                 self.dismiss();
@@ -523,7 +636,10 @@ fn close_button<S: 'static>(t: &tok::Theme, lens: fn(&mut S) -> &mut Chat) -> El
         .on_press(move |s: &mut S| lens(s).dismiss())
 }
 
-fn send_button<S: 'static>(ready: bool, t: &tok::Theme, lens: fn(&mut S) -> &mut Chat) -> El {
+fn send_button<S: 'static>(ready: bool, streaming: bool, t: &tok::Theme, lens: fn(&mut S) -> &mut Chat) -> El {
+    if streaming && !ready {
+        return reply_view::stop_button(lens);
+    }
     let button = el().key("send").size(28.0, 28.0).radius(8.0).continuous_corners().center().label("Send").shortcut_hint("↵");
     if ready {
         button
@@ -541,8 +657,34 @@ fn send_button<S: 'static>(ready: bool, t: &tok::Theme, lens: fn(&mut S) -> &mut
 
 /// Enter or the send button: the draft and its captures join the conversation; the captures
 /// are decoded off the main thread and show when ready.
+/// Over the thread's bottom while the user is scrolled back: back to the latest.
+fn to_latest<S: 'static>(t: &tok::Theme) -> El {
+    let button = el()
+        .key("to-latest")
+        .size(32.0, 32.0)
+        .radius(16.0)
+        .center()
+        .fill(Color { r: 0.16, g: 0.16, b: 0.16, a: 0.96 })
+        .border(1.0, Color::WHITE.alpha(0.14))
+        .shadow(4.0, 12.0, Color::BLACK.alpha(0.35))
+        .hover(Color::WHITE.alpha(0.08))
+        .press(Color::BLACK.alpha(0.12))
+        .press_scale(0.94)
+        .cursor(Cursor::Pointer)
+        .label("Jump to latest")
+        .child(icon(&glyphs::CHEVRON_DOWN, 14.0).color(t.text))
+        .on_press_tx(move |_: &mut S, tx: &mut Tx| tx.scroll_to_bottom("messages"));
+    row()
+        .key("to-latest-row")
+        .pin(Some(0.0), None, Some(0.0), Some(10.0))
+        .justify_center()
+        .transition(Transition::opacity().combined(Transition::scale(0.85)))
+        .child(button)
+}
+
 fn send(s: &mut Chat, tx: &mut Tx) {
     let Some((id, pngs)) = s.send() else { return };
+    s.ask(id);
     tx.scroll_to_bottom("messages");
     if !pngs.is_empty()
         && let Some(host) = &s.host
@@ -602,6 +744,9 @@ pub fn panel<S: 'static>(s: &Chat, key: &str, lens: fn(&mut S) -> &mut Chat, inp
     let mut thread = col().key("thread").w_full().gap(14.0).px(14.0).py(14.0).growth(GrowthSpec::default());
     for (i, m) in s.messages.iter().enumerate() {
         thread = thread.child(message(i, m, &t));
+        if let Some(r) = s.reply_to(m.id) {
+            thread = thread.child(reply_view::view(r, lens));
+        }
     }
     let messages = col()
         .key("messages")
@@ -609,9 +754,15 @@ pub fn panel<S: 'static>(s: &Chat, key: &str, lens: fn(&mut S) -> &mut Chat, inp
         .grow(1.0)
         .shrink()
         .min_h(0.0)
+        // Follows what comes while at the bottom; scrolled back, it stays put.
         .scroll(ScrollSpec { stick_bottom: true })
         .scroll_edge_fade(16.0)
+        .on_at_bottom(move |s: &mut S, at: bool| lens(s).away = !at)
         .child(thread);
+    let mut messages = col().key("thread-frame").w_full().grow(1.0).shrink().min_h(0.0).child(messages);
+    if s.away {
+        messages = messages.child(to_latest::<S>(&t));
+    }
     let field = text_input(&s.draft, TextStyle::new(14.0, 400.0).lh(20.0))
         .key("draft")
         .w_full()
@@ -628,7 +779,7 @@ pub fn panel<S: 'static>(s: &Chat, key: &str, lens: fn(&mut S) -> &mut Chat, inp
         .items_end()
         .gap(8.0)
         .child(col().grow(1.0).min_w(0.0).py(4.0).child(auto_grow(field, 1, 6)))
-        .child(send_button(s.send_ready(), &t, lens));
+        .child(send_button(s.send_ready(), s.streaming(), &t, lens));
     let mut composer = col()
         .key("composer")
         .w_full()
@@ -813,6 +964,78 @@ pub(crate) mod tests {
         assert_eq!(pngs, vec![vec![9]]);
         assert!(c.shot_ids().is_empty());
         assert_eq!(c.messages.last().map(|m| (m.id, m.text.as_str())), Some((id, "")));
+    }
+
+    pub(crate) fn sent(c: &mut Chat, text: &str) -> u64 {
+        c.draft = TextEdit::new(text);
+        let (id, _) = c.send().expect("sent");
+        id
+    }
+
+    fn texts(r: &Reply) -> String {
+        r.parts.iter().filter_map(|p| if let reply::Part::Text(t) = p { Some(t.as_str()) } else { None }).collect()
+    }
+
+    #[test]
+    fn a_sent_message_gets_a_reply_fed_by_its_token() {
+        let mut c = Chat::new(None);
+        let id = sent(&mut c, "hi");
+        let token = c.ask(id).expect("a reply");
+        assert!(c.streaming());
+        c.reply_event(token, Event::Text("Hello".into()), Instant::now());
+        c.reply_event(token + 7, Event::Text(" stray".into()), Instant::now());
+        let r = c.reply_to(id).expect("its reply");
+        assert_eq!((r.prompt.as_str(), texts(r).as_str()), ("hi", "Hello"));
+        c.reply_event(token, Event::Done, Instant::now());
+        assert!(!c.streaming());
+        assert_eq!(c.ask(99), None, "no such message");
+    }
+
+    #[test]
+    fn sending_again_or_retrying_stops_the_reply_streaming_and_its_old_events_go_nowhere() {
+        let mut c = Chat::new(None);
+        let first = sent(&mut c, "one");
+        let old = c.ask(first).unwrap();
+        let second = sent(&mut c, "two");
+        let token = c.ask(second).unwrap();
+        assert_eq!(c.reply_to(first).map(|r| r.state), Some(reply::State::Stopped));
+        c.stop(Instant::now());
+        assert_eq!(c.reply_to(second).map(|r| r.state), Some(reply::State::Stopped));
+        let again = c.retry(token).expect("retried");
+        c.reply_event(token, Event::Text("stale".into()), Instant::now());
+        c.reply_event(old, Event::Text("stale".into()), Instant::now());
+        c.reply_event(again, Event::Text("fresh".into()), Instant::now());
+        let r = c.reply_to(second).unwrap();
+        assert_eq!((r.state, texts(r).as_str()), (reply::State::Streaming, "fresh"), "one reply per message, started over");
+    }
+
+    #[test]
+    fn starting_over_drops_the_replies_and_stale_streams_stay_out() {
+        let mut c = Chat::new(None);
+        let id = sent(&mut c, "one");
+        let old = c.ask(id).unwrap();
+        c.start_over();
+        let id = sent(&mut c, "new");
+        c.reply_event(old, Event::Text("stale".into()), Instant::now());
+        assert!(c.reply_to(id).is_none(), "the old stream feeds nothing");
+        assert_eq!(c.replies.len(), 0);
+    }
+
+    #[test]
+    fn answering_a_question_sends_the_answer_and_gets_its_reply() {
+        let mut c = Chat::new(None);
+        let id = sent(&mut c, "ask");
+        let token = c.ask(id).unwrap();
+        let ask = Event::Ask { prompt: "Which?".into(), options: vec!["Tabs".into(), "Page".into()], multi: false };
+        c.reply_event(token, ask, Instant::now());
+        c.reply_event(token, Event::Done, Instant::now());
+        assert_eq!(c.answer(token, 0), None, "nothing picked");
+        c.pick(token, 0, 1);
+        let next = c.answer(token, 0).expect("answered");
+        assert_eq!(c.messages.last().map(|m| m.text.as_str()), Some("Page"));
+        let r = c.replies.iter().find(|r| r.token == next).expect("its reply");
+        assert!(r.answer && r.streaming());
+        assert_eq!(c.answer(token, 0), None, "once");
     }
 
     pub(crate) fn tiny() -> Image {

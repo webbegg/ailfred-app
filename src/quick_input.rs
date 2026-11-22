@@ -191,6 +191,7 @@ impl QuickInput {
             self.morphing = true;
             self.chat.morph(message);
         }
+        self.chat.ask(id);
         Some((id, text, pngs))
     }
 

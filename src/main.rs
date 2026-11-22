@@ -13,9 +13,12 @@ mod chat;
 mod export;
 mod login;
 mod marks;
+mod mock_model;
 mod output;
 mod icons;
 mod quick_input;
+mod reply;
+mod reply_view;
 mod screens;
 mod settings;
 mod settings_ui;
@@ -357,6 +360,21 @@ impl Host {
         } else {
             shot::For::Nothing
         }
+    }
+
+    /// Streams a reply (`token`) into the chat off the main thread, each event after its wait.
+    /// A stopped or replaced reply ignores what still comes.
+    pub fn stream_reply(&self, token: u64, script: mock_model::Script) {
+        let Some(quick) = self.quick.clone() else { return };
+        std::thread::spawn(move || {
+            for (wait, event) in script {
+                std::thread::sleep(wait);
+                quick.update(move |s, tx| {
+                    s.chat.reply_event(token, event, std::time::Instant::now());
+                    tx.animated();
+                });
+            }
+        });
     }
 
     /// Message `id`'s captures, decoded off the main thread, join it in the chat.
