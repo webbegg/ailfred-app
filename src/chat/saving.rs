@@ -122,6 +122,8 @@ impl Chat {
     /// thread. The one that's here already stays as it is.
     pub fn load(&mut self, loaded: history::Loaded) {
         if loaded.id == self.conv.id && !self.messages.is_empty() {
+            // Left with Cmd+N in the side panel, it's picked back: it goes on.
+            self.over = false;
             return;
         }
         self.stop(Instant::now());

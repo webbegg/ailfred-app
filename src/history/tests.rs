@@ -41,6 +41,16 @@ fn put(dir: &Path, name: &str, content: &str) {
     std::fs::write(dir.join(name), content).unwrap();
 }
 
+#[test]
+fn a_leftover_loose_tmp_doesnt_make_the_conversation_readable_by_others() {
+    let dir = scratch("loose-tmp");
+    let id = "20261122-130000-abcd";
+    put(&dir, &format!("{id}.json.tmp"), "stale");
+    std::fs::set_permissions(dir.join(format!("{id}.json.tmp")), std::fs::Permissions::from_mode(0o644)).unwrap();
+    store::write_snapshot(&dir, &snapshot(saved(id, 1, &["hi"]))).unwrap();
+    assert_eq!(mode(&dir.join(format!("{id}.json"))), 0o600);
+}
+
 // Ids.
 
 #[test]

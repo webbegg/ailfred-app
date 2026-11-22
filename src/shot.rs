@@ -716,7 +716,8 @@ pub fn on_key(s: &mut Overlay, event: &KeyEvent, _: &mut Tx) -> bool {
     // A chord with ⌘ or ⌃ is never typed text or a tool key.
     let chord = event.mods.cmd || event.mods.ctrl;
     if event.is_command('q') {
-        s.host.quit();
+        // As the menu's Quit: what's queued to be saved is written first.
+        s.host.update(|host, tx| host.on_menu(crate::tray::Action::Quit, tx));
         return true;
     }
     let Stage::Editing(edit) = &mut s.stage else {

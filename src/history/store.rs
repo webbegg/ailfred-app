@@ -25,6 +25,8 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = PathBuf::from(tmp);
     let written = (|| {
         let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(&tmp)?;
+        // `mode` only applies to a new file: a leftover one keeps its own.
+        file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
         file.write_all(bytes)?;
         file.sync_all()?;
         std::fs::rename(&tmp, path)

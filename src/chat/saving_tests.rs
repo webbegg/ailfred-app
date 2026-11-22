@@ -149,6 +149,18 @@ fn cmd_n_in_the_side_panel_ends_the_conversation_and_the_next_message_takes_a_ne
 }
 
 #[test]
+fn picking_the_conversation_just_left_with_cmd_n_in_the_side_panel_goes_on_with_it() {
+    let mut c = Chat::new(None);
+    exchange(&mut c, 1, "first", "ok", Event::Done);
+    let left = c.conv.id.clone();
+    c.start_over();
+    c.load(loaded(&left, vec![loaded_message("first", Some(done("ok")))], None));
+    exchange(&mut c, 2, "follow-up", "sure", Event::Done);
+    assert_eq!(c.conv.id, left, "still the conversation picked");
+    assert_eq!(last_saved(&c).messages.len(), 2, "the follow-up joins it");
+}
+
+#[test]
 fn cmd_n_while_a_reply_streams_saves_it_stopped_first() {
     let mut c = Chat::new(None);
     c.push(msg(1, "tell me a long story"));
