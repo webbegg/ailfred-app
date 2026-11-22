@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use rune::prefs::Prefs;
-use rune::{AppHandle, Shortcut, ShortcutError, ShortcutId};
+use rune::{AppHandle, Shortcut, ShortcutError, ShortcutId, Tx};
 
 use crate::Host;
 
@@ -20,12 +20,41 @@ pub fn app_id(installed: bool) -> &'static str {
 }
 pub const DEFAULT_SHORTCUT: &str = "cmd+shift+space";
 const SHORTCUT: &str = "shortcut";
+/// The quick input's chord, until changed in Settings (Option+Space alone is Claude's quick entry).
+pub const DEFAULT_QUICK_SHORTCUT: &str = "ctrl+alt+space";
+
+/// Which global shortcut: the capture's or the quick input's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShortcutFor {
+    Capture,
+    QuickInput,
+}
+
+impl ShortcutFor {
+    pub fn default_chord(self) -> &'static str {
+        match self {
+            ShortcutFor::Capture => DEFAULT_SHORTCUT,
+            ShortcutFor::QuickInput => DEFAULT_QUICK_SHORTCUT,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ShortcutFor::Capture => "capture",
+            ShortcutFor::QuickInput => "quick input",
+        }
+    }
+}
+const QUICK_SHORTCUT: &str = "quick_shortcut";
 const FOLDER: &str = "folder";
 const IGNORE_REDUCE_MOTION: &str = "ignore_reduce_motion";
 const MODEL: &str = "model";
 
+/// Whether the views animate even under the system's Reduce Motion, until set (also before the
+/// settings are read).
+const IGNORE_REDUCE_MOTION_DEFAULT: bool = false;
 /// Whether the views animate even under the system's Reduce Motion, as last set (any thread).
-static IGNORE_REDUCE_MOTION_NOW: AtomicBool = AtomicBool::new(true);
+static IGNORE_REDUCE_MOTION_NOW: AtomicBool = AtomicBool::new(IGNORE_REDUCE_MOTION_DEFAULT);
 
 /// The model as last set, read when a message is sent (any thread).
 static MODEL_NOW: RwLock<Option<String>> = RwLock::new(None);
@@ -59,16 +88,33 @@ impl Settings {
 
     /// The capture shortcut: the default until changed; None once the user cleared it.
     pub fn shortcut(&self) -> Option<Shortcut> {
-        match self.prefs.get::<Option<String>>(SHORTCUT) {
-            None => DEFAULT_SHORTCUT.parse().ok(),
-            Some(None) => None,
-            Some(Some(saved)) => saved.parse().ok().or_else(|| DEFAULT_SHORTCUT.parse().ok()),
-        }
+        self.saved_shortcut(SHORTCUT, DEFAULT_SHORTCUT)
     }
 
     pub fn set_shortcut(&mut self, shortcut: Option<&Shortcut>) {
+        self.save_shortcut(SHORTCUT, shortcut);
+    }
+
+    /// The quick input's shortcut: the default until changed; None once the user cleared it.
+    pub fn quick_shortcut(&self) -> Option<Shortcut> {
+        self.saved_shortcut(QUICK_SHORTCUT, DEFAULT_QUICK_SHORTCUT)
+    }
+
+    pub fn set_quick_shortcut(&mut self, shortcut: Option<&Shortcut>) {
+        self.save_shortcut(QUICK_SHORTCUT, shortcut);
+    }
+
+    fn saved_shortcut(&self, key: &str, default: &str) -> Option<Shortcut> {
+        match self.prefs.get::<Option<String>>(key) {
+            None => default.parse().ok(),
+            Some(None) => None,
+            Some(Some(saved)) => saved.parse().ok().or_else(|| default.parse().ok()),
+        }
+    }
+
+    fn save_shortcut(&mut self, key: &str, shortcut: Option<&Shortcut>) {
         let value: Option<String> = shortcut.map(|s| s.to_string());
-        if let Err(e) = self.prefs.set(SHORTCUT, &value) {
+        if let Err(e) = self.prefs.set(key, &value) {
             eprintln!("Ailfred: saving the shortcut failed: {e}");
         }
     }
@@ -114,9 +160,9 @@ pub fn model_now() -> String {
 }
 
 impl Settings {
-    /// Show every animation even with Reduce Motion on in the system: on until turned off.
+    /// Show every animation even with Reduce Motion on in the system: off until turned on.
     pub fn ignore_reduce_motion(&self) -> bool {
-        self.prefs.get::<bool>(IGNORE_REDUCE_MOTION).unwrap_or(true)
+        self.prefs.get::<bool>(IGNORE_REDUCE_MOTION).unwrap_or(IGNORE_REDUCE_MOTION_DEFAULT)
     }
 
     pub fn set_ignore_reduce_motion(&mut self, ignore: bool) {
@@ -148,26 +194,84 @@ pub fn folder_now() -> PathBuf {
     FOLDER_NOW.read().unwrap_or_else(|e| e.into_inner()).clone().filter(|p| p.is_dir()).unwrap_or_else(default_folder)
 }
 
-/// The capture shortcut's current registration, shared by startup and the settings window.
-/// Main thread only (registration is called from the app's own updates and windows).
-#[derive(Clone, Default)]
-pub struct CaptureShortcut(Arc<Mutex<Option<ShortcutId>>>);
+/// A saved shortcut as registered at startup.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Started {
+    /// The chord that works now: the saved one, else the default; None: neither (or cleared).
+    pub active: Option<Shortcut>,
+    /// What to tell the user when the saved one couldn't be had.
+    pub notice: Option<String>,
+}
 
-impl CaptureShortcut {
+/// Registers each shortcut's saved chord (`register(index, chord)`; None: cleared, nothing), then
+/// each refused one's default instead, saying so. The saved chords go first, so a fallback can't
+/// take another shortcut's own chord.
+pub fn start_shortcuts(slots: &[(Option<Shortcut>, &str)], mut register: impl FnMut(usize, Option<&Shortcut>) -> Result<(), ShortcutError>) -> Vec<Started> {
+    let tried: Vec<_> = slots.iter().enumerate().map(|(i, (saved, _))| register(i, saved.as_ref())).collect();
+    let mut started = Vec::with_capacity(slots.len());
+    for (i, ((saved, default), result)) in slots.iter().zip(tried).enumerate() {
+        started.push(match (saved, result) {
+            (None, _) => Started { active: None, notice: None },
+            (Some(saved), Ok(())) => Started { active: Some(saved.clone()), notice: None },
+            (Some(saved), Err(error)) => fall_back(saved, error, default, |s| register(i, Some(s))),
+        });
+    }
+    started
+}
+
+/// `saved` was refused with `error`: the `default` instead, if it's another chord and it can be had.
+fn fall_back(saved: &Shortcut, error: ShortcutError, default: &str, mut register: impl FnMut(&Shortcut) -> Result<(), ShortcutError>) -> Started {
+    let name = |s: &Shortcut| crate::quick_input::chord_symbols(&s.keycaps());
+    let gone = format!("{} isn't available ({error})", name(saved));
+    if let Some(default) = default.parse::<Shortcut>().ok().filter(|d| d != saved)
+        && register(&default).is_ok()
+    {
+        let notice = format!("{gone}: {} works instead. Record another to change it.", name(&default));
+        return Started { active: Some(default), notice: Some(notice) };
+    }
+    Started { active: None, notice: Some(format!("{gone}. Record another; the menu still has it.")) }
+}
+
+/// A global shortcut's current registration and what it does, shared by startup and the settings
+/// window. Main thread only (registration is called from the app's own updates and windows).
+#[derive(Clone)]
+pub struct HotKey {
+    /// The registration held, and its chord.
+    current: Arc<Mutex<Option<(ShortcutId, Shortcut)>>>,
+    action: fn(&mut Host, &mut Tx),
+}
+
+impl HotKey {
+    /// The capture's: takes a screenshot.
+    pub fn capture() -> HotKey {
+        HotKey { current: Arc::default(), action: crate::on_shortcut }
+    }
+
+    /// The quick input's: shows or hides it.
+    pub fn quick_input() -> HotKey {
+        HotKey { current: Arc::default(), action: |host, _| host.toggle_quick_input() }
+    }
+
     /// Registers `shortcut` (None: no shortcut) and only then releases the previous one, so a
-    /// refused chord leaves the old one working.
+    /// refused chord leaves the old one working. The chord already held stays as it is (the
+    /// system would refuse holding it twice).
     pub fn replace(&self, host: &AppHandle<Host>, shortcut: Option<&Shortcut>) -> Result<(), ShortcutError> {
+        let mut current = self.current.lock().unwrap_or_else(|e| e.into_inner());
+        if let (Some((_, held)), Some(s)) = (&*current, shortcut)
+            && held == s
+        {
+            return Ok(());
+        }
         let new = match shortcut {
-            Some(s) => Some(host.register_shortcut(s.clone(), |host: &mut Host, tx| crate::on_shortcut(host, tx))?),
+            Some(s) => Some((host.register_shortcut(s.clone(), self.action)?, s.clone())),
             None => None,
         };
-        let mut current = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(old) = *current
-            && let Err(e) = host.unregister_shortcut(old)
+        if let Some((old, _)) = &*current
+            && let Err(e) = host.unregister_shortcut(*old)
         {
             // Keep tracking the old one rather than lose its id; release the new one instead.
             eprintln!("Ailfred: releasing the old shortcut failed: {e}");
-            if let Some(new) = new {
+            if let Some((new, _)) = new {
                 let _ = host.unregister_shortcut(new);
             }
             return Err(e);
@@ -190,6 +294,101 @@ mod tests {
         let chord: Shortcut = "ctrl+alt+k".parse().unwrap();
         s.set_shortcut(Some(&chord));
         assert_eq!(s.shortcut(), Some(chord));
+    }
+
+    #[test]
+    fn the_quick_input_shortcut_defaults_to_ctrl_option_space_clears_and_round_trips() {
+        let mut s = Settings::with(Prefs::memory());
+        assert_eq!(s.quick_shortcut(), "ctrl+alt+space".parse().ok());
+        s.set_quick_shortcut(None);
+        assert_eq!(s.quick_shortcut(), None, "cleared stays cleared");
+        let chord: Shortcut = "ctrl+alt+j".parse().unwrap();
+        s.set_quick_shortcut(Some(&chord));
+        assert_eq!(s.quick_shortcut(), Some(chord));
+        assert_eq!(s.shortcut(), DEFAULT_SHORTCUT.parse().ok(), "the capture shortcut is its own");
+    }
+
+    fn chord(s: &str) -> Shortcut {
+        s.parse().unwrap()
+    }
+
+    /// Registers what `taken` doesn't hold, recording each try (one shortcut).
+    fn registrar<'a>(taken: &'a [&'a str], tried: &'a mut Vec<Option<String>>) -> impl FnMut(Option<&Shortcut>) -> Result<(), ShortcutError> + 'a {
+        move |s| {
+            tried.push(s.map(|s| s.to_string()));
+            match s {
+                Some(s) if taken.iter().any(|t| chord(t) == *s) => Err(ShortcutError::Conflict),
+                _ => Ok(()),
+            }
+        }
+    }
+
+    /// One shortcut started alone.
+    fn start_shortcut(saved: Option<Shortcut>, default: &str, mut register: impl FnMut(Option<&Shortcut>) -> Result<(), ShortcutError>) -> Started {
+        start_shortcuts(&[(saved, default)], |_, s| register(s)).remove(0)
+    }
+
+    #[test]
+    fn a_fallback_never_takes_the_other_shortcuts_saved_chord() {
+        // Capture's saved chord is held by another app; the quick input's saved chord is the
+        // capture's default. Ailfred holds what it registers (Rune refuses a second hold).
+        let mut held: Vec<(usize, Shortcut)> = Vec::new();
+        let other_app = chord("ctrl+alt+shift+j");
+        let started = start_shortcuts(&[(Some(other_app.clone()), DEFAULT_SHORTCUT), (Some(chord(DEFAULT_SHORTCUT)), DEFAULT_QUICK_SHORTCUT)], |i, s| {
+            let Some(s) = s else { return Ok(()) };
+            if *s == other_app || held.iter().any(|(_, h)| h == s) {
+                return Err(ShortcutError::Conflict);
+            }
+            held.push((i, s.clone()));
+            Ok(())
+        });
+        assert_eq!(started[1], Started { active: Some(chord(DEFAULT_SHORTCUT)), notice: None }, "the quick input keeps its own");
+        assert_eq!(started[0].active, None, "the capture's default was the quick input's");
+        assert!(started[0].notice.is_some());
+        assert_eq!(held, vec![(1, chord(DEFAULT_SHORTCUT))]);
+    }
+
+    #[test]
+    fn a_saved_shortcut_that_registers_is_used_as_is() {
+        let mut tried = Vec::new();
+        let started = start_shortcut(Some(chord("ctrl+alt+j")), "ctrl+alt+space", registrar(&[], &mut tried));
+        assert_eq!(started, Started { active: Some(chord("ctrl+alt+j")), notice: None });
+        assert_eq!(tried.len(), 1);
+    }
+
+    #[test]
+    fn a_saved_shortcut_thats_taken_falls_back_to_the_default_and_says_so() {
+        let mut tried = Vec::new();
+        let started = start_shortcut(Some(chord("ctrl+alt+j")), "ctrl+alt+space", registrar(&["ctrl+alt+j"], &mut tried));
+        assert_eq!(started.active, Some(chord("ctrl+alt+space")));
+        let notice = started.notice.expect("a notice");
+        assert!(notice.contains("⌃⌥J") && notice.contains("⌃⌥Space"), "names both: {notice}");
+    }
+
+    #[test]
+    fn with_the_default_taken_too_theres_no_shortcut_and_a_notice() {
+        let mut tried = Vec::new();
+        let started = start_shortcut(Some(chord("ctrl+alt+j")), "ctrl+alt+space", registrar(&["ctrl+alt+j", "ctrl+alt+space"], &mut tried));
+        assert_eq!(started.active, None);
+        assert!(started.notice.is_some());
+        assert_eq!(tried.len(), 2);
+    }
+
+    #[test]
+    fn the_default_itself_taken_isnt_tried_twice() {
+        let mut tried = Vec::new();
+        let started = start_shortcut(Some(chord("ctrl+alt+space")), "ctrl+alt+space", registrar(&["ctrl+alt+space"], &mut tried));
+        assert_eq!(started.active, None);
+        assert!(started.notice.expect("a notice").contains("⌃⌥Space"));
+        assert_eq!(tried.len(), 1);
+    }
+
+    #[test]
+    fn a_cleared_shortcut_registers_nothing_and_says_nothing() {
+        let mut tried = Vec::new();
+        let started = start_shortcut(None, "ctrl+alt+space", registrar(&[], &mut tried));
+        assert_eq!(started, Started { active: None, notice: None });
+        assert_eq!(tried, vec![None]);
     }
 
     #[test]
@@ -218,16 +417,17 @@ mod tests {
     }
 
     #[test]
-    fn animations_ignore_reduce_motion_until_turned_off() {
+    fn animations_follow_reduce_motion_until_told_to_ignore_it() {
         let mut s = Settings::with(Prefs::memory());
-        assert!(s.ignore_reduce_motion(), "on by default");
-        s.set_ignore_reduce_motion(false);
-        assert!(!s.ignore_reduce_motion());
-        assert!(!ignore_reduce_motion_now(), "the views see it at once");
+        assert!(!s.ignore_reduce_motion(), "off by default: the system's Reduce Motion is respected");
         s.set_ignore_reduce_motion(true);
         assert!(s.ignore_reduce_motion());
-        assert!(ignore_reduce_motion_now());
+        assert!(ignore_reduce_motion_now(), "the views see it at once");
+        s.set_ignore_reduce_motion(false);
+        assert!(!s.ignore_reduce_motion());
+        assert!(!ignore_reduce_motion_now());
     }
+
 
     #[test]
     fn the_settings_live_under_ailfreds_id() {

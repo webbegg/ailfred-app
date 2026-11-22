@@ -63,6 +63,8 @@ plutil -insert LSMinimumSystemVersion -string 14.0 "$PLIST"
 # Menu-bar-less accessory from the first instant: no Dock icon flash before Rune sets the policy.
 plutil -insert LSUIElement -bool true "$PLIST"
 plutil -insert NSHighResolutionCapable -bool true "$PLIST"
+# Links: `open ailfred://toggle` shows or hides the quick input (src/link.rs).
+plutil -insert CFBundleURLTypes -json '[{"CFBundleURLName":"com.ailfred","CFBundleURLSchemes":["ailfred"]}]' "$PLIST"
 
 codesign --force --sign "$IDENTITY" "$APP"
 if [ "$IDENTITY" != "-" ] && ! codesign -d -r- "$APP" 2>&1 | grep -q "certificate leaf"; then
