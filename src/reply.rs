@@ -50,6 +50,17 @@ impl Tool {
         }
     }
 
+    /// What `n` of its steps act on ("Read 2 files").
+    pub fn noun(self, n: usize) -> &'static str {
+        let (one, many) = match self {
+            Tool::Read | Tool::Edit => ("file", "files"),
+            Tool::Search => ("time", "times"),
+            Tool::Run => ("command", "commands"),
+            Tool::Other => ("tool", "tools"),
+        };
+        if n == 1 { one } else { many }
+    }
+
     /// The same, while it runs.
     pub fn doing(self) -> &'static str {
         match self {
@@ -101,6 +112,38 @@ pub struct Step {
 pub struct Agent {
     pub steps: Vec<Step>,
     pub open: bool,
+}
+
+impl Agent {
+    /// One line: what it does now ("Running cargo test…"), or what it did, by kind in the
+    /// order they came ("Read 2 files · Ran 1 command · 1 failed").
+    pub fn summary(&self) -> String {
+        if let Some(s) = self.steps.iter().rev().find(|s| s.status == Status::Running) {
+            return format!("{}…", doing(s.tool, &s.target));
+        }
+        let mut kinds: Vec<(Tool, usize)> = Vec::new();
+        for s in &self.steps {
+            match kinds.iter_mut().find(|(t, _)| *t == s.tool) {
+                Some((_, n)) => *n += 1,
+                None => kinds.push((s.tool, 1)),
+            }
+        }
+        let mut parts: Vec<String> = kinds.into_iter().map(|(tool, n)| format!("{} {n} {}", tool.verb(), tool.noun(n))).collect();
+        let failed = self.steps.iter().filter(|s| s.status == Status::Failed).count();
+        if failed > 0 {
+            parts.push(format!("{failed} failed"));
+        }
+        parts.join(" · ")
+    }
+}
+
+/// What a step running on `target` does, in words ("Reading src/main.rs").
+pub fn doing(tool: Tool, target: &str) -> String {
+    match (target.trim(), tool) {
+        ("", Tool::Other) => "Using a tool".to_owned(),
+        ("", tool) => tool.doing().to_owned(),
+        (target, tool) => format!("{} {target}", tool.doing()),
+    }
 }
 
 pub struct Diff {
@@ -363,6 +406,27 @@ pub fn diff_counts(patch: &str) -> (usize, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn steps(list: &[(Tool, &str, Status)]) -> Agent {
+        let steps = list.iter().enumerate().map(|(i, (tool, target, status))| Step { id: i as u32, tool: *tool, target: (*target).into(), output: String::new(), status: *status, open: false }).collect();
+        Agent { steps, open: false }
+    }
+
+    #[test]
+    fn a_run_of_steps_sums_up_in_one_line_by_kind_in_the_order_they_came() {
+        use Status::{Done, Failed, Running};
+        let a = steps(&[(Tool::Read, "a.rs", Done), (Tool::Run, "ls", Done), (Tool::Read, "b.rs", Done)]);
+        assert_eq!(a.summary(), "Read 2 files · Ran 1 command");
+        let a = steps(&[(Tool::Search, "fn", Done), (Tool::Edit, "a.rs", Failed), (Tool::Other, "mem", Done), (Tool::Other, "x", Done)]);
+        assert_eq!(a.summary(), "Searched 1 time · Edited 1 file · Used 2 tools · 1 failed");
+        let a = steps(&[(Tool::Run, "cargo test", Done), (Tool::Run, "ls", Done)]);
+        assert_eq!(a.summary(), "Ran 2 commands");
+        // Going: the step running now.
+        let a = steps(&[(Tool::Read, "a.rs", Done), (Tool::Run, "cargo test", Running)]);
+        assert_eq!(a.summary(), "Running cargo test…");
+        let a = steps(&[(Tool::Other, "", Running)]);
+        assert_eq!(a.summary(), "Using a tool…");
+    }
 
     fn at(ms: u64) -> Instant {
         // One base for the whole test binary: instants only compare within it.

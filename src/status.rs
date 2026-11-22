@@ -76,12 +76,7 @@ impl Tracker {
         self.starting = false;
         match event {
             Event::Step { id, tool, target } => {
-                let what = match (target.trim(), tool) {
-                    ("", crate::reply::Tool::Other) => "Using a tool".to_owned(),
-                    ("", tool) => tool.doing().to_owned(),
-                    (target, tool) => format!("{} {target}", tool.doing()),
-                };
-                self.steps.push((*id, what));
+                self.steps.push((*id, crate::reply::doing(*tool, target)));
             }
             Event::StepEnd { id, .. } => self.steps.retain(|(s, _)| s != id),
             Event::Ask { prompt, .. } => self.after = Some(Status::NeedsYou(prompt.clone())),

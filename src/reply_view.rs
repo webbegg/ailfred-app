@@ -215,13 +215,7 @@ fn step_glyph(status: Status, t: &tok::Theme) -> El {
 fn agent<S: 'static>(token: u64, j: usize, a: &Agent, t: &tok::Theme, lens: Lens<S>) -> El {
     let running = a.steps.iter().any(|s| s.status == Status::Running);
     let failed = a.steps.iter().filter(|s| s.status == Status::Failed).count();
-    let n = a.steps.len();
-    let title = if running {
-        "Working…".to_owned()
-    } else {
-        let steps = if n == 1 { "1 step".to_owned() } else { format!("{n} steps") };
-        if failed > 0 { format!("Ran {steps}, {failed} failed") } else { format!("Ran {steps}") }
-    };
+    let title = a.summary();
     let status = if running {
         Status::Running
     } else if failed > 0 {
@@ -242,7 +236,7 @@ fn agent<S: 'static>(token: u64, j: usize, a: &Agent, t: &tok::Theme, lens: Lens
         .label(title.clone())
         .expanded(a.open)
         .child(step_glyph(status, t))
-        .child(text(title).font(SMALL_MEDIUM).color(t.text).grow(1.0))
+        .child(text(title).font(SMALL_MEDIUM).color(t.text).single_line().truncate().grow(1.0).min_w(0.0))
         .child(chevron(a.open, t))
         .on_press(toggle(lens, token, j, None));
     let mut out = col().w_full().radius(10.0).continuous_corners().clip_rounded(10.0).fill(CARD).border(1.0, EDGE).child(head);
