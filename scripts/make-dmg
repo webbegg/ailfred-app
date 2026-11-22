@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Builds and signs Ailfred.app (scripts/bundle-mac) and packs it into
+# dist/Ailfred-<version>-<build>.dmg: the app beside a link to /Applications, to drag it onto.
+# Prints the DMG's path. The DMG is signed with the app's identity when it has one (not ad hoc).
+#
+# Not notarized: with the local signing identity, another Mac sees an unidentified developer
+# (see docs/install.md).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+APP=$(scripts/bundle-mac)
+PLIST="$APP/Contents/Info.plist"
+NAME=$(plutil -extract CFBundleName raw "$PLIST")
+VERSION=$(plutil -extract CFBundleShortVersionString raw "$PLIST")
+BUILD=$(plutil -extract CFBundleVersion raw "$PLIST")
+
+mkdir -p dist
+OUT="dist/$NAME-$VERSION-$BUILD.dmg"
+STAGE=$(mktemp -d)
+trap 'rm -rf "$STAGE"' EXIT
+ditto "$APP" "$STAGE/$NAME.app"
+ln -s /Applications "$STAGE/Applications"
+rm -f "$OUT"
+hdiutil create -volname "$NAME" -srcfolder "$STAGE" -fs HFS+ -format UDZO -ov "$OUT" >&2
+
+# The app's signer, if it has one (an ad hoc signature has no Authority line).
+IDENTITY=$(codesign -dvv "$APP" 2>&1 | sed -n 's/^Authority=//p' | head -1)
+if [ -n "$IDENTITY" ]; then
+  codesign --force --sign "$IDENTITY" "$OUT" >&2
+fi
+echo "$OUT"
