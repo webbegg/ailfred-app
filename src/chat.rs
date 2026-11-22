@@ -2,8 +2,9 @@
 //! window, same element: it springs to the right edge, reshaping), with what was sent as the
 //! first message and its own field focused. It stays open
 //! when another app is clicked; Esc or its close button slide it back out, and the input's
-//! shortcut brings it back. Cmd+N slides it out for good and opens a new input. No AI: it shows
-//! the conversation typed into it.
+//! shortcut brings it back. Cmd+N slides it out for good and opens a new input. Each message
+//! gets a reply from the model (`model.rs`: Claude, or the mock in tests), which the host
+//! streams in; Stop and Retry end the run behind it.
 
 use rune::tok;
 use rune::{
@@ -12,13 +13,16 @@ use rune::{
 };
 use rune_kit::glyphs;
 
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::Host;
 use crate::icons;
 use crate::mock_model;
+use crate::model;
 use crate::reply::{self, Event, Reply};
 use crate::reply_view;
+use crate::settings;
 use crate::quick_input::{self, ACCENT, Attached, Escape};
 
 mod geometry;
@@ -82,6 +86,21 @@ pub struct Message {
     pub id: u64,
     pub text: String,
     pub images: Vec<Image>,
+    /// Its captures' PNG bytes, for the model (the conversation's later messages send them again).
+    pub pngs: Vec<Arc<Vec<u8>>>,
+}
+
+impl Message {
+    /// A message with `text` and no captures.
+    pub fn text(id: u64, text: impl Into<String>) -> Message {
+        Message { id, text: text.into(), images: Vec::new(), pngs: Vec::new() }
+    }
+
+    /// The same with the captures `pngs` (copied: the originals go to be decoded).
+    pub fn with_pngs(mut self, pngs: &[Vec<u8>]) -> Message {
+        self.pngs = pngs.iter().map(|p| Arc::new(p.clone())).collect();
+        self
+    }
 }
 
 pub struct Chat {
@@ -116,11 +135,17 @@ pub struct Chat {
     away: bool,
     /// It's in its own window (popped out), not the side panel: Esc doesn't close it.
     windowed: bool,
+    /// Claude Code's session of this conversation, once it has one (`set_session`), and the
+    /// message whose reply it ends at: the next message resumes it. A new conversation has none.
+    session: Option<(String, u64)>,
+    /// The streams whose runs were cancelled (the host ends their processes), for tests.
+    #[cfg(test)]
+    cancelled: Vec<u64>,
 }
 
 impl Chat {
     pub fn new(host: Option<AppHandle<Host>>) -> Self {
-        Chat { messages: Vec::new(), draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0, replies: Vec::new(), next_token: 0, scratch: TextEdit::new(""), away: false, windowed: false }
+        Chat { messages: Vec::new(), draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0, replies: Vec::new(), next_token: 0, scratch: TextEdit::new(""), away: false, windowed: false, session: None, #[cfg(test)] cancelled: Vec::new() }
     }
 
     pub fn is_open(&self) -> bool {
@@ -149,6 +174,8 @@ impl Chat {
 
     /// Cmd+N in its window: the conversation goes at once; what still streams feeds nothing.
     pub fn clear(&mut self) {
+        self.stop(Instant::now());
+        self.session = None;
         self.messages.clear();
         self.replies.clear();
         self.draft.clear();
@@ -219,6 +246,35 @@ impl Chat {
         }
     }
 
+    /// The request that asks the model message `id` (None: no such message): the earlier
+    /// messages whose reply came (done, or stopped with something) as the history.
+    pub fn request_for(&self, id: u64, model: &str) -> Option<model::Request> {
+        let at = self.messages.iter().position(|m| m.id == id)?;
+        let turns: Vec<(u64, model::Turn)> = self.messages[..at]
+            .iter()
+            .filter_map(|m| {
+                let reply = self.replies.iter().find(|r| r.id == m.id)?.history_text()?;
+                Some((m.id, model::Turn { text: m.text.clone(), pngs: m.pngs.clone(), reply }))
+            })
+            .collect();
+        // Resumed only when it ends where this message's history does: a retry's session
+        // already holds the message and its old reply.
+        let last = turns.last().map(|(id, _)| *id);
+        let session = self.session.as_ref().filter(|(_, ends_at)| Some(*ends_at) == last).map(|(s, _)| s.clone());
+        let history = turns.into_iter().map(|(_, turn)| turn).collect();
+        let message = &self.messages[at];
+        Some(model::Request { model: model.into(), history, text: message.text.clone(), pngs: message.pngs.clone(), session })
+    }
+
+    /// Reply `token` reports Claude Code's session: the next message resumes it. A stream that's
+    /// gone (stopped and replaced, or over with Cmd+N) reports nothing.
+    pub fn set_session(&mut self, token: u64, session: String) {
+        if let Some(reply) = self.reply_mut(token) {
+            let ends_at = reply.id;
+            self.session = Some((session, ends_at));
+        }
+    }
+
     /// Message `id`'s captures, decoded.
     pub fn set_images(&mut self, id: u64, images: Vec<Image>) {
         if let Some(m) = self.messages.iter_mut().find(|m| m.id == id) {
@@ -268,12 +324,13 @@ impl Chat {
 
     /// Cmd+N: slides out, the conversation over (see `over`).
     pub fn start_over(&mut self) {
+        self.stop(Instant::now());
         self.open = false;
         self.over = true;
         self.preview = None;
     }
 
-    /// Message `id` gets a reply from the (fake) model, which the host streams in; the reply's
+    /// Message `id` gets a reply from the model, which the host streams in; the reply's
     /// token, which its events carry. A reply streaming is stopped first.
     pub fn ask(&mut self, id: u64) -> Option<u64> {
         let prompt = self.messages.iter().find(|m| m.id == id)?.text.clone();
@@ -285,13 +342,22 @@ impl Chat {
         self.stop(Instant::now());
         self.next_token += 1;
         let token = self.next_token;
-        let script = if answer { mock_model::answer_script(&prompt) } else { mock_model::script(&prompt) };
+        // Questions with options come from the mock only (so do their answers), and everything
+        // when `AILFRED_MOCK_MODEL=1`.
+        let script = (answer || mock_model::requested()).then(|| if answer { mock_model::answer_script(&prompt) } else { mock_model::script(&prompt) });
         let mut reply = Reply::new(id, prompt);
         (reply.token, reply.answer) = (token, answer);
         self.replies.retain(|r| r.id != id);
         self.replies.push(reply);
         if let Some(host) = &self.host {
-            host.update(move |host, _| host.stream_reply(token, script));
+            match script {
+                Some(script) => host.update(move |host, _| host.stream_reply(token, script)),
+                None => {
+                    if let Some(request) = self.request_for(id, &settings::model_now()) {
+                        host.update(move |host, _| host.ask_model(token, request));
+                    }
+                }
+            }
         }
         token
     }
@@ -308,10 +374,19 @@ impl Chat {
         self.replies.iter().any(Reply::streaming)
     }
 
-    /// Stop: the reply streaming keeps what came.
+    /// Stop: the reply streaming keeps what came, and its run (the process behind it) ends.
     pub fn stop(&mut self, now: Instant) {
+        let tokens: Vec<u64> = self.replies.iter().filter(|r| r.streaming()).map(|r| r.token).collect();
         for reply in &mut self.replies {
             reply.stop(now);
+        }
+        if tokens.is_empty() {
+            return;
+        }
+        #[cfg(test)]
+        self.cancelled.extend(&tokens);
+        if let Some(host) = &self.host {
+            host.update(move |host, _| host.cancel_runs(&tokens));
         }
     }
 
@@ -358,7 +433,7 @@ impl Chat {
     pub fn answer(&mut self, token: u64, part: usize) -> Option<u64> {
         let text = self.reply_mut(token)?.answer(part)?;
         let id = self.next_id();
-        self.push(Message { id, text: text.clone(), images: Vec::new() });
+        self.push(Message::text(id, text.clone()));
         Some(self.start_reply(id, text, true))
     }
 
@@ -370,6 +445,7 @@ impl Chat {
     /// Adds a message at the end of the conversation, the field focused for the next.
     pub fn push(&mut self, message: Message) {
         if std::mem::replace(&mut self.over, false) {
+            self.session = None;
             self.messages.clear();
             self.replies.clear();
             self.draft.clear();
@@ -431,9 +507,9 @@ impl Chat {
         let text = self.draft.text.trim().to_owned();
         self.draft.clear();
         self.preview = None;
-        let pngs = std::mem::take(&mut self.shots).into_iter().map(|a| a.png).collect();
+        let pngs: Vec<Vec<u8>> = std::mem::take(&mut self.shots).into_iter().map(|a| a.png).collect();
         let id = self.next_id();
-        self.push(Message { id, text, images: Vec::new() });
+        self.push(Message::text(id, text).with_pngs(&pngs));
         Some((id, pngs))
     }
 

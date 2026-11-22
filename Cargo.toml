@@ -12,8 +12,11 @@ objc2-core-graphics = "0.3.2"
 objc2-core-text = "0.3.2"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSError", "NSString"] }
 objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-core-graphics", "SCShareableContent", "SCStream", "SCScreenshotManager", "libc"] }
+objc2-security = { version = "0.3.2", default-features = false, features = ["std", "SecItem", "SecBase"] }
 objc2-service-management = "0.3.2"
 png = "0.18"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 rune = { version = "0.0.1", path = "../_references/rune/crates/rune", features = ["native-file-dialog"] }
 rune-kit = { version = "0.0.1", path = "../_references/rune/crates/rune-kit", features = ["markdown"] }
 tray-icon = "0.26"

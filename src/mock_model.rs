@@ -1,6 +1,7 @@
 //! A fake model: scripted replies streamed on a timer, picked by a keyword in the message
 //! ("code", "diff", "agent", "ask", "think", "error"); anything else gets a showcase of every
-//! kind of reply. A real model replaces [`stream`] and keeps the [`Event`]s.
+//! kind of reply. Tests use it, and a run with `AILFRED_MOCK_MODEL=1`; questions with options
+//! (`Ask`) come from it only. The real model (`model.rs`) streams the same [`Event`]s.
 
 use std::time::Duration;
 
@@ -13,6 +14,15 @@ const PER_PIECE: usize = 3;
 
 /// What happens, and how long after the previous event.
 pub type Script = Vec<(Duration, Event)>;
+
+/// Whether the environment asks for the mock (`AILFRED_MOCK_MODEL=1`) instead of Claude.
+pub fn requested() -> bool {
+    requested_from(std::env::var("AILFRED_MOCK_MODEL").ok().as_deref())
+}
+
+fn requested_from(value: Option<&str>) -> bool {
+    value == Some("1")
+}
 
 /// The scripted reply to `prompt`.
 pub fn script(prompt: &str) -> Script {
@@ -140,6 +150,14 @@ mod tests {
 
     use super::*;
     use crate::reply::{Part, Reply, State};
+
+    #[test]
+    fn the_mock_answers_only_when_the_environment_asks_for_it_with_a_1() {
+        assert!(requested_from(Some("1")));
+        assert!(!requested_from(None));
+        assert!(!requested_from(Some("0")));
+        assert!(!requested_from(Some("")));
+    }
 
     fn reply(prompt: &str) -> Reply {
         let mut r = Reply::new(1, prompt);

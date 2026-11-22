@@ -199,7 +199,7 @@ impl QuickInput {
         self.next_message += 1;
         // The chips stay (by id) for the fading row; their images go to be decoded.
         let pngs: Vec<Vec<u8>> = self.shots.iter_mut().map(|a| std::mem::take(&mut a.png)).collect();
-        let message = chat::Message { id, text: text.clone(), images: Vec::new() };
+        let message = chat::Message::text(id, text.clone()).with_pngs(&pngs);
         self.query.focused = false;
         self.pending.clear();
         // The host takes it to the chat's window.

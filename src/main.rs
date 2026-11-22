@@ -17,8 +17,10 @@ mod export;
 mod login;
 mod marks;
 mod mock_model;
+mod model;
 mod output;
 mod icons;
+mod keychain;
 mod quick_input;
 mod reply;
 mod reply_view;
@@ -28,6 +30,7 @@ mod settings_ui;
 mod shot;
 mod tray;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -92,6 +95,8 @@ pub struct Host {
     /// Where the chat is (the side panel, or its window, open or closed, until docked back),
     /// and what waits for it while it moves.
     place: ChatPlace<ChatUpdate>,
+    /// The model calls running, by their reply's token: Stop ends the process behind one.
+    runs: HashMap<u64, model::Run>,
 }
 
 /// Something for the chat, wherever it is.
@@ -278,8 +283,9 @@ impl Host {
     pub fn sent_to_window(&mut self, id: u64, text: String, pngs: Vec<Vec<u8>>) {
         self.quick_open = false;
         self.release();
+        let message = chat::Message::text(id, text).with_pngs(&pngs);
         self.with_chat(move |c, tx| {
-            c.push(chat::Message { id, text, images: Vec::new() });
+            c.push(message);
             c.ask(id);
             tx.scroll_to_bottom("messages");
             tx.animated();
@@ -599,6 +605,41 @@ impl Host {
         });
     }
 
+    /// Asks the model `request` for the reply `token`, off the main thread: what it streams
+    /// comes into the chat as events; `Stop` ends the run (`cancel_runs`). A stopped or replaced
+    /// reply ignores what still comes.
+    pub fn ask_model(&mut self, token: u64, request: model::Request) {
+        let Some(handle) = self.handle.clone() else { return };
+        let run = model::start(request, move |item| handle.update(move |host, _| host.model_said(token, item)));
+        self.runs.insert(token, run);
+    }
+
+    /// What the model's run for `token` reported.
+    fn model_said(&mut self, token: u64, item: model::Item) {
+        match item {
+            model::Item::Session(session) => self.with_chat(move |c, _| c.set_session(token, session)),
+            model::Item::Event(event) => {
+                // Over: nothing left to cancel.
+                if matches!(event, reply::Event::Done | reply::Event::Fail(_)) {
+                    self.runs.remove(&token);
+                }
+                self.with_chat(move |c, tx| {
+                    c.reply_event(token, event, std::time::Instant::now());
+                    tx.animated();
+                });
+            }
+        }
+    }
+
+    /// Stop, Retry, a new message or Cmd+N: ends the processes behind the replies `tokens`.
+    pub fn cancel_runs(&mut self, tokens: &[u64]) {
+        for token in tokens {
+            if let Some(run) = self.runs.remove(token) {
+                run.cancel();
+            }
+        }
+    }
+
     /// Message `id`'s captures, decoded off the main thread, join it in the chat.
     pub fn decode_into_chat(&self, id: u64, pngs: Vec<Vec<u8>>) {
         let Some(handle) = self.handle.clone() else { return };
@@ -728,6 +769,10 @@ impl Host {
                 if let Some(window) = &self.settings_window {
                     window.open();
                 }
+                // The user looking: a good time to ask the Keychain what replies come from.
+                if let Some(ui) = &self.settings_ui {
+                    ui.update(|ui, _| ui.refresh_status());
+                }
             }
             Action::Quit => tx.quit(),
         }
@@ -765,6 +810,7 @@ fn host_init() -> Host {
         chat_window: None,
         chat_ui: None,
         place: ChatPlace::default(),
+        runs: HashMap::new(),
     }
 }
 
@@ -911,7 +957,7 @@ fn main() {
         let ui = SettingsUi::new(settings, handle.clone(), capture_shortcut.clone());
         let hidden = WindowOptions { visible: false, resizable: false, min_size: Some((0.0, 0.0)), ..Default::default() };
         let (settings_ui, settings_window) = app.window(
-            WindowSpec::new("settings", AppSpec::new("Ailfred Settings", (460.0, 260.0), SettingsUi::placeholder, settings_ui::view))
+            WindowSpec::new("settings", AppSpec::new("Ailfred Settings", settings_ui::SIZE, SettingsUi::placeholder, settings_ui::view))
                 .state(ui)
                 .options(hidden),
         );
@@ -958,6 +1004,7 @@ fn main() {
             chat_window: Some(chat_window),
             chat_ui: Some(chat_ui),
             place: ChatPlace::default(),
+            runs: HashMap::new(),
         });
         // Runs on the main thread at the loop's first turn: the status item needs a running NSApp,
         // and runtime shortcut registration needs the host started.
