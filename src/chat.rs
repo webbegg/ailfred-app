@@ -152,6 +152,11 @@ pub struct Chat {
     session: Option<(String, u64)>,
     /// What the conversation is on disk: its id, title and the next capture's number.
     conv: history::Meta,
+    /// The model of the reply streaming last: a message sent meanwhile steers pi's run, and
+    /// waits for any other's.
+    running_model: String,
+    /// The model picker's list shows.
+    models_open: bool,
     /// The streams whose runs were cancelled (the host ends their processes), for tests.
     #[cfg(test)]
     cancelled: Vec<u64>,
@@ -160,11 +165,17 @@ pub struct Chat {
     saved: Vec<history::Snapshot>,
     #[cfg(test)]
     title_asks: Vec<model::Request>,
+    /// The model picked, in tests (else the setting's).
+    #[cfg(test)]
+    model: Option<String>,
+    /// What went to the model, by reply token, for tests.
+    #[cfg(test)]
+    requests: Vec<(u64, model::Request)>,
 }
 
 impl Chat {
     pub fn new(host: Option<AppHandle<Host>>) -> Self {
-        Chat { messages: Vec::new(), draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0, replies: Vec::new(), next_token: 0, scratch: TextEdit::new(""), away: false, windowed: false, session: None, conv: history::Meta::fresh(), #[cfg(test)] cancelled: Vec::new(), #[cfg(test)] saved: Vec::new(), #[cfg(test)] title_asks: Vec::new() }
+        Chat { messages: Vec::new(), draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0, replies: Vec::new(), next_token: 0, scratch: TextEdit::new(""), away: false, windowed: false, session: None, conv: history::Meta::fresh(), running_model: String::new(), models_open: false, #[cfg(test)] cancelled: Vec::new(), #[cfg(test)] saved: Vec::new(), #[cfg(test)] title_asks: Vec::new(), #[cfg(test)] model: None, #[cfg(test)] requests: Vec::new() }
     }
 
     pub fn is_open(&self) -> bool {
@@ -193,7 +204,7 @@ impl Chat {
 
     /// Cmd+N in its window: the conversation goes at once; what still streams feeds nothing.
     pub fn clear(&mut self) {
-        self.stop(Instant::now());
+        self.end_replies(Instant::now());
         self.new_conversation();
         self.reset_conversation();
         (self.preview, self.over, self.away) = (None, false, false);
@@ -286,7 +297,7 @@ impl Chat {
         let session = self.session.as_ref().filter(|(_, ends_at)| Some(*ends_at) == last).map(|(s, _)| s.clone());
         let history = turns.into_iter().map(|(_, turn)| turn).collect();
         let message = &self.messages[at];
-        Some(model::Request { model: model.into(), history, text: message.text.clone(), pngs: message.pngs.clone(), session, answer: false })
+        Some(model::Request { model: model.into(), history, text: message.text.clone(), pngs: message.pngs.clone(), session, answer: false, steer: false })
     }
 
     /// Reply `token` reports Claude Code's session: the next message resumes it. A stream that's
@@ -347,7 +358,7 @@ impl Chat {
 
     /// Cmd+N: slides out, the conversation over (see `over`).
     pub fn start_over(&mut self) {
-        self.stop(Instant::now());
+        self.end_replies(Instant::now());
         self.new_conversation();
         self.open = false;
         self.over = true;
@@ -355,10 +366,77 @@ impl Chat {
     }
 
     /// Message `id` gets a reply from the model, which the host streams in; the reply's
-    /// token, which its events carry. A reply streaming is stopped first.
+    /// token, which its events carry. While another message's reply streams, it's queued: pi
+    /// reads it in the run going (a steer), any other model gets it once the reply ends.
     pub fn ask(&mut self, id: u64) -> Option<u64> {
         let prompt = self.messages.iter().find(|m| m.id == id)?.text.clone();
+        if self.replies.iter().any(|r| r.live() && r.id != id) {
+            return Some(self.queue(id, prompt));
+        }
         Some(self.start_reply(id, prompt, false))
+    }
+
+    /// The model picker: its list opens or closes.
+    pub fn toggle_models(&mut self) {
+        self.models_open = !self.models_open;
+    }
+
+    /// A model picked in the composer: it writes the next replies (kept in the settings, by the
+    /// settings window). Anything not a model is ignored.
+    pub fn pick_model(&mut self, id: &str) {
+        if !model::MODELS.iter().any(|(m, _)| *m == id) {
+            return;
+        }
+        self.models_open = false;
+        #[cfg(test)]
+        {
+            self.model = Some(id.to_owned());
+        }
+        if let Some(host) = &self.host {
+            let id = id.to_owned();
+            host.update(move |host, _| host.pick_model(id));
+        }
+    }
+
+    /// The model the picker names.
+    pub fn model_label(&self) -> &'static str {
+        let id = self.model();
+        model::MODELS.iter().find(|(m, _)| *m == id).map_or("", |(_, label)| label)
+    }
+
+    fn model(&self) -> String {
+        #[cfg(test)]
+        if let Some(model) = &self.model {
+            return model.clone();
+        }
+        settings::model_now()
+    }
+
+    /// Message `id`'s reply waits, queued; to pi streaming, it goes now, as a steer.
+    fn queue(&mut self, id: u64, prompt: String) -> u64 {
+        self.next_token += 1;
+        let token = self.next_token;
+        let model = self.model();
+        let steer = model == model::PI && self.running_model == model::PI && !by_mock(false, &model, mock_model::requested());
+        let mut reply = Reply::new(id, prompt);
+        (reply.token, reply.state, reply.steered) = (token, reply::State::Queued, steer);
+        self.replies.retain(|r| r.id != id);
+        self.replies.push(reply);
+        // Quitting now keeps it, interrupted.
+        self.save();
+        if steer && let Some(request) = self.request_for(id, &model) {
+            self.send_request(token, model::Request { steer: true, ..request });
+        }
+        token
+    }
+
+    /// `request` goes to the model for the reply `token`.
+    fn send_request(&mut self, token: u64, request: model::Request) {
+        #[cfg(test)]
+        self.requests.push((token, request.clone()));
+        if let Some(host) = &self.host {
+            host.update(move |host, _| host.ask_model(token, request));
+        }
     }
 
     /// Asks message `id` again: from `prompt` (`answer`: the user's answer to a question).
@@ -368,36 +446,54 @@ impl Chat {
         let token = self.next_token;
         // Claude's questions with options come from the mock only (so do their answers); pi asks
         // its own and waits for them; everything is the mock's with `AILFRED_MOCK_MODEL=1`.
-        let model = settings::model_now();
+        let model = self.model();
         let script = by_mock(answer, &model, mock_model::requested()).then(|| if answer { mock_model::answer_script(&prompt) } else { mock_model::script(&prompt) });
+        self.running_model = if script.is_some() { String::new() } else { model.clone() };
         let mut reply = Reply::new(id, prompt);
         (reply.token, reply.answer) = (token, answer);
         self.replies.retain(|r| r.id != id);
         self.replies.push(reply);
         // Saved as it starts: quitting now leaves it interrupted.
         self.save();
-        if let Some(host) = &self.host {
-            match script {
-                Some(script) => host.update(move |host, _| host.stream_reply(token, script)),
-                None => {
-                    if let Some(request) = self.request_for(id, &model) {
-                        let request = model::Request { answer, ..request };
-                        host.update(move |host, _| host.ask_model(token, request));
-                    }
+        match script {
+            Some(script) => {
+                if let Some(host) = &self.host {
+                    host.update(move |host, _| host.stream_reply(token, script));
+                }
+            }
+            None => {
+                if let Some(request) = self.request_for(id, &model) {
+                    self.send_request(token, model::Request { answer, ..request });
                 }
             }
         }
         token
     }
 
-    /// The next event of the reply stream `token`; one stopped or replaced takes none.
+    /// The next event of the reply stream `token`; one stopped or replaced takes none. A reply
+    /// ending lets the next queued one go, unless it asks the user something.
     pub fn reply_event(&mut self, token: u64, event: Event, now: Instant) {
         let Some(reply) = self.reply_mut(token) else { return };
-        let was_streaming = reply.streaming();
+        let was = reply.live();
         reply.apply(event, now);
-        if was_streaming && !reply.streaming() {
+        if was && !reply.live() {
+            let asks = reply.asks();
             self.reply_ended(token);
+            if !asks {
+                self.next_queued();
+            }
         }
+    }
+
+    /// Nothing going: the first message queued gets its reply. While pi still has a steered
+    /// one, it waits for pi.
+    fn next_queued(&mut self) {
+        if self.replies.iter().any(Reply::live) {
+            return;
+        }
+        let Some(r) = self.replies.iter().filter(|r| r.state == reply::State::Queued).min_by_key(|r| r.token) else { return };
+        let (id, prompt) = (r.id, r.prompt.clone());
+        self.start_reply(id, prompt, false);
     }
 
     /// A reply is streaming.
@@ -405,15 +501,26 @@ impl Chat {
         self.replies.iter().any(Reply::streaming)
     }
 
-    /// Stop: the reply streaming keeps what came, and its run (the process behind it) ends.
-    /// The conversation is saved with it.
+    /// Stop: the reply streaming keeps what came, its run (the process behind it) ends, and the
+    /// next message queued goes at once (pi drops the ones it hadn't read: they go again). The
+    /// conversation is saved with it.
     pub fn stop(&mut self, now: Instant) {
         if self.stop_replies(now) {
             self.save();
         }
+        self.next_queued();
     }
 
-    /// Stops what streams without saving; whether anything did.
+    /// The conversation is left: what streams stops and what's queued goes, saved so.
+    fn end_replies(&mut self, now: Instant) {
+        let queued = self.replies.len();
+        self.replies.retain(|r| r.state != reply::State::Queued);
+        if self.stop_replies(now) || self.replies.len() != queued {
+            self.save();
+        }
+    }
+
+    /// Stops what streams without saving (what's queued stays); whether anything did.
     fn stop_replies(&mut self, now: Instant) -> bool {
         let tokens: Vec<u64> = self.replies.iter().filter(|r| r.streaming()).map(|r| r.token).collect();
         for reply in &mut self.replies {
@@ -421,6 +528,10 @@ impl Chat {
         }
         if tokens.is_empty() {
             return false;
+        }
+        // pi drops what was steered into the run with it: those wait to go again on their own.
+        for r in &mut self.replies {
+            r.steered = false;
         }
         #[cfg(test)]
         self.cancelled.extend(&tokens);

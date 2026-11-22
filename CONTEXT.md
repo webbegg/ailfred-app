@@ -60,20 +60,31 @@ the start of the first message instead.
 _Avoid_: name, subject
 
 **Message**:
-What the user sent: text and its shots.
+What the user sent: text and its shots. One sent while a reply streams is **queued**: pi reads it
+in the run going (steered), its reply starting there; Claude gets it once the reply ends (a reply
+ending in a question waits for the answer first). Stop sends the first queued one at once, and
+what pi hadn't read goes again on its own. A queued message is saved; quitting leaves it
+interrupted.
 
 **Reply**:
 The model's answer to one message, streamed in parts: thinking, text (markdown), agent steps, a
-diff, a question with options, an error. A reply is streaming, done, stopped or failed.
+diff, a question with options, an error. A reply is queued, streaming, done, stopped or failed.
 _Avoid_: response, completion
 
 **Model**:
-What writes the replies, picked in Settings: Claude, through the Anthropic API with the user's
+What writes the replies, picked in Settings or with the composer's model picker (beside Send;
+not a chip): Claude, through the Anthropic API with the user's
 key, else through the installed Claude Code; or **pi**, Ailfred's own pi (`pi.rs`, `pi_setup.rs`)
 on the model and sign-ins of the user's pi setup, which runs tools and asks its own questions.
 Each is a `model::Model`. The mock model (`mock_model.rs`) in tests and with
 `AILFRED_MOCK_MODEL=1`.
 _Avoid_: agent, backend
+
+**Status**:
+What Ailfred is doing, app-wide (`status.rs`): idle, starting, thinking, working (on a tool),
+needs you (a question), an error, or replied (while the chat was hidden). The menu-bar icon
+shows it with a badge, its tooltip in words.
+_Avoid_: agent state, activity
 
 **Host**:
 The windowless app at the root (`main.rs`) that owns every window, the tray and the shortcuts.

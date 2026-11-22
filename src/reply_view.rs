@@ -9,7 +9,7 @@ use rune_kit::{CodeFrame, Markdown, MarkdownStyle, glyphs};
 
 use crate::chat::Chat;
 use crate::quick_input::ACCENT;
-use crate::reply::{Agent, Diff, Part, Question, Reply, State, Status, Step, Thinking};
+use crate::reply::{Agent, Diff, Part, Question, Reply, State, Step, StepStatus, Thinking};
 
 const BODY: TextStyle = TextStyle::new(13.5, 400.0).lh(20.0);
 const SMALL: TextStyle = TextStyle::new(12.0, 400.0).lh(16.0);
@@ -40,6 +40,10 @@ pub fn view<S: 'static>(r: &Reply, lens: Lens<S>) -> El {
     let t = tok::theme(true);
     let token = r.token;
     let mut out = col().key(format!("reply-{token}")).w_full().gap(10.0).hover_group().transition(Transition::opacity());
+    if r.state == State::Queued {
+        let why = if r.steered { "Queued: pi reads it as it works" } else { "Queued: it goes once the reply before it ends" };
+        return out.child(text("Queued").key("queued").font(SMALL_MEDIUM).color(t.text_secondary).label(why));
+    }
     let last = r.parts.len().saturating_sub(1);
     for (j, part) in r.parts.iter().enumerate() {
         let live = r.streaming() && j == last;
@@ -193,38 +197,32 @@ fn code_frame<S: 'static>(code: El, frame: &CodeFrame<'_>, t: &tok::Theme) -> El
     col().w_full().radius(10.0).continuous_corners().clip_rounded(10.0).fill(CODE_BG).border(1.0, EDGE).child(head).child(code)
 }
 
-fn step_glyph(status: Status, t: &tok::Theme) -> El {
+fn step_glyph(status: StepStatus, t: &tok::Theme) -> El {
     let slot = el().size(14.0, 14.0).center();
     match status {
-        Status::Running => slot.child(el().size(7.0, 7.0).radius(3.5).fill(ACCENT.mix(Color::WHITE, 0.2)).cycle(PULSE)),
-        Status::Done => slot.child(icon(&glyphs::CHECK_SMALL, 13.0).color(green())),
-        Status::Failed => slot.child(icon(&glyphs::CLOSE, 10.0).color(red())),
+        StepStatus::Running => slot.child(el().size(7.0, 7.0).radius(3.5).fill(ACCENT.mix(Color::WHITE, 0.2)).cycle(PULSE)),
+        StepStatus::Done => slot.child(icon(&glyphs::CHECK_SMALL, 13.0).color(green())),
+        StepStatus::Failed => slot.child(icon(&glyphs::CLOSE, 10.0).color(red())),
     }
     .key("status")
     .label(match status {
-        Status::Running => "Running",
-        Status::Done => "Done",
-        Status::Failed => "Failed",
+        StepStatus::Running => "Running",
+        StepStatus::Done => "Done",
+        StepStatus::Failed => "Failed",
     })
     .color(t.text)
 }
 
 fn agent<S: 'static>(token: u64, j: usize, a: &Agent, t: &tok::Theme, lens: Lens<S>) -> El {
-    let running = a.steps.iter().any(|s| s.status == Status::Running);
-    let failed = a.steps.iter().filter(|s| s.status == Status::Failed).count();
-    let n = a.steps.len();
-    let title = if running {
-        "Working…".to_owned()
-    } else {
-        let steps = if n == 1 { "1 step".to_owned() } else { format!("{n} steps") };
-        if failed > 0 { format!("Ran {steps}, {failed} failed") } else { format!("Ran {steps}") }
-    };
+    let running = a.steps.iter().any(|s| s.status == StepStatus::Running);
+    let failed = a.steps.iter().filter(|s| s.status == StepStatus::Failed).count();
+    let title = a.summary();
     let status = if running {
-        Status::Running
+        StepStatus::Running
     } else if failed > 0 {
-        Status::Failed
+        StepStatus::Failed
     } else {
-        Status::Done
+        StepStatus::Done
     };
     let head = row()
         .key("head")
@@ -239,7 +237,7 @@ fn agent<S: 'static>(token: u64, j: usize, a: &Agent, t: &tok::Theme, lens: Lens
         .label(title.clone())
         .expanded(a.open)
         .child(step_glyph(status, t))
-        .child(text(title).font(SMALL_MEDIUM).color(t.text).grow(1.0))
+        .child(text(title).font(SMALL_MEDIUM).color(t.text).single_line().truncate().grow(1.0).min_w(0.0))
         .child(chevron(a.open, t))
         .on_press(toggle(lens, token, j, None));
     let mut out = col().w_full().radius(10.0).continuous_corners().clip_rounded(10.0).fill(CARD).border(1.0, EDGE).child(head);
@@ -681,6 +679,21 @@ mod tests {
     }
 
     #[test]
+    fn the_composer_has_the_model_picker_and_it_lists_the_models() {
+        let mut chat = Chat::new(None);
+        chat.place(Insets::default(), [1440.0, 900.0]);
+        chat.open();
+        let mut rt = Runtime::new(W { chat }, window, (1440.0, 900.0), Env::new(true, 2.0));
+        rt.frame(1.0 / 60.0);
+        let k = keys(&rt);
+        assert!(k.iter().any(|k| k == "model-picker") && !k.iter().any(|k| k == "models"), "{k:?}");
+        rt.update(|s, _| s.chat.toggle_models());
+        rt.frame(1.0 / 60.0);
+        let k = keys(&rt);
+        assert!(k.iter().any(|k| k == "models") && k.iter().any(|k| k == "model-pi"), "{k:?}");
+    }
+
+    #[test]
     fn while_it_streams_send_is_stop_and_an_error_offers_retry() {
         let mut chat = Chat::new(None);
         chat.place(Insets::default(), [1440.0, 900.0]);
@@ -694,6 +707,14 @@ mod tests {
         let k = keys(&rt);
         assert!(k.iter().any(|k| k == "stop") && k.iter().any(|k| k == "waiting"), "{k:?}");
         rt.update(|s, _| {
+            let id = chat::tests::sent(&mut s.chat, "meanwhile");
+            s.chat.ask(id);
+        });
+        rt.frame(1.0 / 60.0);
+        assert!(keys(&rt).iter().any(|k| k == "queued"), "sent while it streams: queued");
+        rt.update(|s, _| {
+            s.chat.stop(Instant::now());
+            s.chat.stop(Instant::now());
             let id = chat::tests::sent(&mut s.chat, "error");
             let token = s.chat.ask(id).unwrap();
             for (_, event) in mock_model::script("error") {

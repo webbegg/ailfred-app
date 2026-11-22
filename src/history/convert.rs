@@ -10,11 +10,11 @@ fn joined<'a>(texts: impl Iterator<Item = &'a str>) -> String {
     texts.filter(|t| !t.trim().is_empty()).collect::<Vec<_>>().join("\n\n")
 }
 
-/// What to save of `reply`: one still streaming is written `interrupted` (if the app quits now,
-/// that's what's left of it).
+/// What to save of `reply`: one still streaming, or queued, is written `interrupted` (if the app
+/// quits now, that's what's left of it).
 pub fn saved_reply(reply: &Reply) -> SavedReply {
     let state = match reply.state {
-        State::Streaming => ReplyState::Interrupted,
+        State::Queued | State::Streaming => ReplyState::Interrupted,
         State::Done => ReplyState::Done,
         State::Stopped => ReplyState::Stopped,
         State::Failed => ReplyState::Failed,

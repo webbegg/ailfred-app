@@ -228,14 +228,186 @@ fn a_sent_message_gets_a_reply_fed_by_its_token() {
     assert_eq!(c.ask(99), None, "no such message");
 }
 
+fn state(c: &Chat, id: u64) -> Option<reply::State> {
+    c.reply_to(id).map(|r| r.state)
+}
+
 #[test]
-fn sending_again_or_retrying_stops_the_reply_streaming_and_its_old_events_go_nowhere() {
+fn a_message_sent_while_a_reply_streams_waits_queued_and_goes_once_it_ends() {
+    let mut c = Chat::new(None);
+    c.model = Some(crate::model::DEFAULT_MODEL.into());
+    let a = sent(&mut c, "one");
+    let ta = c.ask(a).unwrap();
+    let b = sent(&mut c, "two");
+    c.ask(b);
+    let d = sent(&mut c, "three");
+    c.ask(d);
+    assert_eq!((state(&c, a), state(&c, b), state(&c, d)), (Some(reply::State::Streaming), Some(reply::State::Queued), Some(reply::State::Queued)));
+    assert!(c.cancelled.is_empty(), "nothing stopped");
+    assert_eq!(c.requests.len(), 1, "only the first went");
+    c.reply_event(ta, Event::Text("Hi".into()), Instant::now());
+    c.reply_event(ta, Event::Done, Instant::now());
+    assert_eq!((state(&c, b), state(&c, d)), (Some(reply::State::Streaming), Some(reply::State::Queued)), "one at a time");
+    let (tb, request) = c.requests.last().cloned().unwrap();
+    assert_eq!((request.text.as_str(), request.history.len(), request.steer), ("two", 1, false), "with the first as history");
+    c.reply_event(tb, Event::Fail("no".into()), Instant::now());
+    assert_eq!(state(&c, d), Some(reply::State::Streaming), "after a failure too");
+}
+
+#[test]
+fn stop_ends_the_reply_and_the_queued_message_goes_at_once() {
+    let mut c = Chat::new(None);
+    c.model = Some(crate::model::DEFAULT_MODEL.into());
+    let a = sent(&mut c, "one");
+    let ta = c.ask(a).unwrap();
+    let b = sent(&mut c, "two");
+    c.ask(b);
+    c.stop(Instant::now());
+    assert_eq!((state(&c, a), state(&c, b)), (Some(reply::State::Stopped), Some(reply::State::Streaming)));
+    assert_eq!(c.cancelled, [ta]);
+    assert_eq!(c.requests.last().map(|(_, r)| r.text.as_str()), Some("two"));
+}
+
+#[test]
+fn with_pi_replying_a_message_sent_meanwhile_steers_its_run_and_its_reply_starts_when_pi_reads_it() {
+    let mut c = Chat::new(None);
+    c.model = Some(crate::model::PI.into());
+    let a = sent(&mut c, "one");
+    let ta = c.ask(a).unwrap();
+    let b = sent(&mut c, "two");
+    let tb = c.ask(b).unwrap();
+    assert_eq!(c.requests.iter().map(|(t, r)| (*t, r.text.as_str(), r.steer)).collect::<Vec<_>>(), [(ta, "one", false), (tb, "two", true)]);
+    assert_eq!(state(&c, b), Some(reply::State::Queued));
+    c.reply_event(ta, Event::Done, Instant::now());
+    assert_eq!((c.requests.len(), state(&c, b)), (2, Some(reply::State::Queued)), "already with pi: nothing sent again");
+    c.reply_event(tb, Event::Text("Sure".into()), Instant::now());
+    assert_eq!(state(&c, b), Some(reply::State::Streaming));
+    assert_eq!(texts(c.reply_to(b).unwrap()), "Sure");
+
+    // Stopped before pi read it: it goes again as a message of its own.
+    let d = sent(&mut c, "three");
+    c.ask(d);
+    assert!(c.requests.last().unwrap().1.steer);
+    c.stop(Instant::now());
+    let (td, request) = c.requests.last().cloned().unwrap();
+    assert_eq!((request.text.as_str(), request.steer, state(&c, d)), ("three", false, Some(reply::State::Streaming)));
+    assert_eq!(c.reply_to(d).map(|r| r.token), Some(td));
+}
+
+#[test]
+fn a_steer_pi_dropped_for_a_retry_goes_again_after_it() {
+    let mut c = Chat::new(None);
+    c.model = Some(crate::model::PI.into());
+    let a = sent(&mut c, "one");
+    let ta = c.ask(a).unwrap();
+    c.reply_event(ta, Event::Done, Instant::now());
+    let b = sent(&mut c, "two");
+    c.ask(b);
+    let d = sent(&mut c, "three");
+    c.ask(d);
+    assert!(c.requests.last().unwrap().1.steer);
+    let again = c.retry(ta).unwrap();
+    assert_eq!(state(&c, d), Some(reply::State::Queued), "pi dropped it with the run: it waits");
+    c.reply_event(again, Event::Done, Instant::now());
+    let (td, request) = c.requests.last().cloned().unwrap();
+    assert_eq!((request.text.as_str(), request.steer, state(&c, d)), ("three", false, Some(reply::State::Streaming)));
+    assert_eq!(c.reply_to(d).map(|r| r.token), Some(td));
+}
+
+#[test]
+fn a_steered_reply_that_fails_at_once_lets_the_queue_go_on_and_is_saved() {
+    let mut c = Chat::new(None);
+    c.model = Some(crate::model::PI.into());
+    let a = sent(&mut c, "one");
+    let ta = c.ask(a).unwrap();
+    let b = sent(&mut c, "two");
+    let tb = c.ask(b).unwrap();
+    c.model = Some(crate::model::DEFAULT_MODEL.into());
+    let d = sent(&mut c, "three");
+    c.ask(d);
+    c.reply_event(ta, Event::Done, Instant::now());
+    assert_eq!(state(&c, d), Some(reply::State::Queued), "behind the one pi has");
+    let saves = c.saved.len();
+    c.reply_event(tb, Event::Fail("Not now".into()), Instant::now());
+    assert_eq!((state(&c, b), state(&c, d)), (Some(reply::State::Failed), Some(reply::State::Streaming)));
+    assert!(c.saved.len() > saves, "its end is saved");
+}
+
+#[test]
+fn a_queued_message_is_saved_at_once_and_leaving_the_conversation_drops_the_queue() {
+    let mut c = Chat::new(None);
+    c.model = Some(crate::model::DEFAULT_MODEL.into());
+    let a = sent(&mut c, "one");
+    c.ask(a);
+    let b = sent(&mut c, "two");
+    c.ask(b);
+    let saved = &c.saved.last().unwrap().saved;
+    assert_eq!(saved.messages.len(), 2, "quitting now keeps it");
+    let requests = c.requests.len();
+    c.start_over();
+    assert_eq!(c.requests.len(), requests, "Cmd+N sends nothing queued");
+    assert!(c.reply_to(b).is_none());
+}
+
+#[test]
+fn a_reply_ending_in_a_question_holds_the_queue_until_its_answered() {
+    let mut c = Chat::new(None);
+    c.model = Some(crate::model::DEFAULT_MODEL.into());
+    let a = sent(&mut c, "one");
+    let ta = c.ask(a).unwrap();
+    let b = sent(&mut c, "two");
+    c.ask(b);
+    c.reply_event(ta, Event::Ask { prompt: "Which?".into(), options: vec!["A".into(), "B".into()], multi: false }, Instant::now());
+    c.reply_event(ta, Event::Done, Instant::now());
+    assert_eq!(state(&c, b), Some(reply::State::Queued), "the question first");
+    c.pick(ta, 0, 1);
+    let answer = c.answer(ta, 0).unwrap();
+    c.reply_event(answer, Event::Done, Instant::now());
+    assert_eq!(state(&c, b), Some(reply::State::Streaming));
+}
+
+#[test]
+fn a_reply_claude_streams_is_waited_for_even_with_pi_picked_meanwhile() {
+    let mut c = Chat::new(None);
+    c.model = Some(crate::model::DEFAULT_MODEL.into());
+    let a = sent(&mut c, "one");
+    c.ask(a);
+    c.model = Some(crate::model::PI.into());
+    let b = sent(&mut c, "two");
+    c.ask(b);
+    assert_eq!((c.requests.len(), state(&c, b)), (1, Some(reply::State::Queued)), "no steering Claude");
+}
+
+#[test]
+fn the_model_picker_lists_the_models_and_a_pick_closes_it_and_writes_the_next_reply() {
+    let mut c = Chat::new(None);
+    c.model = Some(crate::model::DEFAULT_MODEL.into());
+    assert_eq!(c.model_label(), "Sonnet 5.5");
+    c.toggle_models();
+    assert!(c.models_open);
+    c.pick_model(crate::model::PI);
+    assert!(!c.models_open);
+    assert_eq!(c.model_label(), "pi");
+    let id = sent(&mut c, "hi");
+    c.ask(id);
+    assert_eq!(c.requests.last().map(|(_, r)| r.model.as_str()), Some(crate::model::PI));
+    c.pick_model("no-such-model");
+    assert_eq!(c.model_label(), "pi", "ignored");
+    c.toggle_models();
+    c.toggle_models();
+    assert!(!c.models_open);
+}
+
+#[test]
+fn retrying_stops_the_reply_streaming_and_its_old_events_go_nowhere() {
     let mut c = Chat::new(None);
     let first = sent(&mut c, "one");
     let old = c.ask(first).unwrap();
     let second = sent(&mut c, "two");
-    let token = c.ask(second).unwrap();
+    c.ask(second).unwrap();
+    c.stop(Instant::now());
     assert_eq!(c.reply_to(first).map(|r| r.state), Some(reply::State::Stopped));
+    let token = c.reply_to(second).map(|r| r.token).unwrap();
     c.stop(Instant::now());
     assert_eq!(c.reply_to(second).map(|r| r.state), Some(reply::State::Stopped));
     let again = c.retry(token).expect("retried");
@@ -567,12 +739,12 @@ fn stopping_asking_again_retrying_and_starting_over_cancel_the_run_of_the_reply_
     c.stop(Instant::now());
     assert_eq!(c.cancelled, [first], "nothing streaming, nothing to cancel");
     let second = c.ask(b).unwrap();
-    let third = c.ask(a).unwrap();
-    assert_eq!(c.cancelled, [first, second], "a new reply replaces the streaming one");
-    let fourth = c.retry(third).unwrap();
-    assert_eq!(c.cancelled, [first, second, third], "Retry");
+    c.ask(a).unwrap();
+    assert_eq!(c.cancelled, [first], "a new message waits for the reply streaming");
+    let third = c.retry(second).unwrap();
+    assert_eq!(c.cancelled, [first, second], "Retry");
     c.start_over();
-    assert_eq!(c.cancelled, [first, second, third, fourth], "Cmd+N");
+    assert_eq!(c.cancelled, [first, second, third], "Cmd+N");
     let id = sent(&mut c, "c");
     let fifth = c.ask(id).unwrap();
     c.clear();

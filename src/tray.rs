@@ -8,6 +8,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 use crate::Host;
 use crate::history::Entry;
+use crate::status::Status;
 
 /// What a menu pick asks the host to do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,7 +65,7 @@ impl Pick {
 
 pub struct Tray {
     /// Dropping it removes the icon.
-    _icon: TrayIcon,
+    icon: TrayIcon,
     capture: MenuItem,
     menu: Menu,
     /// The most recent conversations, after "Quick Input"; in the menu only while there are any.
@@ -74,6 +75,9 @@ pub struct Tray {
     permission: MenuItem,
     permission_shown: bool,
     can_login: bool,
+    /// What the icon shows now.
+    glyph: Glyph,
+    tooltip: String,
 }
 
 impl Tray {
@@ -119,7 +123,7 @@ impl Tray {
         .map_err(|e| e.to_string())?;
 
         let icon = TrayIconBuilder::new()
-            .with_icon_templated(icon(false)?)
+            .with_icon_templated(icon()?)
             .with_tooltip("Ailfred")
             .with_menu(Box::new(menu.clone()))
             .build()
@@ -135,7 +139,25 @@ impl Tray {
             }
         }));
         let recent = Submenu::with_id("recent", "Recent", true);
-        Ok(Tray { _icon: icon, capture, menu, recent, recent_shown: false, login, permission, permission_shown: false, can_login })
+        Ok(Tray { icon, capture, menu, recent, recent_shown: false, login, permission, permission_shown: false, can_login, glyph: Glyph::Plain, tooltip: "Ailfred".into() })
+    }
+
+    /// The icon and its tooltip show `status` (each set only when it changes).
+    pub fn set_status(&mut self, status: &Status) {
+        let glyph = Glyph::of(status);
+        if glyph != self.glyph {
+            match glyph_icon(glyph).and_then(|icon| self.icon.set_icon_templated(Some(icon)).map_err(|e| e.to_string())) {
+                Ok(()) => self.glyph = glyph,
+                Err(e) => eprintln!("Ailfred: updating the menu-bar icon failed: {e}"),
+            }
+        }
+        let tooltip = status.tooltip();
+        if tooltip != self.tooltip {
+            if let Err(e) = self.icon.set_tooltip(Some(&tooltip)) {
+                eprintln!("Ailfred: updating the menu-bar tooltip failed: {e}");
+            }
+            self.tooltip = tooltip;
+        }
     }
 
     /// Shows the capture chord next to "Capture Area" (none when cleared). Rune writes chords as
@@ -172,14 +194,6 @@ impl Tray {
         }
     }
 
-    /// The dot on the icon on or off: a reply waits to be seen.
-    pub fn set_marked(&self, marked: bool) {
-        let done = icon(marked).and_then(|icon| self._icon.set_icon_templated(Some(icon)).map_err(|e| e.to_string()));
-        if let Err(e) = done {
-            eprintln!("Ailfred: marking the menu-bar icon failed: {e}");
-        }
-    }
-
     pub fn set_login(&self, enabled: bool) {
         self.login.set_checked(enabled);
     }
@@ -211,35 +225,91 @@ impl Tray {
 /// 22 pt), so it shows at 22 pt.
 const SIZE: usize = 36;
 
-/// The dot of a reply waiting to be seen: its centre and radius, in pixels, at the top right.
-const DOT: [f32; 3] = [SIZE as f32 - 7.0, 7.0, 5.0];
-/// The clear ring between the dot and the mark, in pixels.
-const DOT_GAP: f32 = 2.0;
+/// A template icon: the app's mark, black with alpha; macOS tints it.
+fn icon() -> Result<Icon, String> {
+    glyph_icon(Glyph::Plain)
+}
 
-/// A template icon: the app's mark, black with alpha; macOS tints it. `marked`: with the dot.
-fn icon(marked: bool) -> Result<Icon, String> {
-    Icon::from_rgba(icon_rgba(marked), SIZE as u32, SIZE as u32).map_err(|e| e.to_string())
+fn glyph_icon(glyph: Glyph) -> Result<Icon, String> {
+    Icon::from_rgba(glyph_rgba(glyph), SIZE as u32, SIZE as u32).map_err(|e| e.to_string())
 }
 
 /// The icon's pixels, RGBA.
-fn icon_rgba(marked: bool) -> Vec<u8> {
-    let coverage = rune::text::icon_coverage(&crate::app_icon::MENU_BAR_MARK, SIZE as u32);
-    let [cx, cy, r] = DOT;
-    let mut rgba = Vec::with_capacity(SIZE * SIZE * 4);
-    for (at, a) in coverage.into_iter().enumerate() {
-        let a = if marked {
-            let (x, y) = ((at % SIZE) as f32 + 0.5, (at / SIZE) as f32 + 0.5);
-            let d = ((x - cx).powi(2) + (y - cy).powi(2)).sqrt();
-            // Antialiased by half a pixel each side: the dot, and the ring cut out of the mark.
-            let dot = (r + 0.5 - d).clamp(0.0, 1.0);
-            let kept = (d - (r + DOT_GAP) + 0.5).clamp(0.0, 1.0);
-            ((f32::from(a) * kept).max(dot * 255.0)).round() as u8
-        } else {
-            a
-        };
-        rgba.extend([0, 0, 0, a]);
+#[cfg(test)]
+fn icon_rgba() -> Vec<u8> {
+    glyph_rgba(Glyph::Plain)
+}
+
+/// How the icon shows a [`Status`], one look each: the mark, faded while the model starts, else
+/// with a badge at its top right, cut out of it: a ring while it thinks, a ring round a dot while
+/// it works on a tool, a diamond when it asks the user, a dot when a reply ended unseen, a cross
+/// after a failure.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Glyph {
+    Plain,
+    Faded,
+    Thinking,
+    Working,
+    Asking,
+    Replied,
+    Failed,
+}
+
+impl Glyph {
+    pub fn of(status: &Status) -> Glyph {
+        match status {
+            Status::Idle => Glyph::Plain,
+            Status::Starting => Glyph::Faded,
+            Status::Thinking => Glyph::Thinking,
+            Status::Working(_) => Glyph::Working,
+            Status::NeedsYou(_) => Glyph::Asking,
+            Status::Replied => Glyph::Replied,
+            Status::Error(_) => Glyph::Failed,
+        }
     }
-    rgba
+}
+
+/// The badge (the dot of a reply waiting to be seen): its centre and radius, in pixels, at the
+/// top right.
+const DOT: [f32; 3] = [SIZE as f32 - 7.0, 7.0, 5.0];
+/// The clear ring between the badge and the mark, in pixels.
+const DOT_GAP: f32 = 2.0;
+/// Half the ring's and the cross's strokes; the working dot's radius.
+const RING_HALF: f32 = 0.9;
+const CROSS_HALF: f32 = 1.1;
+const CENTRE_DOT_R: f32 = 1.6;
+
+fn glyph_rgba(glyph: Glyph) -> Vec<u8> {
+    let mut alpha = rune::text::icon_coverage(&crate::app_icon::MENU_BAR_MARK, SIZE as u32);
+    // How much of a pixel lies inside an edge `d` px away (positive: inside).
+    let cover = |d: f32| (d + 0.5).clamp(0.0, 1.0);
+    let [cx, cy, r] = DOT;
+    for (i, a) in alpha.iter_mut().enumerate() {
+        let (x, y) = ((i % SIZE) as f32 + 0.5, (i / SIZE) as f32 + 0.5);
+        let (dx, dy) = (x - cx, y - cy);
+        let d = (dx * dx + dy * dy).sqrt();
+        let ring = cover(RING_HALF - (d - (r - RING_HALF)).abs());
+        let badge = match glyph {
+            Glyph::Plain => continue,
+            Glyph::Faded => {
+                *a /= 2;
+                continue;
+            }
+            Glyph::Thinking => ring,
+            Glyph::Working => ring.max(cover(CENTRE_DOT_R - d)),
+            // Corners on the axes, within the badge's circle.
+            Glyph::Asking => cover((r - dx.abs() - dy.abs()) / std::f32::consts::SQRT_2),
+            Glyph::Replied => cover(r - d),
+            Glyph::Failed => {
+                // The two diagonals, within the badge's circle.
+                let off = (dx - dy).abs().min((dx + dy).abs()) / std::f32::consts::SQRT_2;
+                cover(CROSS_HALF - off).min(cover(r - d))
+            }
+        };
+        let cut = cover(d - r - DOT_GAP);
+        *a = ((f32::from(*a) * cut).max(255.0 * badge)).round() as u8;
+    }
+    alpha.into_iter().flat_map(|a| [0, 0, 0, a]).collect()
 }
 
 #[cfg(test)]
@@ -258,7 +328,7 @@ mod tests {
 
     #[test]
     fn the_menu_bar_icon_is_the_apps_mark() {
-        let rgba = icon_rgba(false);
+        let rgba = icon_rgba();
         let want = rune::text::icon_coverage(&crate::app_icon::MENU_BAR_MARK, SIZE as u32);
         let whole = rune::text::icon_coverage(&crate::app_icon::MARK, SIZE as u32);
         let ink = |c: &[u8]| c.iter().map(|&a| u32::from(a)).sum::<u32>();
@@ -271,37 +341,79 @@ mod tests {
         assert!(want.iter().map(|&a| u32::from(a)).sum::<u32>() > 2000, "it has ink");
     }
 
+    const GLYPHS: [Glyph; 7] = [Glyph::Plain, Glyph::Faded, Glyph::Thinking, Glyph::Working, Glyph::Asking, Glyph::Replied, Glyph::Failed];
+
     #[test]
     fn the_menu_bar_mark_keeps_a_margin_like_the_other_menu_bar_icons() {
-        let rgba = icon_rgba(false);
-        let edge = 4;
-        for y in 0..SIZE {
-            for x in 0..SIZE {
-                let inside = (edge..SIZE - edge).contains(&x) && (edge..SIZE - edge).contains(&y);
-                if !inside {
-                    assert_eq!(rgba[(y * SIZE + x) * 4 + 3], 0, "ink at ({x}, {y}), within {edge} px of the edge");
+        // The badge, like a notification's, may reach the corner.
+        for glyph in [Glyph::Plain, Glyph::Faded] {
+            let rgba = glyph_rgba(glyph);
+            let edge = 4;
+            for y in 0..SIZE {
+                for x in 0..SIZE {
+                    let inside = (edge..SIZE - edge).contains(&x) && (edge..SIZE - edge).contains(&y);
+                    if !inside {
+                        assert_eq!(rgba[(y * SIZE + x) * 4 + 3], 0, "{glyph:?}: ink at ({x}, {y}), within {edge} px of the edge");
+                    }
                 }
             }
         }
     }
 
-    /// Writes both icons, 8x, black on white, to look at: `cargo test --offline menu_bar_icons_to_look_at -- --ignored`.
+    #[test]
+    fn each_status_has_its_glyph_and_each_glyph_looks_different() {
+        let glyph = |s: Status| Glyph::of(&s);
+        assert_eq!(glyph(Status::Idle), Glyph::Plain);
+        assert_eq!(glyph(Status::Starting), Glyph::Faded);
+        assert_eq!((glyph(Status::Thinking), glyph(Status::Working("Reading a".into()))), (Glyph::Thinking, Glyph::Working));
+        assert_eq!((glyph(Status::NeedsYou("?".into())), glyph(Status::Replied)), (Glyph::Asking, Glyph::Replied));
+        assert_eq!(glyph(Status::Error("no".into())), Glyph::Failed);
+        let looks: Vec<Vec<u8>> = GLYPHS.iter().map(|&g| glyph_rgba(g)).collect();
+        for (i, a) in looks.iter().enumerate() {
+            assert!(looks[i + 1..].iter().all(|b| a != b), "{:?} looks like another", GLYPHS[i]);
+        }
+
+        let alpha = |g: Glyph| -> Vec<u8> { glyph_rgba(g).as_chunks::<4>().0.iter().map(|p| p[3]).collect() };
+        let ink = |a: &[u8]| a.iter().map(|&a| u32::from(a)).sum::<u32>();
+        let mark = alpha(Glyph::Plain);
+        let faded = ink(&alpha(Glyph::Faded)) as f32 / ink(&mark) as f32;
+        assert!((0.45..0.55).contains(&faded), "half the ink: {faded}");
+        // Each badge alone: centre filled for a dot, empty for a ring.
+        let at = |a: &[u8], x: f32, y: f32| a[y as usize * SIZE + x as usize];
+        let [cx, cy, r] = DOT;
+        let [thinking, working, asking, replied, failed] = [Glyph::Thinking, Glyph::Working, Glyph::Asking, Glyph::Replied, Glyph::Failed].map(alpha);
+        assert_eq!([&thinking, &working, &asking, &replied, &failed].map(|a| at(a, cx, cy)), [0, 255, 255, 255, 255], "the centre");
+        assert_eq!([&thinking, &working, &replied].map(|a| at(a, cx + r - 1.0, cy) > 200), [true, true, true], "the rim");
+        assert!(at(&working, cx + 2.0, cy) < 60, "a ring round a dot");
+        assert!(at(&asking, cx + 3.0, cy + 2.0) < 60 && at(&replied, cx + 3.0, cy + 2.0) > 200, "a diamond, not a dot");
+        assert!(at(&failed, cx + 2.5, cy) < 60 && at(&failed, cx + 2.0, cy + 2.0) > 200, "a cross, not a dot");
+        for a in [&thinking, &working, &asking, &replied, &failed] {
+            // A pixel about r + gap/2 from the centre.
+            assert_eq!(at(a, cx - r - DOT_GAP / 4.0, cy + DOT_GAP), 0, "the gap around the badge");
+        }
+        let bottom = SIZE * 18;
+        assert_eq!(&thinking[bottom..], &mark[bottom..], "the mark's bottom half stays");
+    }
+
+    /// Writes every glyph, 8x, black on white, to look at: `cargo test --offline menu_bar_icons_to_look_at -- --ignored`.
     #[test]
     #[ignore]
     fn menu_bar_icons_to_look_at() {
         const ZOOM: usize = 8;
         let side = SIZE * ZOOM;
-        let mut out = vec![255u8; side * 2 * side * 4];
-        for (i, rgba) in [icon_rgba(false), icon_rgba(true)].iter().enumerate() {
+        let n = GLYPHS.len();
+        let mut out = vec![255u8; side * n * side * 4];
+        for (i, glyph) in GLYPHS.iter().enumerate() {
+            let rgba = glyph_rgba(*glyph);
             for y in 0..side {
                 for x in 0..side {
                     let v = 255 - rgba[((y / ZOOM) * SIZE + x / ZOOM) * 4 + 3];
-                    let at = (y * side * 2 + i * side + x) * 4;
+                    let at = (y * side * n + i * side + x) * 4;
                     out[at..at + 3].copy_from_slice(&[v, v, v]);
                 }
             }
         }
-        let png = crate::export::encode_png((side * 2) as u32, side as u32, 1.0, &out).unwrap();
+        let png = crate::export::encode_png((side * n) as u32, side as u32, 1.0, &out).unwrap();
         let path = std::env::temp_dir().join("ailfred-menu-bar-icons.png");
         std::fs::write(&path, png).unwrap();
         eprintln!("wrote {}", path.display());
@@ -315,7 +427,7 @@ mod tests {
 
     #[test]
     fn a_reply_waiting_puts_a_dot_at_the_top_right_with_a_clear_ring_around_it() {
-        let (plain, marked) = (icon_rgba(false), icon_rgba(true));
+        let (plain, marked) = (glyph_rgba(Glyph::Plain), glyph_rgba(Glyph::Replied));
         assert_eq!(marked.len(), plain.len());
         assert!(marked.as_chunks::<4>().0.iter().all(|p| p[..3] == [0, 0, 0]), "still a template icon");
         let alpha = |rgba: &[u8], x: usize, y: usize| rgba[(y * SIZE + x) * 4 + 3];

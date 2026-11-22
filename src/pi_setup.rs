@@ -138,24 +138,25 @@ pub struct Pi {
 }
 
 enum PiState {
-    /// With the message waiting for it, if any.
-    Starting(Option<(crate::pi::Prompt, crate::pi::Sink)>),
+    /// With the messages waiting for it, in order (the first one's run takes the rest as
+    /// steers).
+    Starting(Vec<(crate::pi::Prompt, crate::pi::Sink)>),
     Up(crate::pi::PiEngine),
     Failed(String),
 }
 
 impl PiState {
-    /// Up, or failed to start: the message waiting goes to pi, or fails.
+    /// Up, or failed to start: the messages waiting go to pi, or fail.
     fn became(&mut self, started: Result<crate::pi::PiEngine, String>) {
         let waiting = match self {
-            PiState::Starting(waiting) => waiting.take(),
-            _ => None,
+            PiState::Starting(waiting) => std::mem::take(waiting),
+            _ => Vec::new(),
         };
         *self = match started {
             Ok(engine) => PiState::Up(engine),
             Err(e) => PiState::Failed(format!("pi couldn't start: {e}")),
         };
-        if let Some((prompt, sink)) = waiting {
+        for (prompt, sink) in waiting {
             match self {
                 PiState::Up(engine) => engine.send(prompt, sink),
                 PiState::Failed(why) => sink(crate::reply::Event::Fail(why.clone())),
@@ -171,7 +172,7 @@ impl Pi {
         let Some(pi) = pi else {
             return Pi::with(PiState::Failed("pi isn't installed (~/.pi/agent/bin/pi, or set AILFRED_PI).".into()));
         };
-        let pi_ = Pi::with(PiState::Starting(None));
+        let pi_ = Pi::with(PiState::Starting(Vec::new()));
         let state = pi_.state.clone();
         std::thread::spawn(move || {
             let started = start(&pi, &data, &real_home).map_err(|e| {
@@ -192,6 +193,11 @@ impl Pi {
         self.state.lock().unwrap().became(started);
     }
 
+    /// It isn't up yet: a message waits for it.
+    pub fn starting(&self) -> bool {
+        matches!(*self.state.lock().unwrap_or_else(|e| e.into_inner()), PiState::Starting(_))
+    }
+
     /// It couldn't start: the host starts it again for the next message.
     pub fn failed(&self) -> bool {
         matches!(*self.state.lock().unwrap_or_else(|e| e.into_inner()), PiState::Failed(_))
@@ -202,11 +208,11 @@ impl crate::model::Model for Pi {
     fn send(&mut self, request: crate::model::Request, sink: crate::model::Sink) {
         use crate::model::Item;
         use crate::reply::Event;
-        let prompt = crate::pi::Prompt { text: request.text, pngs: request.pngs, answer: request.answer };
+        let prompt = crate::pi::Prompt { text: request.text, pngs: request.pngs, answer: request.answer, steer: request.steer };
         let sink: crate::pi::Sink = Arc::new(move |event| sink(Item::Event(event)));
         match &mut *self.state.lock().unwrap_or_else(|e| e.into_inner()) {
             PiState::Up(engine) => engine.send(prompt, sink),
-            PiState::Starting(waiting) => *waiting = Some((prompt, sink)),
+            PiState::Starting(waiting) => waiting.push((prompt, sink)),
             PiState::Failed(why) => sink(Event::Fail(why.clone())),
         }
     }
@@ -214,7 +220,7 @@ impl crate::model::Model for Pi {
     fn stop(&mut self) {
         match &mut *self.state.lock().unwrap_or_else(|e| e.into_inner()) {
             PiState::Up(engine) => engine.stop(),
-            PiState::Starting(waiting) => *waiting = None,
+            PiState::Starting(waiting) => waiting.clear(),
             PiState::Failed(_) => {}
         }
     }
@@ -412,14 +418,14 @@ mod tests {
     }
 
     fn pi_request(text: &str) -> crate::model::Request {
-        crate::model::Request { model: crate::model::PI.into(), history: Vec::new(), text: text.into(), pngs: Vec::new(), session: None, answer: false }
+        crate::model::Request { model: crate::model::PI.into(), history: Vec::new(), text: text.into(), pngs: Vec::new(), session: None, answer: false, steer: false }
     }
 
     #[test]
     fn a_message_sent_while_pi_starts_goes_to_it_once_its_up() {
         use crate::model::{Item, Model};
         use crate::reply::Event;
-        let mut pi = Pi::with(PiState::Starting(None));
+        let mut pi = Pi::with(PiState::Starting(Vec::new()));
         let (s, rx) = sink();
         pi.send(pi_request("hi"), s);
         assert!(rx.try_recv().is_err(), "it waits");
@@ -431,18 +437,32 @@ mod tests {
         assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)), Ok(Item::Event(Event::Text("Up".into()))));
 
         // Stopped while it starts: nothing goes; failing to start fails the one waiting.
-        let mut pi = Pi::with(PiState::Starting(None));
+        let mut pi = Pi::with(PiState::Starting(Vec::new()));
         let (s, rx) = sink();
         pi.send(pi_request("never"), s);
         pi.stop();
         pi.became(Err("no node".into()));
         assert!(rx.try_recv().is_err());
-        let mut pi = Pi::with(PiState::Starting(None));
+        let mut pi = Pi::with(PiState::Starting(Vec::new()));
         let (s, rx) = sink();
         pi.send(pi_request("hi"), s);
         pi.became(Err("no node".into()));
         assert_eq!(rx.try_recv(), Ok(Item::Event(Event::Fail("pi couldn't start: no node".into()))));
         assert!(pi.failed(), "so the host starts it again at the next message");
+    }
+
+    #[test]
+    fn every_message_sent_while_pi_starts_waits_for_it() {
+        use crate::model::{Item, Model};
+        use crate::reply::Event;
+        let mut pi = Pi::with(PiState::Starting(Vec::new()));
+        let (s1, rx1) = sink();
+        pi.send(pi_request("hi"), s1);
+        let (s2, rx2) = sink();
+        pi.send(crate::model::Request { steer: true, ..pi_request("and this") }, s2);
+        pi.became(Err("no node".into()));
+        let failed = Item::Event(Event::Fail("pi couldn't start: no node".into()));
+        assert_eq!((rx1.try_recv(), rx2.try_recv()), (Ok(failed.clone()), Ok(failed)));
     }
 
     #[test]

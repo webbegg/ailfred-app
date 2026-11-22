@@ -119,6 +119,8 @@ pub struct Request {
     pub session: Option<String>,
     /// The user's answer to the model's question (pi waits for it), not a new message.
     pub answer: bool,
+    /// Sent while pi replies: it goes into the run going (pi only).
+    pub steer: bool,
 }
 
 /// What a run reports.
