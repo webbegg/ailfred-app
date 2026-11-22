@@ -13,6 +13,7 @@ mod app_icon;
 mod chat;
 mod chat_place;
 mod chat_window;
+mod computer;
 mod export;
 mod history;
 mod login;
