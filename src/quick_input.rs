@@ -95,6 +95,8 @@ pub struct QuickInput {
     pending: Vec<u64>,
     /// The capture shortcut's symbols, shown in the empty field's hint.
     capture_chord: Option<String>,
+    /// The chat is in its own window: what's sent goes there (the host's), not into `chat`.
+    windowed: bool,
 }
 
 /// What Esc in a field (the input's or the chat's) does.
@@ -146,7 +148,25 @@ impl QuickInput {
             presses: 0,
             pending: Vec::new(),
             capture_chord: None,
+            windowed: false,
         }
+    }
+
+    /// The chat goes into its own window: it's handed over, landed, and an empty one stays,
+    /// closed. What's sent from now on goes to the window.
+    pub fn take_chat(&mut self) -> Chat {
+        self.end_morph();
+        self.windowed = true;
+        let mut chat = std::mem::replace(&mut self.chat, Chat::new(self.host.clone()));
+        chat.set_windowed(true);
+        chat
+    }
+
+    /// The chat's back from its window, closed, to slide in.
+    pub fn put_chat(&mut self, mut chat: Chat) {
+        chat.set_windowed(false);
+        self.chat = chat;
+        self.windowed = false;
     }
 
     /// The panel's rect at rest (points on the window's display). Applied without motion, with
@@ -179,6 +199,12 @@ impl QuickInput {
         let message = chat::Message { id, text: text.clone(), images: Vec::new() };
         self.query.focused = false;
         self.pending.clear();
+        // The host takes it to the chat's window.
+        if self.windowed {
+            self.close();
+            self.query.clear();
+            return Some((id, text, pngs));
+        }
         if self.chat.is_open() {
             self.close();
             self.query.clear();
@@ -437,8 +463,11 @@ impl QuickInput {
     fn send_now(&mut self) {
         if let Some((id, text, pngs)) = self.send() {
             eprintln!("{}", sent_log(&text, &pngs));
+            let windowed = self.windowed;
             if let Some(host) = &self.host {
-                host.update(move |host, _| host.sent_from_quick_input(id, pngs));
+                host.update(move |host, _| {
+                    if windowed { host.sent_to_window(id, text, pngs) } else { host.sent_from_quick_input(id, pngs) }
+                });
             }
         }
     }
@@ -653,6 +682,7 @@ pub fn view(s: &QuickInput, cx: &mut Cx<QuickInput>) -> El {
 fn input_row(s: &QuickInput, t: &tok::Theme) -> El {
     let field = text_input(&s.query, TextStyle::new(15.0, 400.0).lh(22.0))
         .key("query")
+        .label("Ask anything")
         .single_line()
         .grow(1.0)
         .min_w(FIELD_MIN_W)
@@ -1146,6 +1176,29 @@ mod tests {
         s.open();
         s.query = TextEdit::new("again");
         assert_eq!(s.send().map(|m| m.0), Some(id + 1));
+    }
+
+    #[test]
+    fn with_the_chat_in_its_window_sending_closes_the_input_and_leaves_the_message_to_the_host() {
+        let mut s = sent("first", None);
+        assert!(s.send().is_some());
+        let mut chat = s.take_chat();
+        assert!(chat.windowed() && chat.landed(), "handed over landed, mid-flight or not");
+        assert!(!s.chat.is_open() && !s.morphing);
+        assert_eq!(chat.reply_to(0).map(|r| r.prompt.as_str()), Some("first"), "the conversation went with it");
+        s.open();
+        s.query = TextEdit::new("more");
+        let (id, text, _) = s.send().expect("sent");
+        assert_eq!((id, text.as_str()), (1, "more"));
+        assert!(!s.is_open() && !s.morphing && !s.chat.is_open(), "the input slides down, no side panel");
+        assert!(s.chat.reply_to(1).is_none(), "the message isn't the side panel's");
+        chat.stop(std::time::Instant::now());
+        s.put_chat(chat);
+        assert!(!s.chat.windowed() && !s.chat.is_open());
+        s.open();
+        s.query = TextEdit::new("side");
+        assert!(s.send().is_some());
+        assert!(s.chat.is_open() && s.chat.reply_to(2).is_some(), "back to the side panel");
     }
 
     #[test]

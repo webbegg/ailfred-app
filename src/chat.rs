@@ -213,7 +213,15 @@ pub enum Toggle {
 /// The shortcut with the input `quick_open`, a conversation `started` (not replaced by Cmd+N),
 /// shown or not (`chat_open`): an open input closes; a conversation comes back instead of a new
 /// input, or goes; otherwise the input opens.
-pub fn toggle(quick_open: bool, started: bool, chat_open: bool) -> Toggle {
+/// The chat's back in the side panel from its window: it slides in, or, emptied there, a
+/// fresh input rises as Cmd+N's does.
+pub fn on_dock(has_messages: bool) -> Toggle {
+    if has_messages { Toggle::ShowChat } else { Toggle::ShowInput }
+}
+
+pub fn toggle(quick_open: bool, started: bool, chat_open: bool, windowed: bool) -> Toggle {
+    // The chat in its window: the shortcut is the input's, to send to it.
+    let started = started && !windowed;
     match (quick_open, started, chat_open) {
         (true, _, _) => Toggle::HideInput,
         (false, true, false) => Toggle::ShowChat,
@@ -312,15 +320,61 @@ pub struct Chat {
     /// The user scrolled back from the latest: what comes keeps their place, and a button
     /// takes them back down.
     away: bool,
+    /// It's in its own window (popped out), not the side panel: Esc doesn't close it.
+    windowed: bool,
 }
 
 impl Chat {
     pub fn new(host: Option<AppHandle<Host>>) -> Self {
-        Chat { messages: Vec::new(), draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0, replies: Vec::new(), next_token: 0, scratch: TextEdit::new(""), away: false }
+        Chat { messages: Vec::new(), draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0, replies: Vec::new(), next_token: 0, scratch: TextEdit::new(""), away: false, windowed: false }
     }
 
     pub fn is_open(&self) -> bool {
         self.open
+    }
+
+    pub fn has_messages(&self) -> bool {
+        !self.messages.is_empty()
+    }
+
+    /// Into its own window (true), or back into the side panel, closed, so it slides in.
+    pub fn set_windowed(&mut self, on: bool) {
+        self.windowed = on;
+        // It arrives at the latest (`Host::into_window`, `QuickInput::put_chat`).
+        self.away = false;
+        self.landed = true;
+        self.preview = None;
+        self.open = on;
+        self.draft.focused = on;
+    }
+
+    #[cfg(test)]
+    pub fn windowed(&self) -> bool {
+        self.windowed
+    }
+
+    /// Cmd+N in its window: the conversation goes at once; what still streams feeds nothing.
+    pub fn clear(&mut self) {
+        self.messages.clear();
+        self.replies.clear();
+        self.draft.clear();
+        self.shots.clear();
+        (self.preview, self.over, self.away) = (None, false, false);
+        self.draft.focused = true;
+    }
+
+    /// Its pop-out button: the host moves it into its own window.
+    fn pop_out(&self) {
+        if let Some(host) = &self.host {
+            host.update(|host, _| host.pop_out());
+        }
+    }
+
+    /// Its window's dock button: the host moves it back into the side panel.
+    fn dock_back(&self) {
+        if let Some(host) = &self.host {
+            host.update(|host, _| host.dock_back());
+        }
     }
 
     #[cfg(test)]
@@ -515,7 +569,8 @@ impl Chat {
     }
 
     fn next_id(&self) -> u64 {
-        self.messages.last().map_or(0, |m| m.id + 1).max(LOCAL_IDS)
+        // Past every id so far: the input's (small) ones arrive after typed ones too.
+        self.messages.iter().map(|m| m.id + 1).max().unwrap_or(0).max(LOCAL_IDS)
     }
 
     /// Adds a message at the end of the conversation, the field focused for the next.
@@ -603,9 +658,14 @@ impl Chat {
             return true;
         }
         if ev.key == Key::Escape {
-            if self.escape() == Escape::Close {
-                self.dismiss();
+            if self.escape() == Escape::Preview {
+                return true;
             }
+            // A window stays; the side panel slides out.
+            if self.windowed {
+                return false;
+            }
+            self.dismiss();
             return true;
         }
         if ev.key == Key::Backspace && self.draft.text.is_empty() {
@@ -729,17 +789,75 @@ fn message(i: usize, m: &Message, t: &tok::Theme) -> El {
 /// (`input_row`), while the input's panel is turning into this one, fades out over it.
 pub fn panel<S: 'static>(s: &Chat, key: &str, lens: fn(&mut S) -> &mut Chat, input_row: Option<El>) -> El {
     let t = tok::theme(true);
-    let header = row()
+    let header = header(14.0, &t)
+        .child(header_button("pop-out", &icons::POP_OUT, "Open in a window", &t, move |s: &mut S| lens(s).pop_out()))
+        .child(close_button(&t, lens));
+    let [.., w, h] = side_rect(s.screen, s.insets);
+    let [top, right] = side_pins(s.insets);
+    // At its landed size from the start, pinned to the panel's top left: the panel reveals it as
+    // it grows. Hidden while the input's panel reshapes, then faded in.
+    let content = body(s, header, lens)
+        .key("chat-layer")
+        .size(w, h)
+        .pin(Some(0.0), Some(0.0), None, None)
+        .opacity(if s.landed { 1.0 } else { 0.0 })
+        .opacity_motion(Anim::new(Curve::ease_in_out(CONTENT_FADE)));
+    let layers = match input_row {
+        Some(row) => vec![content, row.opacity(0.0).opacity_motion(Anim::new(Curve::ease_in_out(ROW_FADE)))],
+        None => vec![content],
+    };
+    quick_input::surface(key, s.open, layers)
+        .size(w, h)
+        // By its right edge: told the wrong screen (none yet at launch, or another display's),
+        // closed it still waits past the window's edge, never on screen.
+        .pin(None, Some(top), Some(right), None)
+        .offset(offset(s.open, s.insets), 0.0)
+        .offset_motion(Anim::from(GLIDE))
+        // The input's panel arrives pressed in (sending) and springs back to full size.
+        .scale(1.0)
+        .scale_motion(Anim::from(GLIDE))
+        .motion(GLIDE)
+}
+
+/// The header's row: the sparkle and "Chat", `lead` points in; the caller adds its buttons.
+pub fn header(lead: f32, t: &tok::Theme) -> El {
+    row()
         .key("header")
         .w_full()
         .h(HEADER_H)
-        .pl(14.0)
+        .pl(lead)
         .pr(9.0)
         .gap(8.0)
         .center_y()
         .child(icon(&glyphs::SPARKLE, 16.0).color(ACCENT))
         .child(text("Chat").font(TextStyle::new(13.5, 600.0)).color(t.text).grow(1.0))
-        .child(close_button(&t, lens));
+}
+
+pub const HEADER_HEIGHT: f32 = HEADER_H;
+
+/// A header button: a glyph, its `label` spoken and shown on hover.
+fn header_button<S: 'static>(key: &str, glyph: &'static rune::Icon, label: &str, t: &tok::Theme, f: impl Fn(&mut S) + 'static) -> El {
+    el().key(key.to_owned())
+        .size(26.0, 26.0)
+        .radius(7.0)
+        .continuous_corners()
+        .center()
+        .hover(Color::WHITE.alpha(0.10))
+        .press(Color::WHITE.alpha(0.06))
+        .cursor(Cursor::Pointer)
+        .label(label.to_owned())
+        .child(icon(glyph, 14.0).color(t.text_secondary))
+        .on_press(f)
+}
+
+/// Its window's dock button: back into the side panel.
+pub fn dock_button<S: 'static>(t: &tok::Theme, lens: fn(&mut S) -> &mut Chat) -> El {
+    header_button("dock-side", &icons::DOCK_SIDE, "Back to the side panel", t, move |s: &mut S| lens(s).dock_back())
+}
+
+/// The conversation under `header`: the thread, scrolling, then the composer.
+pub fn body<S: 'static>(s: &Chat, header: El, lens: fn(&mut S) -> &mut Chat) -> El {
+    let t = tok::theme(true);
     let divider = || el().w_full().h(1.0).fill(Color::WHITE.alpha(0.06));
     let mut thread = col().key("thread").w_full().gap(14.0).px(14.0).py(14.0).growth(GrowthSpec::default());
     for (i, m) in s.messages.iter().enumerate() {
@@ -765,6 +883,7 @@ pub fn panel<S: 'static>(s: &Chat, key: &str, lens: fn(&mut S) -> &mut Chat, inp
     }
     let field = text_input(&s.draft, TextStyle::new(14.0, 400.0).lh(20.0))
         .key("draft")
+        .label("Message")
         .w_full()
         .color(t.text)
         .caret(t.text, ACCENT.alpha(0.35))
@@ -803,35 +922,7 @@ pub fn panel<S: 'static>(s: &Chat, key: &str, lens: fn(&mut S) -> &mut Chat, inp
         composer = composer.child(chips);
     }
     let composer = composer.child(typing);
-    let [.., w, h] = side_rect(s.screen, s.insets);
-    let [top, right] = side_pins(s.insets);
-    // At its landed size from the start, pinned to the panel's top left: the panel reveals it as
-    // it grows. Hidden while the input's panel reshapes, then faded in.
-    let content = col()
-        .key("chat-layer")
-        .size(w, h)
-        .pin(Some(0.0), Some(0.0), None, None)
-        .opacity(if s.landed { 1.0 } else { 0.0 })
-        .opacity_motion(Anim::new(Curve::ease_in_out(CONTENT_FADE)))
-        .child(header)
-        .child(divider())
-        .child(messages)
-        .child(el().w_full().padding(10.0).child(composer));
-    let layers = match input_row {
-        Some(row) => vec![content, row.opacity(0.0).opacity_motion(Anim::new(Curve::ease_in_out(ROW_FADE)))],
-        None => vec![content],
-    };
-    quick_input::surface(key, s.open, layers)
-        .size(w, h)
-        // By its right edge: told the wrong screen (none yet at launch, or another display's),
-        // closed it still waits past the window's edge, never on screen.
-        .pin(None, Some(top), Some(right), None)
-        .offset(offset(s.open, s.insets), 0.0)
-        .offset_motion(Anim::from(GLIDE))
-        // The input's panel arrives pressed in (sending) and springs back to full size.
-        .scale(1.0)
-        .scale_motion(Anim::from(GLIDE))
-        .motion(GLIDE)
+    col().child(header).child(divider()).child(messages).child(el().w_full().padding(10.0).child(composer))
 }
 
 /// Keys in the window with the chat's field focused and nothing else taking them.
@@ -974,6 +1065,84 @@ pub(crate) mod tests {
 
     fn texts(r: &Reply) -> String {
         r.parts.iter().filter_map(|p| if let reply::Part::Text(t) = p { Some(t.as_str()) } else { None }).collect()
+    }
+
+    #[test]
+    fn in_its_window_it_stays_open_esc_leaves_it_and_cmd_n_clears_it_at_once() {
+        let mut c = Chat::new(None);
+        let id = sent(&mut c, "hi");
+        let token = c.ask(id).unwrap();
+        c.set_windowed(true);
+        assert!(c.windowed() && c.is_open() && c.landed() && c.draft_focused());
+        let esc = KeyEvent { key: Key::Escape, mods: rune::Mods::default() };
+        c.stop(Instant::now());
+        assert!(!c.field_key(&esc), "Esc doesn't close a window");
+        c.attach(1, vec![1], tiny());
+        c.draft = TextEdit::new("draft");
+        c.clear();
+        assert!(c.messages.is_empty() && c.replies.is_empty() && c.shots.is_empty() && c.draft.text.is_empty());
+        c.reply_event(token, Event::Text("stale".into()), Instant::now());
+        assert!(c.replies.is_empty());
+        c.set_windowed(false);
+        assert!(!c.windowed() && !c.is_open(), "back in the side panel, closed: it slides in");
+        let id = sent(&mut c, "side");
+        c.ask(id);
+        c.stop(Instant::now());
+        assert!(c.field_key(&esc), "Esc closes the side panel");
+    }
+
+    #[test]
+    fn a_message_typed_after_one_from_the_input_gets_an_id_of_its_own() {
+        let mut c = Chat::new(None);
+        c.push(Message { id: 0, text: "from the input".into(), images: Vec::new() });
+        let typed = sent(&mut c, "typed");
+        c.push(Message { id: 1, text: "from the input again".into(), images: Vec::new() });
+        let again = sent(&mut c, "typed again");
+        let ids: Vec<u64> = c.messages.iter().map(|m| m.id).collect();
+        assert!(again != typed && again != 0 && again != 1, "{ids:?}");
+    }
+
+    #[test]
+    fn moved_between_the_panel_and_its_window_it_starts_at_the_latest() {
+        let mut c = Chat::new(None);
+        c.away = true;
+        c.set_windowed(true);
+        assert!(!c.away, "no stuck jump-to-latest button in the window");
+        c.away = true;
+        c.set_windowed(false);
+        assert!(!c.away, "nor back in the side panel");
+    }
+
+    #[test]
+    fn docked_back_empty_it_offers_the_input_not_an_empty_panel() {
+        assert_eq!(on_dock(true), Toggle::ShowChat);
+        assert_eq!(on_dock(false), Toggle::ShowInput, "cleared with Cmd+N in its window");
+    }
+
+    #[test]
+    fn esc_while_a_reply_streams_stops_it_and_only_the_next_closes_the_side_panel() {
+        let esc = KeyEvent { key: Key::Escape, mods: rune::Mods::default() };
+        let mut c = Chat::new(None);
+        c.open();
+        let id = sent(&mut c, "hi");
+        c.ask(id);
+        assert!(c.streaming());
+        assert!(c.field_key(&esc));
+        assert!(!c.streaming() && c.is_open(), "stopped, still open");
+        assert!(c.field_key(&esc), "the next asks the host to slide it out");
+        let mut w = Chat::new(None);
+        let id = sent(&mut w, "hi");
+        w.ask(id);
+        w.set_windowed(true);
+        assert!(w.field_key(&esc) && !w.streaming() && w.is_open(), "stopped in the window");
+        assert!(!w.field_key(&esc) && w.is_open(), "the window stays");
+    }
+
+    #[test]
+    fn windowed_the_inputs_shortcut_opens_and_closes_the_input_only() {
+        assert_eq!(toggle(false, true, false, true), Toggle::ShowInput);
+        assert_eq!(toggle(true, true, false, true), Toggle::HideInput);
+        assert_eq!(toggle(false, true, false, false), Toggle::ShowChat, "in the side panel, as before");
     }
 
     #[test]
@@ -1179,11 +1348,11 @@ pub(crate) mod tests {
 
     #[test]
     fn the_input_shortcut_brings_back_a_started_chat() {
-        assert_eq!(toggle(false, false, false), Toggle::ShowInput, "no chat yet");
-        assert_eq!(toggle(true, false, false), Toggle::HideInput);
-        assert_eq!(toggle(true, true, true), Toggle::HideInput, "an open input closes first");
-        assert_eq!(toggle(false, true, false), Toggle::ShowChat, "the chat instead of the input");
-        assert_eq!(toggle(false, true, true), Toggle::HideChat);
+        assert_eq!(toggle(false, false, false, false), Toggle::ShowInput, "no chat yet");
+        assert_eq!(toggle(true, false, false, false), Toggle::HideInput);
+        assert_eq!(toggle(true, true, true, false), Toggle::HideInput, "an open input closes first");
+        assert_eq!(toggle(false, true, false, false), Toggle::ShowChat, "the chat instead of the input");
+        assert_eq!(toggle(false, true, true, false), Toggle::HideChat);
     }
 
     #[test]
