@@ -125,15 +125,15 @@ impl CaptureShortcut {
             None => None,
         };
         let mut current = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(old) = *current {
-            if let Err(e) = host.unregister_shortcut(old) {
-                // Keep tracking the old one rather than lose its id; release the new one instead.
-                eprintln!("Ailfred: releasing the old shortcut failed: {e}");
-                if let Some(new) = new {
-                    let _ = host.unregister_shortcut(new);
-                }
-                return Err(e);
+        if let Some(old) = *current
+            && let Err(e) = host.unregister_shortcut(old)
+        {
+            // Keep tracking the old one rather than lose its id; release the new one instead.
+            eprintln!("Ailfred: releasing the old shortcut failed: {e}");
+            if let Some(new) = new {
+                let _ = host.unregister_shortcut(new);
             }
+            return Err(e);
         }
         *current = new;
         Ok(())

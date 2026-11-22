@@ -248,7 +248,8 @@ mod tests {
         }
         pixelate(&mut px, 4, 2, [0, 0, 2, 2], 2);
         assert_eq!(&px[0..4], &[127, 127, 127, 255]);
-        assert_eq!(&px[(1 * 4 + 1) * 4..(1 * 4 + 1) * 4 + 4], &[127, 127, 127, 255]);
+        let p11 = (4 + 1) * 4; // pixel (1, 1) of the 4-wide image
+        assert_eq!(&px[p11..p11 + 4], &[127, 127, 127, 255]);
         assert_eq!(&px[2 * 4..2 * 4 + 4], &[255, 0, 0, 255], "outside the rect untouched");
     }
 

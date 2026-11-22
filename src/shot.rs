@@ -104,10 +104,10 @@ impl Edit {
 
     fn undo(&mut self) {
         // Undo drops text being typed; an empty caret just goes, and the undo reaches the last mark.
-        if let Some((_, typed)) = self.typing.take() {
-            if !typed.trim().is_empty() {
-                return;
-            }
+        if let Some((_, typed)) = self.typing.take()
+            && !typed.trim().is_empty()
+        {
+            return;
         }
         self.marks.pop();
         self.previews.pop();
