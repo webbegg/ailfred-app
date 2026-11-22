@@ -36,6 +36,13 @@ fn some(s: &str) -> Option<String> {
     Some(s.to_owned())
 }
 
+#[test]
+fn claude_lets_go_of_a_run_that_ended_so_a_stop_kills_nothing() {
+    let mut claude = Claude { run: Some(Run::new()) };
+    claude.finished();
+    assert!(claude.run.is_none());
+}
+
 // The choice of backend.
 
 #[test]

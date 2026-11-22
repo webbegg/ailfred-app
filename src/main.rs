@@ -619,10 +619,13 @@ impl Host {
         self.model(is_pi).send(request, sink);
     }
 
-    /// pi (started the first time it's asked for) or Claude.
+    /// pi (started the first time it's asked for, and again after it failed to) or Claude.
     fn model(&mut self, pi: bool) -> &mut dyn model::Model {
         if !pi {
             return &mut self.claude;
+        }
+        if self.pi.as_ref().is_some_and(pi_setup::Pi::failed) {
+            self.pi = None;
         }
         self.pi.get_or_insert_with(|| {
             let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
@@ -643,6 +646,9 @@ impl Host {
         match item {
             model::Item::Session(session) => self.with_chat(move |c, _| c.set_session(token, session)),
             model::Item::Event(event) => {
+                if matches!(event, reply::Event::Done | reply::Event::Fail(_)) {
+                    self.claude.finished();
+                }
                 self.with_chat(move |c, tx| {
                     c.reply_event(token, event, std::time::Instant::now());
                     tx.animated();

@@ -226,6 +226,8 @@ impl Core {
             sink(Event::Fail(STOPPED.into()));
         }
         self.down = true;
+        // The pi that comes back starts a session of its own.
+        self.renew = false;
         self.busy = false;
         self.aborting = false;
         self.dialog = None;
@@ -626,6 +628,21 @@ mod tests {
         core.stop();
         feed(&mut core, &[SETTLED]);
         assert!(core.send(prompt("plain"), sink)[0].get("images").is_none(), "none without shots");
+    }
+
+    #[test]
+    fn a_new_conversation_asked_as_pi_crashed_isnt_started_twice() {
+        let mut core = Core::default();
+        let (sink, _rx) = channel();
+        core.send(prompt("hi"), sink);
+        feed(&mut core, &[STARTED]);
+        core.new_conversation();
+        // pi goes before settling; the one that comes back starts afresh anyway.
+        core.exited();
+        core.started();
+        let (sink, _rx) = channel();
+        core.send(prompt("first of the new one"), sink);
+        assert!(feed(&mut core, &[STARTED, SETTLED]).is_empty(), "no stale new_session");
     }
 
     #[test]

@@ -131,16 +131,38 @@ pub fn start(pi: &Path, data: &Path, real_home: &Path) -> io::Result<crate::pi::
     crate::pi::PiEngine::supervised(move || command(&pi, &layout, &real_home, &path, std::env::vars_os()), crate::pi::SHUTDOWN_GRACE)
 }
 
-/// Ailfred's pi as a [`Model`](crate::model::Model): started (off the main thread) when it's
-/// first picked; a message before it's up fails with a note.
+/// Ailfred's pi as a [`Model`](crate::model::Model): started off the main thread; a message
+/// sent meanwhile waits for it.
 pub struct Pi {
     state: Arc<Mutex<PiState>>,
 }
 
 enum PiState {
-    Starting,
+    /// With the message waiting for it, if any.
+    Starting(Option<(crate::pi::Prompt, crate::pi::Sink)>),
     Up(crate::pi::PiEngine),
     Failed(String),
+}
+
+impl PiState {
+    /// Up, or failed to start: the message waiting goes to pi, or fails.
+    fn became(&mut self, started: Result<crate::pi::PiEngine, String>) {
+        let waiting = match self {
+            PiState::Starting(waiting) => waiting.take(),
+            _ => None,
+        };
+        *self = match started {
+            Ok(engine) => PiState::Up(engine),
+            Err(e) => PiState::Failed(format!("pi couldn't start: {e}")),
+        };
+        if let Some((prompt, sink)) = waiting {
+            match self {
+                PiState::Up(engine) => engine.send(prompt, sink),
+                PiState::Failed(why) => sink(crate::reply::Event::Fail(why.clone())),
+                PiState::Starting(_) => {}
+            }
+        }
+    }
 }
 
 impl Pi {
@@ -149,23 +171,30 @@ impl Pi {
         let Some(pi) = pi else {
             return Pi::with(PiState::Failed("pi isn't installed (~/.pi/agent/bin/pi, or set AILFRED_PI).".into()));
         };
-        let state = Arc::new(Mutex::new(PiState::Starting));
-        let up = state.clone();
+        let pi_ = Pi::with(PiState::Starting(None));
+        let state = pi_.state.clone();
         std::thread::spawn(move || {
-            let now = match start(&pi, &data, &real_home) {
-                Ok(engine) => PiState::Up(engine),
-                Err(e) => {
-                    eprintln!("Ailfred: pi couldn't start: {e}");
-                    PiState::Failed(format!("pi couldn't start: {e}"))
-                }
-            };
-            *up.lock().unwrap_or_else(|e| e.into_inner()) = now;
+            let started = start(&pi, &data, &real_home).map_err(|e| {
+                eprintln!("Ailfred: pi couldn't start: {e}");
+                e.to_string()
+            });
+            state.lock().unwrap_or_else(|e| e.into_inner()).became(started);
         });
-        Pi { state }
+        pi_
     }
 
     fn with(state: PiState) -> Pi {
         Pi { state: Arc::new(Mutex::new(state)) }
+    }
+
+    #[cfg(test)]
+    fn became(&mut self, started: Result<crate::pi::PiEngine, String>) {
+        self.state.lock().unwrap().became(started);
+    }
+
+    /// It couldn't start: the host starts it again for the next message.
+    pub fn failed(&self) -> bool {
+        matches!(*self.state.lock().unwrap_or_else(|e| e.into_inner()), PiState::Failed(_))
     }
 }
 
@@ -173,19 +202,20 @@ impl crate::model::Model for Pi {
     fn send(&mut self, request: crate::model::Request, sink: crate::model::Sink) {
         use crate::model::Item;
         use crate::reply::Event;
+        let prompt = crate::pi::Prompt { text: request.text, pngs: request.pngs, answer: request.answer };
+        let sink: crate::pi::Sink = Arc::new(move |event| sink(Item::Event(event)));
         match &mut *self.state.lock().unwrap_or_else(|e| e.into_inner()) {
-            PiState::Up(engine) => {
-                let prompt = crate::pi::Prompt { text: request.text, pngs: request.pngs, answer: request.answer };
-                engine.send(prompt, Arc::new(move |event| sink(Item::Event(event))));
-            }
-            PiState::Starting => sink(Item::Event(Event::Fail("pi is starting. Try again in a moment.".into()))),
-            PiState::Failed(why) => sink(Item::Event(Event::Fail(why.clone()))),
+            PiState::Up(engine) => engine.send(prompt, sink),
+            PiState::Starting(waiting) => *waiting = Some((prompt, sink)),
+            PiState::Failed(why) => sink(Event::Fail(why.clone())),
         }
     }
 
     fn stop(&mut self) {
-        if let PiState::Up(engine) = &mut *self.state.lock().unwrap_or_else(|e| e.into_inner()) {
-            engine.stop();
+        match &mut *self.state.lock().unwrap_or_else(|e| e.into_inner()) {
+            PiState::Up(engine) => engine.stop(),
+            PiState::Starting(waiting) => *waiting = None,
+            PiState::Failed(_) => {}
         }
     }
 
@@ -362,20 +392,57 @@ mod tests {
     }
 
     #[test]
-    fn until_pi_is_up_a_message_fails_with_why() {
+    fn without_pi_a_message_fails_with_why() {
         use crate::model::{Item, Model};
-        let request = crate::model::Request { model: crate::model::PI.into(), history: Vec::new(), text: "hi".into(), pngs: Vec::new(), session: None, answer: false };
-        for (mut pi, why) in [
-            (Pi::with(PiState::Starting), "pi is starting. Try again in a moment."),
-            (Pi::start(None, PathBuf::new(), PathBuf::new()), "pi isn't installed (~/.pi/agent/bin/pi, or set AILFRED_PI)."),
-        ] {
-            let (tx, rx) = std::sync::mpsc::channel();
-            let tx = Mutex::new(tx);
-            pi.send(request.clone(), Arc::new(move |item| drop(tx.lock().unwrap().send(item))));
+        let mut pi = Pi::start(None, PathBuf::new(), PathBuf::new());
+        let why = "pi isn't installed (~/.pi/agent/bin/pi, or set AILFRED_PI).";
+        {
+            let (s, rx) = sink();
+            pi.send(pi_request("hi"), s);
             assert_eq!(rx.try_recv(), Ok(Item::Event(crate::reply::Event::Fail(why.into()))));
             pi.stop();
             pi.new_conversation();
         }
+    }
+
+    fn sink() -> (crate::model::Sink, std::sync::mpsc::Receiver<crate::model::Item>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let tx = Mutex::new(tx);
+        (Arc::new(move |item| drop(tx.lock().unwrap().send(item))), rx)
+    }
+
+    fn pi_request(text: &str) -> crate::model::Request {
+        crate::model::Request { model: crate::model::PI.into(), history: Vec::new(), text: text.into(), pngs: Vec::new(), session: None, answer: false }
+    }
+
+    #[test]
+    fn a_message_sent_while_pi_starts_goes_to_it_once_its_up() {
+        use crate::model::{Item, Model};
+        use crate::reply::Event;
+        let mut pi = Pi::with(PiState::Starting(None));
+        let (s, rx) = sink();
+        pi.send(pi_request("hi"), s);
+        assert!(rx.try_recv().is_err(), "it waits");
+        let reply = r#"{"type":"response","command":"prompt","success":true,"data":{"disposition":"started"}}"#;
+        let delta = r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"Up"}}"#;
+        let mut fake = Command::new("/bin/sh");
+        fake.arg("-c").arg(format!("read line; printf '%s\\n' '{reply}' '{delta}' '{{\"type\":\"agent_settled\"}}'; cat > /dev/null"));
+        pi.became(crate::pi::PiEngine::spawn(fake).map_err(|e| e.to_string()));
+        assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)), Ok(Item::Event(Event::Text("Up".into()))));
+
+        // Stopped while it starts: nothing goes; failing to start fails the one waiting.
+        let mut pi = Pi::with(PiState::Starting(None));
+        let (s, rx) = sink();
+        pi.send(pi_request("never"), s);
+        pi.stop();
+        pi.became(Err("no node".into()));
+        assert!(rx.try_recv().is_err());
+        let mut pi = Pi::with(PiState::Starting(None));
+        let (s, rx) = sink();
+        pi.send(pi_request("hi"), s);
+        pi.became(Err("no node".into()));
+        assert_eq!(rx.try_recv(), Ok(Item::Event(Event::Fail("pi couldn't start: no node".into()))));
+        assert!(pi.failed(), "so the host starts it again at the next message");
     }
 
     #[test]

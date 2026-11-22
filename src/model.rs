@@ -145,6 +145,13 @@ pub struct Claude {
     run: Option<Run>,
 }
 
+impl Claude {
+    /// The reply ended: its run is over, so a later Stop has nothing to end.
+    pub fn finished(&mut self) {
+        self.run = None;
+    }
+}
+
 impl Model for Claude {
     fn send(&mut self, request: Request, sink: Sink) {
         self.stop();
