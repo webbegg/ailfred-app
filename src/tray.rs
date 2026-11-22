@@ -152,14 +152,14 @@ impl Tray {
 /// 22 pt), so it shows at 22 pt.
 const SIZE: usize = 36;
 
-/// A template icon: the quick input's sparkle, black with alpha; macOS tints it.
+/// A template icon: the app's mark, black with alpha; macOS tints it.
 fn icon() -> Result<Icon, String> {
     Icon::from_rgba(icon_rgba(), SIZE as u32, SIZE as u32).map_err(|e| e.to_string())
 }
 
 /// The icon's pixels, RGBA.
 fn icon_rgba() -> Vec<u8> {
-    rune::text::icon_coverage(&rune_kit::glyphs::SPARKLE, SIZE as u32).into_iter().flat_map(|a| [0, 0, 0, a]).collect()
+    rune::text::icon_coverage(&crate::app_icon::MENU_BAR_MARK, SIZE as u32).into_iter().flat_map(|a| [0, 0, 0, a]).collect()
 }
 
 #[cfg(test)]
@@ -167,13 +167,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_menu_bar_icon_is_the_inputs_sparkle() {
+    fn the_menu_bar_icon_is_the_apps_mark() {
         let rgba = icon_rgba();
-        let want = rune::text::icon_coverage(&rune_kit::glyphs::SPARKLE, SIZE as u32);
+        let want = rune::text::icon_coverage(&crate::app_icon::MENU_BAR_MARK, SIZE as u32);
+        let whole = rune::text::icon_coverage(&crate::app_icon::MARK, SIZE as u32);
+        let ink = |c: &[u8]| c.iter().map(|&a| u32::from(a)).sum::<u32>();
+        let ratio = ink(&want) as f32 / ink(&whole) as f32;
+        assert!((0.55..0.75).contains(&ratio), "the mark at about 80% (64% of its ink): {ratio}");
         assert_eq!(rgba.len(), SIZE * SIZE * 4);
         assert!(rgba.chunks_exact(4).all(|p| p[..3] == [0, 0, 0]), "black: a template icon");
         let alpha: Vec<u8> = rgba.chunks_exact(4).map(|p| p[3]).collect();
         assert_eq!(alpha, want);
         assert!(want.iter().map(|&a| u32::from(a)).sum::<u32>() > 2000, "it has ink");
+    }
+
+    #[test]
+    fn the_menu_bar_mark_keeps_a_margin_like_the_other_menu_bar_icons() {
+        let rgba = icon_rgba();
+        let edge = 4;
+        for y in 0..SIZE {
+            for x in 0..SIZE {
+                let inside = (edge..SIZE - edge).contains(&x) && (edge..SIZE - edge).contains(&y);
+                if !inside {
+                    assert_eq!(rgba[(y * SIZE + x) * 4 + 3], 0, "ink at ({x}, {y}), within {edge} px of the edge");
+                }
+            }
+        }
     }
 }

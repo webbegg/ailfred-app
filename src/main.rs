@@ -9,6 +9,7 @@
 
 mod app_env;
 mod capture;
+mod app_icon;
 mod chat;
 mod chat_place;
 mod chat_window;
@@ -838,6 +839,23 @@ impl Drop for Busy {
 }
 
 fn main() {
+    // `--app-icon <out.png>`: writes the app's icon, 1024 px, for the bundle's `.icns`
+    // (scripts/install-mac), and exits.
+    let args: Vec<String> = std::env::args().collect();
+    if let [_, flag, out] = args.as_slice()
+        && flag == "--app-icon"
+    {
+        if let Err(e) = std::fs::write(out, app_icon::png(1024)) {
+            eprintln!("Capibarapp: writing the icon to {out} failed: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    // The Dock's and app switcher's icon while the chat's window shows one (a dev build has no
+    // bundle to take it from).
+    if let Err(e) = rune::set_app_icon(app_icon::png(512)) {
+        eprintln!("Capibarapp: {e}");
+    }
     let installed = app_env::in_bundle();
     if installed {
         app_env::log_to_file();
