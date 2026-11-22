@@ -24,8 +24,11 @@ const FOLDER: &str = "folder";
 const IGNORE_REDUCE_MOTION: &str = "ignore_reduce_motion";
 const MODEL: &str = "model";
 
+/// Whether the views animate even under the system's Reduce Motion, until set (also before the
+/// settings are read).
+const IGNORE_REDUCE_MOTION_DEFAULT: bool = false;
 /// Whether the views animate even under the system's Reduce Motion, as last set (any thread).
-static IGNORE_REDUCE_MOTION_NOW: AtomicBool = AtomicBool::new(true);
+static IGNORE_REDUCE_MOTION_NOW: AtomicBool = AtomicBool::new(IGNORE_REDUCE_MOTION_DEFAULT);
 
 /// The model as last set, read when a message is sent (any thread).
 static MODEL_NOW: RwLock<Option<String>> = RwLock::new(None);
@@ -114,9 +117,9 @@ pub fn model_now() -> String {
 }
 
 impl Settings {
-    /// Show every animation even with Reduce Motion on in the system: on until turned off.
+    /// Show every animation even with Reduce Motion on in the system: off until turned on.
     pub fn ignore_reduce_motion(&self) -> bool {
-        self.prefs.get::<bool>(IGNORE_REDUCE_MOTION).unwrap_or(true)
+        self.prefs.get::<bool>(IGNORE_REDUCE_MOTION).unwrap_or(IGNORE_REDUCE_MOTION_DEFAULT)
     }
 
     pub fn set_ignore_reduce_motion(&mut self, ignore: bool) {
@@ -218,16 +221,17 @@ mod tests {
     }
 
     #[test]
-    fn animations_ignore_reduce_motion_until_turned_off() {
+    fn animations_follow_reduce_motion_until_told_to_ignore_it() {
         let mut s = Settings::with(Prefs::memory());
-        assert!(s.ignore_reduce_motion(), "on by default");
-        s.set_ignore_reduce_motion(false);
-        assert!(!s.ignore_reduce_motion());
-        assert!(!ignore_reduce_motion_now(), "the views see it at once");
+        assert!(!s.ignore_reduce_motion(), "off by default: the system's Reduce Motion is respected");
         s.set_ignore_reduce_motion(true);
         assert!(s.ignore_reduce_motion());
-        assert!(ignore_reduce_motion_now());
+        assert!(ignore_reduce_motion_now(), "the views see it at once");
+        s.set_ignore_reduce_motion(false);
+        assert!(!s.ignore_reduce_motion());
+        assert!(!ignore_reduce_motion_now());
     }
+
 
     #[test]
     fn the_settings_live_under_ailfreds_id() {
