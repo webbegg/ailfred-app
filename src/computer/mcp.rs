@@ -822,15 +822,8 @@ impl Helper {
             Tool::Key { combo } => {
                 let (target, recipient) = self.keyboard_target(false)?;
                 let focus = self.desktop.focused_element();
-                let act = if combo.is_return() {
-                    Act::Return(focus.as_ref())
-                } else if combo.is_space() {
-                    Act::Space(focus.as_ref())
-                } else {
-                    Act::Other
-                };
                 let action = format!("Press {}", combo.label());
-                self.confirm_if_risky(assess(act, intent), &action, &target)?;
+                self.confirm_if_risky(assess(Act::Key(combo, focus.as_ref()), intent), &action, &target)?;
                 // Reading the focus or a confirmation can change the app in front: the key goes only
                 // to the recipient approved above, as each typed chunk does.
                 let (_, current) = self.keyboard_target(false)?;

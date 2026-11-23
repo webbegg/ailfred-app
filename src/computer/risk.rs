@@ -1,6 +1,8 @@
 //! Which actions need a native per-action confirmation. A declared intent only adds
 //! checks: an action is risky when the target is risky or the intent is.
 
+use super::keys::KeyCombo;
+
 /// Words that make an action risky, in English and Spanish. `place order` is a phrase.
 const RISKY: &[&str] = &[
     "send", "pay", "buy", "purchase", "delete", "remove", "submit", "confirm", "transfer", "place order",
@@ -42,12 +44,12 @@ pub enum Act<'a> {
     Click(&'a [AxElement]),
     /// A drag: the chains under the start point and under the end point.
     Drag(&'a [AxElement], &'a [AxElement]),
-    /// Return (or Enter), from `key`.
-    Return(Option<&'a Focus>),
     /// Space, from `key`: it presses a focused button.
     Space(Option<&'a Focus>),
     /// Text from `type`: a newline presses Return and a space presses a focused button.
     Type(&'a str, Option<&'a Focus>),
+    /// A combo from `key`, with what has the focus.
+    Key(KeyCombo, Option<&'a Focus>),
     /// Every other action: only the intent can make it risky.
     Other,
 }
@@ -134,6 +136,52 @@ fn risky_space(focus: &Focus) -> Option<String> {
     None
 }
 
+/// Roles that tell nothing about what is there: an app without an Accessibility tree (Chrome or
+/// Electron often) answers with its window, its app, or nothing at all.
+const UNREADABLE_ROLES: &[&str] = &["", "AXUnknown", "AXWindow", "AXApplication"];
+
+fn unreadable(chain: &[AxElement]) -> bool {
+    chain.iter().all(|e| UNREADABLE_ROLES.contains(&e.role.as_str()))
+}
+
+/// A click's chain that tells nothing could be a Send or Buy button: it asks.
+fn checked_click(chain: &[AxElement]) -> Option<String> {
+    if unreadable(chain) {
+        return Some("the missing Accessibility details of what is under the point (it may be a Send or Buy button)".into());
+    }
+    risky_click(chain)
+}
+
+/// The focus, unless it tells nothing.
+fn readable(focus: Option<&Focus>) -> Option<&Focus> {
+    focus.filter(|f| !unreadable(std::slice::from_ref(&f.element)))
+}
+
+fn unread_focus(what: &str) -> String {
+    format!("the missing Accessibility details of what has the focus ({what})")
+}
+
+fn checked_return(focus: Option<&Focus>) -> Option<String> {
+    readable(focus).map_or_else(|| Some(unread_focus("Return may send it")), risky_return)
+}
+
+/// Shortcuts that delete, quit, log out, lock or send, whatever has the focus. ⌘⌫ in a text
+/// field only deletes to the line's start.
+fn risky_shortcut(combo: KeyCombo, focus: Option<&Focus>) -> Option<String> {
+    let m = combo.modifiers;
+    let in_field = readable(focus).is_some_and(|f| TEXT_INPUT_ROLES.contains(&f.element.role.as_str()));
+    let does = match combo.key {
+        "delete" | "forwarddelete" if m.cmd && !in_field => "deletes what is selected (files, messages)",
+        "q" if m.cmd && m.shift => "logs out",
+        "q" if m.cmd && m.ctrl => "locks the screen",
+        "q" if m.cmd => "quits the app",
+        "d" if m.cmd && m.shift => "sends the message in Mail",
+        "return" if m.cmd || m.ctrl || m.alt => "often sends or submits",
+        _ => return None,
+    };
+    Some(format!("the shortcut {}, which {does}", combo.label()))
+}
+
 fn risky_typing(text: &str, focus: &Focus) -> Option<String> {
     let newline = text.contains('\n').then(|| risky_return(focus)).flatten();
     newline.or_else(|| text.contains(' ').then(|| risky_space(focus)).flatten())
@@ -142,14 +190,25 @@ fn risky_typing(text: &str, focus: &Focus) -> Option<String> {
 /// Why `act` needs a confirmation, or `None` when it does not.
 pub fn assess(act: Act<'_>, intent: Option<&str>) -> Option<String> {
     let target = match act {
-        Act::Click(chain) => risky_click(chain),
-        Act::Drag(from, to) => match (risky_click(from), risky_click(to)) {
+        Act::Click(chain) => checked_click(chain),
+        Act::Drag(from, to) => match (checked_click(from), checked_click(to)) {
             (Some(from), Some(to)) if from != to => Some(format!("{from} and {to}")),
             (from, to) => from.or(to),
         },
-        Act::Return(focus) => focus.and_then(risky_return),
-        Act::Space(focus) => focus.and_then(risky_space),
-        Act::Type(text, focus) => focus.and_then(|focus| risky_typing(text, focus)),
+        Act::Space(focus) => readable(focus).map_or_else(|| Some(unread_focus("Space may press it")), risky_space),
+        Act::Type(text, focus) => match readable(focus) {
+            Some(focus) => risky_typing(text, focus),
+            None => text.contains('\n').then(|| unread_focus("a typed Return may send it")),
+        },
+        Act::Key(combo, focus) => risky_shortcut(combo, focus).or_else(|| {
+            if combo.is_return() {
+                checked_return(focus)
+            } else if combo.is_space() {
+                assess(Act::Space(focus), None)
+            } else {
+                None
+            }
+        }),
         Act::Other => None,
     };
     let intent = intent.filter(|i| risky_word(i).is_some()).map(|i| format!("the declared intent “{}”", i.trim()));
@@ -210,26 +269,36 @@ mod tests {
         // A risky word outside a button (plain text, a text field) is not a press.
         assert_eq!(assess(Act::Click(&[element("AXStaticText", "Send")]), None), None);
         assert_eq!(assess(Act::Click(&[element("AXTextField", "Delete")]), None), None);
-        assert_eq!(assess(Act::Click(&[]), None), None);
+        // Readable, but nothing pressable in it: a page's plain area.
+        assert_eq!(assess(Act::Click(&[element("AXGroup", ""), element("AXWebArea", "Inbox")]), None), None);
+    }
+
+    #[test]
+    fn a_click_where_the_app_tells_nothing_is_risky() {
+        // Chrome or Electron without an Accessibility tree: nothing, or only the window.
+        let unreadable = assess(Act::Click(&[]), None).expect("nothing under the point");
+        assert!(unreadable.contains("Accessibility"), "{unreadable}");
+        assert!(assess(Act::Click(&[element("AXWindow", "Slack"), element("AXApplication", "Slack")]), None).is_some());
+        assert!(assess(Act::Click(&[element("AXUnknown", "")]), None).is_some());
     }
 
     #[test]
     fn return_on_a_default_button_is_risky() {
         let default = Focus { element: element("AXButton", "OK"), is_default_button: true, default_button: None };
-        assert!(assess(Act::Return(Some(&default)), None).is_some());
+        assert!(assess(Act::Key(key("return"), Some(&default)), None).is_some());
     }
 
     #[test]
     fn return_on_a_focused_risky_button_is_risky() {
-        assert!(assess(Act::Return(Some(&focus(element("AXButton", "Transfer")))), None).is_some());
+        assert!(assess(Act::Key(key("return"), Some(&focus(element("AXButton", "Transfer")))), None).is_some());
     }
 
     #[test]
     fn return_in_a_send_like_field_is_risky() {
         let composer = AxElement { role: "AXTextArea".into(), description: Some("Message #general".into()), ..AxElement::default() };
-        assert!(assess(Act::Return(Some(&focus(composer))), None).is_some());
+        assert!(assess(Act::Key(key("return"), Some(&focus(composer))), None).is_some());
         let spanish = AxElement { role: "AXTextField".into(), title: Some("Escribe un mensaje".into()), ..AxElement::default() };
-        assert!(assess(Act::Return(Some(&focus(spanish))), None).is_some());
+        assert!(assess(Act::Key(key("return"), Some(&focus(spanish))), None).is_some());
     }
 
     #[test]
@@ -239,7 +308,7 @@ mod tests {
             is_default_button: false,
             default_button: Some(element("AXButton", "Pay")),
         };
-        assert!(assess(Act::Return(Some(&field)), None).is_some());
+        assert!(assess(Act::Key(key("return"), Some(&field)), None).is_some());
     }
 
     #[test]
@@ -249,8 +318,47 @@ mod tests {
             is_default_button: false,
             default_button: Some(element("AXButton", "Done")),
         };
-        assert_eq!(assess(Act::Return(Some(&search)), None), None);
-        assert_eq!(assess(Act::Return(None), None), None);
+        assert_eq!(assess(Act::Key(key("return"), Some(&search)), None), None);
+    }
+
+    #[test]
+    fn return_space_or_a_typed_newline_where_the_focus_tells_nothing_is_risky() {
+        let window = focus(element("AXWindow", "Slack"));
+        for focus in [None, Some(&window)] {
+            assert!(assess(Act::Key(key("return"), focus), None).is_some(), "{focus:?}");
+            assert!(assess(Act::Space(focus), None).is_some(), "{focus:?}");
+            assert!(assess(Act::Type("hi\n", focus), None).is_some(), "{focus:?}");
+            // Without a newline, typing presses nothing.
+            assert_eq!(assess(Act::Type("a b", focus), None), None, "{focus:?}");
+        }
+    }
+
+    fn key(combo: &str) -> crate::computer::keys::KeyCombo {
+        crate::computer::keys::parse_combo(combo).unwrap()
+    }
+
+    #[test]
+    fn shortcuts_that_delete_quit_log_out_lock_or_send_are_risky() {
+        let list = focus(element("AXRow", "Report.pdf"));
+        for combo in ["cmd+backspace", "cmd+shift+delete", "alt+cmd+backspace", "cmd+forwarddelete", "cmd+q", "shift+cmd+q", "alt+shift+cmd+q", "ctrl+cmd+q", "cmd+shift+d", "cmd+return", "ctrl+enter"] {
+            let reason = assess(Act::Key(key(combo), Some(&list)), None);
+            assert!(reason.as_deref().is_some_and(|r| r.contains(&key(combo).label())), "{combo}: {reason:?}");
+        }
+    }
+
+    #[test]
+    fn ordinary_shortcuts_and_deleting_text_in_a_field_are_not() {
+        let list = focus(element("AXRow", "Report.pdf"));
+        for combo in ["cmd+c", "cmd+v", "cmd+t", "cmd+w", "tab", "escape", "down", "backspace", "cmd+shift+t"] {
+            assert_eq!(assess(Act::Key(key(combo), Some(&list)), None), None, "{combo}");
+        }
+        // ⌘⌫ in a field deletes to the line's start.
+        let field = focus(element("AXTextField", "Search"));
+        assert_eq!(assess(Act::Key(key("cmd+backspace"), Some(&field)), None), None);
+        // Plain Return and Space keep their own checks.
+        assert_eq!(assess(Act::Key(key("return"), Some(&field)), None), None);
+        assert!(assess(Act::Key(key("return"), None), None).is_some());
+        assert!(assess(Act::Key(key("space"), Some(&focus(element("AXButton", "Send")))), None).is_some());
     }
 
     #[test]
@@ -260,7 +368,8 @@ mod tests {
         assert!(assess(Act::Drag(&send, &send), None).is_some());
         assert!(assess(Act::Drag(&send, &open), None).is_some());
         assert!(assess(Act::Drag(&open, &send), None).is_some());
-        assert_eq!(assess(Act::Drag(&open, &[]), None), None);
+        assert_eq!(assess(Act::Drag(&open, &open), None), None);
+        assert!(assess(Act::Drag(&open, &[]), None).is_some(), "an end that tells nothing");
     }
 
     #[test]
@@ -280,7 +389,6 @@ mod tests {
             default_button: Some(element("AXButton", "Send")),
         };
         assert_eq!(assess(Act::Space(Some(&composer)), None), None);
-        assert_eq!(assess(Act::Space(None), None), None);
     }
 
     #[test]
@@ -291,7 +399,6 @@ mod tests {
         let composer = focus(element("AXTextArea", "Message"));
         assert_eq!(assess(Act::Type("hello there", Some(&composer)), None), None);
         assert!(assess(Act::Type("hello\n", Some(&composer)), None).is_some());
-        assert_eq!(assess(Act::Type("a b\n", None), None), None);
     }
 
     #[test]
