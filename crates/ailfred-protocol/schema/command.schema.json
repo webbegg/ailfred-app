@@ -1,0 +1,542 @@
+{
+  "$defs": {
+    "CallKind": {
+      "description": "A tool call's kind: always `function`.",
+      "enum": [
+        "function"
+      ],
+      "type": "string"
+    },
+    "Content": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "items": {
+            "$ref": "#/$defs/ContentPart"
+          },
+          "type": "array"
+        }
+      ],
+      "description": "A message's body: plain text, or parts (text and media) in order."
+    },
+    "ContentPart": {
+      "description": "One part of a message's body, tagged by `type`.",
+      "oneOf": [
+        {
+          "properties": {
+            "text": {
+              "type": "string"
+            },
+            "type": {
+              "const": "text",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "text"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/PartSource"
+            },
+            "type": {
+              "const": "image",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "source"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/PartSource"
+            },
+            "type": {
+              "const": "audio",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "source"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/PartSource"
+            },
+            "type": {
+              "const": "video",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "source"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "source": {
+              "$ref": "#/$defs/PartSource"
+            },
+            "type": {
+              "const": "document",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "source"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Context": {
+      "description": "A named piece of what's around the conversation, for the agent.",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "description",
+        "value"
+      ],
+      "type": "object"
+    },
+    "FunctionCall": {
+      "properties": {
+        "arguments": {
+          "description": "As a JSON string.",
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "arguments"
+      ],
+      "type": "object"
+    },
+    "Message": {
+      "description": "A message of the conversation, tagged by `role`.",
+      "oneOf": [
+        {
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "role": {
+              "const": "developer",
+              "type": "string"
+            }
+          },
+          "required": [
+            "role",
+            "id",
+            "content"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "role": {
+              "const": "system",
+              "type": "string"
+            }
+          },
+          "required": [
+            "role",
+            "id",
+            "content"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "role": {
+              "const": "assistant",
+              "type": "string"
+            },
+            "toolCalls": {
+              "items": {
+                "$ref": "#/$defs/ToolCall"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "role",
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "content": {
+              "$ref": "#/$defs/Content"
+            },
+            "id": {
+              "type": "string"
+            },
+            "name": {
+              "type": "string"
+            },
+            "role": {
+              "const": "user",
+              "type": "string"
+            }
+          },
+          "required": [
+            "role",
+            "id",
+            "content"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "content": {
+              "$ref": "#/$defs/Content"
+            },
+            "error": {
+              "description": "Why the tool failed, beside what it returned.",
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "role": {
+              "const": "tool",
+              "type": "string"
+            },
+            "toolCallId": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "role",
+            "id",
+            "content",
+            "toolCallId"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "activityType": {
+              "type": "string"
+            },
+            "content": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "id": {
+              "type": "string"
+            },
+            "role": {
+              "const": "activity",
+              "type": "string"
+            }
+          },
+          "required": [
+            "role",
+            "id",
+            "activityType",
+            "content"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "content": {
+              "type": "string"
+            },
+            "id": {
+              "type": "string"
+            },
+            "role": {
+              "const": "reasoning",
+              "type": "string"
+            }
+          },
+          "required": [
+            "role",
+            "id",
+            "content"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "PartSource": {
+      "description": "Where a media part's bytes come from, tagged by `type`.",
+      "oneOf": [
+        {
+          "description": "The bytes themselves, base64.",
+          "properties": {
+            "mimeType": {
+              "type": "string"
+            },
+            "type": {
+              "const": "data",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value",
+            "mimeType"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "mimeType": {
+              "type": "string"
+            },
+            "type": {
+              "const": "url",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A handle a model provider issued.",
+          "properties": {
+            "mimeType": {
+              "type": "string"
+            },
+            "provider": {
+              "type": "string"
+            },
+            "type": {
+              "const": "file",
+              "type": "string"
+            },
+            "value": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "value"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "Resume": {
+      "description": "An answer to one [`Interrupt`] (the schema's `ResumeEntry`).",
+      "properties": {
+        "interruptId": {
+          "type": "string"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "payload": {
+          "description": "The answer itself (Ailfred's: `{\"answer\": \"…\"}`)."
+        },
+        "status": {
+          "$ref": "#/$defs/ResumeStatus"
+        }
+      },
+      "required": [
+        "interruptId",
+        "status"
+      ],
+      "type": "object"
+    },
+    "ResumeStatus": {
+      "enum": [
+        "resolved",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "RunAgentInput": {
+      "description": "What starts a run: the conversation, and the answers to the last run's questions.",
+      "properties": {
+        "context": {
+          "items": {
+            "$ref": "#/$defs/Context"
+          },
+          "type": "array"
+        },
+        "forwardedProps": true,
+        "messages": {
+          "items": {
+            "$ref": "#/$defs/Message"
+          },
+          "type": "array"
+        },
+        "parentRunId": {
+          "type": "string"
+        },
+        "protocolVersion": {
+          "type": "string"
+        },
+        "resume": {
+          "items": {
+            "$ref": "#/$defs/Resume"
+          },
+          "type": "array"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "state": true,
+        "threadId": {
+          "type": "string"
+        },
+        "tools": {
+          "items": {
+            "$ref": "#/$defs/Tool"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "threadId",
+        "runId",
+        "messages"
+      ],
+      "type": "object"
+    },
+    "Tool": {
+      "description": "A tool the client offers the agent.",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parameters": {
+          "description": "A JSON Schema of its arguments."
+        }
+      },
+      "required": [
+        "name",
+        "description"
+      ],
+      "type": "object"
+    },
+    "ToolCall": {
+      "description": "A call an assistant message made.",
+      "properties": {
+        "function": {
+          "$ref": "#/$defs/FunctionCall"
+        },
+        "id": {
+          "type": "string"
+        },
+        "type": {
+          "$ref": "#/$defs/CallKind"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "function"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "allOf": [
+        {
+          "$ref": "#/$defs/RunAgentInput"
+        },
+        {
+          "properties": {
+            "type": {
+              "const": "run",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        }
+      ],
+      "description": "The user sends something: a new message (a steer, if a run goes: the core decides), or\nthe answers to the last run's questions in `resume`. Its `messages` are the whole\nconversation so far, as AG-UI requires, the replies included as assistant messages."
+    },
+    {
+      "description": "The user stops the run going.",
+      "properties": {
+        "runId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "type": {
+          "const": "stop",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "threadId",
+        "runId"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "Command"
+}

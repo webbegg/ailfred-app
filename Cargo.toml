@@ -3,9 +3,10 @@ name = "ailfred"
 version = "0.1.0"
 edition = "2024"
 
-# The app at the root; its engine and conversation model, without UI, in crates/ailfred-core.
+# The app at the root; its engine and conversation model, without UI, in crates/ailfred-core;
+# the wire protocol its clients speak (AG-UI events), in crates/ailfred-protocol.
 [workspace]
-members = ["crates/ailfred-core"]
+members = ["crates/ailfred-core", "crates/ailfred-protocol"]
 resolver = "3"
 
 [dependencies]

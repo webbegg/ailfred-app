@@ -1,0 +1,13 @@
+{"type":"RUN_STARTED","threadId":"thread-1","runId":"run-answer","protocolVersion":"1.0","timestamp":1767225600000}
+{"type":"REASONING_START","messageId":"run-answer-reasoning-1","timestamp":1767225600000}
+{"type":"REASONING_MESSAGE_START","messageId":"run-answer-thinking-1","role":"reasoning","timestamp":1767225600000}
+{"type":"REASONING_MESSAGE_CONTENT","messageId":"run-answer-thinking-1","delta":"The user wants ","timestamp":1767225600100}
+{"type":"REASONING_MESSAGE_CONTENT","messageId":"run-answer-thinking-1","delta":"a greeting.","timestamp":1767225600150}
+{"type":"REASONING_MESSAGE_END","messageId":"run-answer-thinking-1","timestamp":1767225600400}
+{"type":"REASONING_END","messageId":"run-answer-reasoning-1","timestamp":1767225600400}
+{"type":"TEXT_MESSAGE_START","messageId":"run-answer-text-1","role":"assistant","timestamp":1767225600400}
+{"type":"TEXT_MESSAGE_CONTENT","messageId":"run-answer-text-1","delta":"Hello","timestamp":1767225600400}
+{"type":"TEXT_MESSAGE_CONTENT","messageId":"run-answer-text-1","delta":", ","timestamp":1767225600450}
+{"type":"TEXT_MESSAGE_CONTENT","messageId":"run-answer-text-1","delta":"**world**.","timestamp":1767225600500}
+{"type":"TEXT_MESSAGE_END","messageId":"run-answer-text-1","timestamp":1767225600600}
+{"type":"RUN_FINISHED","threadId":"thread-1","runId":"run-answer","outcome":{"type":"success"},"timestamp":1767225600600}
