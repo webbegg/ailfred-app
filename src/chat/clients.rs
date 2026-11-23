@@ -1,4 +1,5 @@
-//! The chat and the apps watching it through the local server (`crate::server`): what happens
+//! The chat and the apps watching it through the local server (`crate::server`) or the web
+//! view (`crate::web_view`, the same hub in the app's process): what happens
 //! here reaches its hub (a new conversation, a reply starting, its events, Stop), and what a
 //! client sends comes in as if typed here.
 //!
@@ -12,19 +13,59 @@ use std::time::Instant;
 
 use ailfred_protocol::agui::{self, Resume, ResumeStatus};
 use ailfred_protocol::command::{Command, Unsaid, user_said};
+use ailfred_protocol::saved;
 use ailfred_protocol::snapshot::{self, Turn};
 use serde_json::{Value, json};
 
 use super::{Chat, Message};
 use crate::history;
 use crate::reply::{Part, State};
-use crate::server::{Answer, Feed, Frame, now_ms};
+use crate::server::{Answer, Feed, Frame, Sink, now_ms};
 
 impl Chat {
-    /// The local server's hub (None: it stopped). Set, it gets the conversation as it is.
+    /// The local server's hub (None: it stopped). Set, it gets the conversation as it is: its
+    /// snapshot, then the replies going (and queued) as runs, each caught up with what came so
+    /// far, so a client joining gets them from their `RUN_STARTED` and live to their end.
     pub fn set_feed(&mut self, feed: Option<Feed>) {
         self.feed = feed;
         self.announce();
+        self.catch_up();
+    }
+
+    /// The hub, new, learns the replies going and queued, in the order they were made: each a
+    /// run (named anew), the streaming ones fed their parts so far. A question among them gets
+    /// the live run's interrupt id too.
+    fn catch_up(&mut self) {
+        let Some(feed) = self.feed.clone() else { return };
+        let mut going: Vec<usize> = (0..self.replies.len()).filter(|&i| matches!(self.replies[i].state, State::Streaming | State::Queued)).collect();
+        going.sort_by_key(|&i| self.replies[i].token);
+        let start = now_ms();
+        for at in going {
+            let reply = &self.replies[at];
+            let (token, id) = (reply.token, reply.id);
+            let Some(message) = self.messages.iter().find(|m| m.id == id) else { continue };
+            let pngs: Vec<&[u8]> = message.pngs.iter().map(|p| p.as_slice()).collect();
+            feed.with(|hub| hub.reply(token, id, &message.text, &pngs, None));
+            if !reply.streaming() {
+                continue;
+            }
+            let events = saved::part_events(reply);
+            // Its parts came before now, in the order and spacing they came.
+            let since = start.saturating_sub(events.last().map_or(0, |(_, ms)| *ms));
+            let questions: Vec<usize> = reply.parts.iter().enumerate().filter(|(_, p)| matches!(p, Part::Question(_))).map(|(i, _)| i).collect();
+            let mut asked = questions.into_iter();
+            let mut sent: Vec<(String, usize)> = Vec::new();
+            for (event, ms) in events {
+                let question = matches!(event, crate::reply::Event::Ask { .. });
+                let ids = feed.with(|hub| hub.event(token, &event, since + ms));
+                if question && let Some(part) = asked.next() {
+                    sent.extend(ids.into_iter().map(|i| (i, part)));
+                }
+            }
+            for (interrupt, part) in sent {
+                self.asked.insert(interrupt, (token, part));
+            }
+        }
     }
 
     /// The conversation is a new one (or was loaded): the hub streams it from its snapshot.
@@ -104,6 +145,23 @@ impl Chat {
             let snapshot = self.messages_snapshot(&hub.live_messages());
             hub.join(watcher, &snapshot);
         });
+    }
+
+    /// The web view joins (again, after a reload): `sink` gets what [`Chat::join`] gives a
+    /// client, and replaces the sink it had. Nothing without a hub.
+    pub fn join_local(&self, sink: Sink) {
+        let Some(feed) = &self.feed else { return };
+        feed.with(|hub| {
+            let snapshot = self.messages_snapshot(&hub.live_messages());
+            hub.join_local(sink, &snapshot);
+        });
+    }
+
+    /// The web view closed: its sink leaves the hub.
+    pub fn leave_local(&self) {
+        if let Some(feed) = &self.feed {
+            feed.with(|hub| hub.leave_local());
+        }
     }
 
     /// A client's command, done as the window would do it; what to answer.

@@ -3,7 +3,8 @@ use std::sync::mpsc::Receiver;
 use ailfred_protocol::saved::OUTPUT_MAX;
 
 use super::super::hub::{Frame, Hub};
-use super::{PNG, empty, got, tag, watcher};
+use super::super::routes::STREAM_FRAMES;
+use super::{PNG, empty, got, local, tag, watcher};
 use crate::reply::{Event, Tool};
 
 /// A hub on thread `t`, watched.
@@ -183,6 +184,48 @@ fn every_frame_of_a_full_run_keeps_to_the_official_schema() {
     }
     // `got` holds every frame to the schema.
     assert_eq!(got(&rx).len(), 17);
+}
+
+#[test]
+fn the_web_view_is_never_dropped_however_much_comes_and_outlives_the_servers_streams() {
+    let (mut hub, rx) = watched();
+    let (sink, web) = local();
+    hub.join_local(sink, &empty());
+    assert_eq!(got(&web).iter().map(tag).collect::<Vec<_>>(), ["MESSAGES_SNAPSHOT "]);
+    hub.reply(1, 10, "a", &[], Some("ra".into()));
+    for n in 0..2 * STREAM_FRAMES {
+        hub.event(1, &text(&n.to_string()), n as u64);
+    }
+    assert_eq!(hub.watching(), 0, "the stream nobody read is dropped");
+    drop(rx);
+    assert_eq!(got(&web).len(), 2 + 2 * STREAM_FRAMES, "RUN_STARTED, TEXT_MESSAGE_START and every chunk");
+    hub.close();
+    hub.event(1, &Event::Done, 0);
+    assert_eq!(got(&web).iter().map(tag).collect::<Vec<_>>(), ["TEXT_MESSAGE_END ra", "RUN_FINISHED ra"], "the server stopping doesn't end it");
+    let (tx, late) = watcher();
+    hub.join(tx, &empty());
+    assert!(late.recv().is_err(), "closed, the server's clients don't join");
+    hub.reopen();
+    let (tx, again) = watcher();
+    hub.join(tx, &empty());
+    assert_eq!(got(&again).len(), 1, "started again, they do");
+}
+
+#[test]
+fn the_web_view_joining_again_replaces_its_sink_and_leaving_ends_it() {
+    let (mut hub, _rx) = watched();
+    let (sink, old) = local();
+    hub.join_local(sink, &empty());
+    hub.reply(1, 10, "a", &[], Some("ra".into()));
+    hub.event(1, &text("A"), 1);
+    let (sink, new) = local();
+    hub.join_local(sink, &empty());
+    assert_eq!(old.try_iter().count(), 4, "the snapshot, then the run's three");
+    assert!(matches!(old.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected)), "the old sink is gone");
+    assert_eq!(got(&new).iter().map(tag).collect::<Vec<_>>(), ["MESSAGES_SNAPSHOT ", "RUN_STARTED ra", "TEXT_MESSAGE_START ra", "TEXT_MESSAGE_CONTENT ra"]);
+    hub.leave_local();
+    assert!(!hub.local_watching());
+    assert!(new.recv().is_err(), "left, its sink is gone");
 }
 
 #[test]

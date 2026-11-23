@@ -100,5 +100,9 @@ The switch in Settings that lets apps on this Mac show and continue the conversa
 A **client** is such an app (`docs/local-server.md`).
 _Avoid_: API, daemon
 
+**Web view**:
+A window (menu: **Open Web View**) showing the conversation in the chat with the web page in `web/`, live, the server off or on (`docs/web-view.md`).
+_Avoid_: browser window, web client (in UI copy)
+
 **Host**:
 The windowless app at the root (`main.rs`) that owns every window, the tray and the shortcuts.

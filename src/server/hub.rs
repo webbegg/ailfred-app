@@ -9,7 +9,9 @@
 //! `RUN_STARTED`, then what comes.
 //!
 //! It never waits for a client: each has a bounded channel, and one whose channel is full (it
-//! reads too slowly) is dropped; it can join again.
+//! reads too slowly) is dropped; it can join again. The web view, in the app's own process,
+//! watches through a sink of its own instead, never dropped: it stays until it leaves, and the
+//! server stopping doesn't end it.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::SyncSender;
@@ -28,6 +30,9 @@ pub type Frame = String;
 
 /// The keep-alive comment a stream gets when nothing else came for a while.
 pub const PING: &str = ": ping\n\n";
+
+/// Where the web view's frames go, in order: it takes each at once, never waiting.
+pub type Sink = Box<dyn FnMut(Frame) + Send>;
 
 /// The hub, shared by the chat (main thread) and the server's streams.
 #[derive(Clone, Default)]
@@ -59,7 +64,9 @@ pub struct Hub {
     /// The next number a minted run id takes.
     minted: u64,
     watchers: Vec<SyncSender<Frame>>,
-    /// The server stopped: nobody joins any more.
+    /// The web view's sink, while it watches.
+    local: Option<Sink>,
+    /// The server stopped: none of its clients joins any more (the web view still may).
     closed: bool,
 }
 
@@ -216,6 +223,9 @@ impl Hub {
     /// unread, is dropped (its run goes on).
     fn broadcast(&mut self, frame: &str) {
         self.watchers.retain(|w| w.try_send(frame.to_owned()).is_ok());
+        if let Some(local) = &mut self.local {
+            local(frame.to_owned());
+        }
     }
 
     /// The messages whose runs aren't sent whole yet: a snapshot leaves them out.
@@ -234,13 +244,36 @@ impl Hub {
         if self.closed {
             return;
         }
+        if watcher.try_send(self.first(snapshot)).is_ok() {
+            self.watchers.push(watcher);
+        }
+    }
+
+    /// What a client joining gets first: `snapshot`, then the runs going from their start.
+    fn first(&self, snapshot: &agui::Event) -> Frame {
         let mut first = agui::sse(snapshot);
         for run in &self.runs {
             first.extend(run.frames[..run.sent].iter().map(String::as_str));
         }
-        if watcher.try_send(first).is_ok() {
-            self.watchers.push(watcher);
-        }
+        first
+    }
+
+    /// The web view joins (again, after a reload): `sink` gets what [`Hub::join`] gives a
+    /// client, and replaces the sink it had. The server stopped or not.
+    pub fn join_local(&mut self, mut sink: Sink, snapshot: &agui::Event) {
+        sink(self.first(snapshot));
+        self.local = Some(sink);
+    }
+
+    /// The web view closed: its sink goes.
+    pub fn leave_local(&mut self) {
+        self.local = None;
+    }
+
+    /// The web view watches.
+    #[cfg(test)]
+    pub fn local_watching(&self) -> bool {
+        self.local.is_some()
     }
 
     /// Run `run` hasn't ended.
@@ -255,10 +288,15 @@ impl Hub {
         self.watchers.len()
     }
 
-    /// The server stopped: every stream ends.
+    /// The server stopped: every stream ends (the web view's goes on).
     pub fn close(&mut self) {
         self.closed = true;
         self.watchers.clear();
+    }
+
+    /// The server started (again) on this hub, which the web view kept fed: clients join again.
+    pub fn reopen(&mut self) {
+        self.closed = false;
     }
 }
 

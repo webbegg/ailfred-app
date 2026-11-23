@@ -1,2 +1,5 @@
 /target
 /dist
+# The web view's page: its packages and its build (web/package-lock.json stays committed).
+/web/node_modules
+/web/dist

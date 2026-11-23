@@ -38,6 +38,8 @@ mod saving_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 mod view;
+#[cfg(test)]
+mod web_view_tests;
 
 pub use geometry::{Insets, insets, offset, side_pins, side_rect, thumb_size};
 pub use images::{Field, Image, Pasted, decode_pasted, decode_png, lightbox, paste_lands, pasted_images, take_ids};

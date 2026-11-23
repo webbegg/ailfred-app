@@ -26,8 +26,10 @@ use ailfred_protocol::command::Command;
 use rune::AppHandle;
 
 pub use http::{Running, forget, start};
-pub use hub::{Feed, Frame};
-pub use routes::{Answer, Core};
+pub use hub::{Feed, Frame, Sink};
+pub use routes::{Answer, Core, parse_command};
+#[cfg(test)]
+pub(crate) use routes::{COMMANDS, Gate, Head, Outcome, serve};
 
 use crate::Host;
 
@@ -57,6 +59,50 @@ pub fn switch(running: &mut Option<Running>, on: bool, start: impl FnOnce() -> s
             *running = Some(r);
         }
         Err(e) => eprintln!("Ailfred: the local server couldn't start: {e}"),
+    }
+}
+
+/// Who needs the chat to feed the hub: the local server, the web view, or both. The chat feeds
+/// one hub while either does, and stops once neither does (the next one is a fresh hub).
+#[derive(Default)]
+pub struct Feeding {
+    feed: Option<Feed>,
+    /// The chat was given `feed`.
+    fed: bool,
+}
+
+impl Feeding {
+    /// The hub, made if there's none yet: what the server starts on.
+    pub fn feed(&mut self) -> Feed {
+        self.feed.get_or_insert_with(Feed::default).clone()
+    }
+
+    /// The hub while it's fed.
+    #[cfg(test)]
+    pub fn fed(&self) -> Option<&Feed> {
+        self.feed.as_ref().filter(|_| self.fed)
+    }
+
+    /// Whether anything needs the hub now (the server runs, or the web view is open). Some: the
+    /// chat must be told (`Chat::set_feed`), with the hub or with none.
+    pub fn need(&mut self, wanted: bool) -> Option<Option<Feed>> {
+        match (wanted, self.fed) {
+            (true, false) => {
+                self.fed = true;
+                Some(Some(self.feed()))
+            }
+            (false, true) => {
+                self.fed = false;
+                self.feed = None;
+                Some(None)
+            }
+            // Made for a server that didn't start: nothing has it.
+            (false, false) => {
+                self.feed = None;
+                None
+            }
+            (true, true) => None,
+        }
     }
 }
 

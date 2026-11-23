@@ -35,6 +35,8 @@ own window) with Claude. Words used here and in the UI: see `CONTEXT.md`.
 - `server.rs` (with `src/server/`) is the local server, off until Settings turns it on: other
   apps watch and drive the chat's conversation over AG-UI on `127.0.0.1` (`docs/local-server.md`);
   the chat feeds its hub, its commands reach the chat through the `Host`.
+- `web_view.rs` (with `src/web_view/`) is the web view: a WKWebView window showing `web/`'s page, its
+  bridge on the server's hub and command checks in-process, no HTTP (`docs/web-view.md`).
 - `main.rs` holds the `Host`: the windowless app that owns the overlay, the quick input, the chat
   window, the tray and the shortcuts, and routes the chat between side panel and window.
 - macOS-only calls (`objc2-*`) stay in small modules (`capture.rs`, `login.rs`, `screens.rs`,

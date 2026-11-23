@@ -73,10 +73,31 @@ impl From<ReplayError> for SavedError {
 pub fn reply_events(reply: &Reply, thread_id: &str, run_id: &str) -> Vec<agui::Event> {
     let mut encoder = Encoder::new(thread_id, run_id);
     let mut out = Vec::new();
-    let mut at = 0u64;
-    let mut steps = 0u32;
     // The results carry the steps' output.
     let mut put = |event: Event, at: u64| out.extend(encoder.encode(&event, at).into_iter().filter(|e| !matches!(e, agui::Event::Custom { name, .. } if name == STEP_OUTPUT)));
+    let mut at = 0u64;
+    for (event, when) in part_events(reply) {
+        at = when;
+        put(event, at);
+    }
+    let error = reply.parts.iter().rev().find_map(|p| if let Part::Error(e) = p { Some(e.clone()) } else { None });
+    match reply.state {
+        State::Done => put(Event::Done, at),
+        State::Failed => put(Event::Fail(error.unwrap_or_default()), at),
+        State::Stopped if !reply.interrupted => out.extend(encoder.stop(at)),
+        State::Stopped | State::Streaming | State::Queued => put(Event::Lost(INTERRUPTED.into()), at),
+    }
+    out
+}
+
+/// The core events that built `reply`'s parts so far, in order, each with when it came (ms from
+/// the reply's start, a thinking ending `took` after it started): how it ended is left out.
+/// What [`reply_events`] encodes, and what a hub given a reply mid-stream catches up with.
+pub fn part_events(reply: &Reply) -> Vec<(Event, u64)> {
+    let mut out = Vec::new();
+    let mut at = 0u64;
+    let mut steps = 0u32;
+    let mut put = |event: Event, at: u64| out.push((event, at));
     for part in &reply.parts {
         match part {
             Part::Thinking(t) => {
@@ -107,13 +128,6 @@ pub fn reply_events(reply: &Reply, thread_id: &str, run_id: &str) -> Vec<agui::E
             // The run's end says it.
             Part::Error(_) => {}
         }
-    }
-    let error = reply.parts.iter().rev().find_map(|p| if let Part::Error(e) = p { Some(e.clone()) } else { None });
-    match reply.state {
-        State::Done => put(Event::Done, at),
-        State::Failed => put(Event::Fail(error.unwrap_or_default()), at),
-        State::Stopped if !reply.interrupted => out.extend(encoder.stop(at)),
-        State::Stopped | State::Streaming | State::Queued => put(Event::Lost(INTERRUPTED.into()), at),
     }
     out
 }

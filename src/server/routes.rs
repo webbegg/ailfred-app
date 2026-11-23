@@ -193,11 +193,18 @@ pub fn serve(admitted: Admitted, body: &mut dyn Read, core: &dyn Core) -> Outcom
     if body.take(MAX_BODY + 1).read_to_end(&mut bytes).is_err() {
         return Outcome::Answer(Answer::error(400, "the body couldn't be read"));
     }
+    Outcome::Answer(parse_command(&bytes).map_or_else(|refused| refused, |command| core.command(command)))
+}
+
+/// A command's body, checked as the chat can't: at most `MAX_BODY` (413), a `Command` (400), and
+/// its images whole PNGs of a size the app takes (400). The web view's bridge checks its
+/// commands with this too.
+pub fn parse_command(bytes: &[u8]) -> Result<Command, Answer> {
     if bytes.len() as u64 > MAX_BODY {
-        return Outcome::Answer(Answer::error(413, "the command is larger than 16 MiB"));
+        return Err(Answer::error(413, "the command is larger than 16 MiB"));
     }
-    match serde_json::from_slice::<Command>(&bytes) {
-        Ok(command) => Outcome::Answer(images_fit(&command).map_or_else(|refused| refused, |()| core.command(command))),
+    match serde_json::from_slice::<Command>(bytes) {
+        Ok(command) => images_fit(&command).map(|()| command),
         Err(e) => {
             let mut reason = format!("not a command: {e}");
             if reason.len() > REASON_MAX {
@@ -207,7 +214,7 @@ pub fn serve(admitted: Admitted, body: &mut dyn Read, core: &dyn Core) -> Outcom
                 }
                 reason.truncate(cut);
             }
-            Outcome::Answer(Answer::error(400, reason))
+            Err(Answer::error(400, reason))
         }
     }
 }

@@ -29,11 +29,17 @@ IDENTITY=${MAC_APP_SIGN:--}
 
 # Settings shows it (src/settings_ui.rs); cargo rebuilds when it changes.
 AILFRED_BUILD="$BUILD" cargo build --release --locked -p ailfred >&2
+# The web view's page: one self-contained web/dist/index.html (docs/web-view.md), always from a
+# clean install of the lockfile (never a stale or changed web/node_modules), no install scripts.
+npm --prefix web ci --ignore-scripts >&2
+npm --prefix web run build >&2
 
 APP="$TARGET/bundle/$NAME.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$TARGET/release/$EXE" "$APP/Contents/MacOS/$EXE"
+mkdir -p "$APP/Contents/Resources/web"
+cp web/dist/index.html "$APP/Contents/Resources/web/index.html"
 # The app's icon (Finder, Launchpad), drawn by the app itself at 1024 px, then scaled into an
 # iconset.
 ICONSET=$(mktemp -d)/AppIcon.iconset

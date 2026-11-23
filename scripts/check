@@ -6,6 +6,8 @@
 #   1. build everything (the app, the core, their tests and examples)
 #   2. clippy over Ailfred's own code, warnings as errors (Rune's warnings don't count)
 #   3. the tests, with settings in a scratch folder so they never touch a real one
+#   4. the web view's page (web/): type check, its tests, its build (`npm ci --ignore-scripts`
+#      first if web/node_modules is missing)
 # Usage: scripts/check [test name filter]
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -22,5 +24,9 @@ step "test"
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 RUNE_PREFS_DIR="$scratch" cargo test --workspace ${1:+"$1"}
+
+step "web"
+[ -d web/node_modules ] || npm --prefix web ci --ignore-scripts
+npm --prefix web run check
 
 printf '\nAll checks passed.\n'
