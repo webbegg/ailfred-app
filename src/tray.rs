@@ -3,7 +3,7 @@
 
 use rune::AppHandle;
 use tray_icon::menu::accelerator::{Accelerator, Code, Modifiers};
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
+use tray_icon::menu::{CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 use crate::Host;
@@ -25,10 +25,31 @@ pub enum Action {
     Quit,
     /// Ends computer control's session (shown only while one runs).
     StopComputer,
+    /// Opens the web view (or brings it to the front).
+    OpenWebView,
 }
 
+/// The menu's fixed items in order, `None` a separator (the permission row and "Stop
+/// Controlling the Mac" come and go at the top; Recent after "Quick Input").
+const MENU: [Option<Action>; 14] = [
+    Some(Action::Capture),
+    Some(Action::CaptureWindow),
+    Some(Action::CaptureFullScreen),
+    None,
+    Some(Action::QuickInput),
+    None,
+    Some(Action::OpenFolder),
+    None,
+    Some(Action::OpenWebView),
+    None,
+    Some(Action::ToggleLogin),
+    Some(Action::Settings),
+    None,
+    Some(Action::Quit),
+];
+
 impl Action {
-    const ALL: [(Action, &'static str); 10] = [
+    const ALL: [(Action, &'static str); 11] = [
         (Action::Capture, "capture"),
         (Action::CaptureWindow, "capture-window"),
         (Action::CaptureFullScreen, "capture-full-screen"),
@@ -39,6 +60,7 @@ impl Action {
         (Action::Settings, "settings"),
         (Action::Quit, "quit"),
         (Action::StopComputer, "stop-computer"),
+        (Action::OpenWebView, "web-view"),
     ];
     fn id(self) -> &'static str {
         Action::ALL.iter().find(|(a, _)| *a == self).map(|(_, id)| *id).unwrap_or("")
@@ -105,6 +127,7 @@ impl Tray {
         // Its chord too, once registered.
         let quick = MenuItem::with_id(Action::QuickInput.id(), "Quick Input", true, None);
         let folder = MenuItem::with_id(Action::OpenFolder.id(), "Open Screenshots Folder", true, None);
+        let web_view = MenuItem::with_id(Action::OpenWebView.id(), "Open Web View", true, None);
         let login = CheckMenuItem::with_id(Action::ToggleLogin.id(), "Launch at Login", can_login, login_enabled, None);
         let permission = MenuItem::with_id(
             Action::OpenPermissionSettings.id(),
@@ -114,22 +137,28 @@ impl Tray {
         );
         let settings = MenuItem::with_id(Action::Settings.id(), "Settings…", true, Some(Accelerator::new(Modifiers::META, Code::Comma)));
         let quit = MenuItem::with_id(Action::Quit.id(), "Quit Ailfred", true, Some(Accelerator::new(Modifiers::META, Code::KeyQ)));
+        let separators: Vec<PredefinedMenuItem> = MENU.iter().filter(|slot| slot.is_none()).map(|_| PredefinedMenuItem::separator()).collect();
+        let mut separator = separators.iter();
+        let mut items: Vec<&dyn IsMenuItem> = Vec::new();
+        for slot in MENU {
+            let item: &dyn IsMenuItem = match slot {
+                None => separator.next().ok_or("a separator too few")?,
+                Some(Action::Capture) => &capture,
+                Some(Action::CaptureWindow) => &window,
+                Some(Action::CaptureFullScreen) => &full,
+                Some(Action::QuickInput) => &quick,
+                Some(Action::OpenFolder) => &folder,
+                Some(Action::OpenWebView) => &web_view,
+                Some(Action::ToggleLogin) => &login,
+                Some(Action::Settings) => &settings,
+                Some(Action::Quit) => &quit,
+                // Inserted at the top while they apply.
+                Some(Action::OpenPermissionSettings | Action::StopComputer) => continue,
+            };
+            items.push(item);
+        }
         let menu = Menu::new();
-        menu.append_items(&[
-            &capture,
-            &window,
-            &full,
-            &PredefinedMenuItem::separator(),
-            &quick,
-            &PredefinedMenuItem::separator(),
-            &folder,
-            &PredefinedMenuItem::separator(),
-            &login,
-            &settings,
-            &PredefinedMenuItem::separator(),
-            &quit,
-        ])
-        .map_err(|e| e.to_string())?;
+        menu.append_items(&items).map_err(|e| e.to_string())?;
 
         let icon = TrayIconBuilder::new()
             .with_icon_templated(icon()?)
@@ -385,6 +414,18 @@ mod tests {
         assert_eq!(Pick::from_id("recent"), None, "the submenu itself picks nothing");
         assert_eq!(Pick::from_id("nope"), None);
         assert_eq!(Pick::from_id("stop-computer"), Some(Pick::Action(Action::StopComputer)));
+    }
+
+    #[test]
+    fn the_menu_opens_the_web_view_just_above_launch_at_login_and_settings() {
+        assert_eq!(Pick::from_id("web-view"), Some(Pick::Action(Action::OpenWebView)));
+        let at = |a: Action| MENU.iter().position(|i| *i == Some(a)).unwrap();
+        let web = at(Action::OpenWebView);
+        assert_eq!((MENU[web - 1], MENU[web + 1]), (None, None), "a group of its own");
+        assert_eq!((at(Action::ToggleLogin), at(Action::Settings)), (web + 2, web + 3), "just above");
+        for action in [Action::Capture, Action::QuickInput, Action::OpenFolder, Action::Quit] {
+            assert!(at(action) < MENU.len(), "{action:?} stays");
+        }
     }
 
     #[test]

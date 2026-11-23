@@ -1,4 +1,5 @@
-//! The chat and the apps watching it through the local server (`crate::server`): what happens
+//! The chat and the apps watching it through the local server (`crate::server`) or the web
+//! view (`crate::web_view`, the same hub in the app's process): what happens
 //! here reaches its hub (a new conversation, a reply starting, its events, Stop), and what a
 //! client sends comes in as if typed here.
 //!
@@ -18,7 +19,7 @@ use serde_json::{Value, json};
 use super::{Chat, Message};
 use crate::history;
 use crate::reply::{Part, State};
-use crate::server::{Answer, Feed, Frame, now_ms};
+use crate::server::{Answer, Feed, Frame, Sink, now_ms};
 
 impl Chat {
     /// The local server's hub (None: it stopped). Set, it gets the conversation as it is.
@@ -104,6 +105,23 @@ impl Chat {
             let snapshot = self.messages_snapshot(&hub.live_messages());
             hub.join(watcher, &snapshot);
         });
+    }
+
+    /// The web view joins (again, after a reload): `sink` gets what [`Chat::join`] gives a
+    /// client, and replaces the sink it had. Nothing without a hub.
+    pub fn join_local(&self, sink: Sink) {
+        let Some(feed) = &self.feed else { return };
+        feed.with(|hub| {
+            let snapshot = self.messages_snapshot(&hub.live_messages());
+            hub.join_local(sink, &snapshot);
+        });
+    }
+
+    /// The web view closed: its sink leaves the hub.
+    pub fn leave_local(&self) {
+        if let Some(feed) = &self.feed {
+            feed.with(|hub| hub.leave_local());
+        }
     }
 
     /// A client's command, done as the window would do it; what to answer.

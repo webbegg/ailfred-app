@@ -34,6 +34,12 @@ pub(crate) fn watcher() -> (SyncSender<Frame>, Receiver<Frame>) {
     sync_channel(STREAM_FRAMES)
 }
 
+/// The web view's sink, as the app makes it (unbounded, in the process), and what it got.
+pub(crate) fn local() -> (super::hub::Sink, Receiver<Frame>) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    (Box::new(move |frame| tx.send(frame).unwrap_or_default()), rx)
+}
+
 /// The events a watcher got so far, each checked: an SSE `data:` line, keeping to the official
 /// schema (a joining client's first frame holds several).
 pub(crate) fn got(frames: &Receiver<Frame>) -> Vec<Value> {

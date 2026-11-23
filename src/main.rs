@@ -33,6 +33,7 @@ mod settings_ui;
 mod shot;
 mod status;
 mod tray;
+mod web_view;
 
 // The engine and the conversation model, shared with other clients: `crate::reply` and the
 // rest read as before.
@@ -123,6 +124,12 @@ pub struct Host {
     /// The local server, while Settings' switch is on: apps on this Mac watch and continue
     /// the conversation.
     server: Option<server::Running>,
+    /// The hub the chat feeds while the server runs or the web view is open.
+    feeding: server::Feeding,
+    /// The web view's window, while it's open, and how many times its page joined (frames for
+    /// an earlier join, or an earlier window, are dropped).
+    web_view: Option<web_view::Window>,
+    web_view_joined: u64,
     /// pi started before computer control was last switched: its tools are out of date, so it
     /// starts again for the next message.
     pi_stale: bool,
@@ -130,6 +137,14 @@ pub struct Host {
 
 /// Something for the chat, wherever it is.
 type ChatUpdate = Box<dyn FnOnce(&mut Chat, &mut Tx) + Send>;
+
+/// Who sent the chat a command, and gets its answer.
+enum Asker {
+    /// A local server's client, if the server still waits for it.
+    Server(server::Ticket),
+    /// The web view's page, by the command's id.
+    WebView(String),
+}
 
 impl Host {
     /// The input's shortcut: a started chat comes back (or goes) instead of a new input.
@@ -953,12 +968,94 @@ impl Host {
     /// the chat feeds its hub; off, it stops (its streams end, its discovery file goes).
     pub fn set_local_server(&mut self, on: bool) {
         let Some(handle) = self.handle.clone() else { return };
-        let was = self.server.is_some();
-        server::switch(&mut self.server, on, || server::start(Arc::new(server::AppCore(handle)), server::Feed::default(), &history::app_dir_now()));
-        let feed = self.server.as_ref().map(|r| r.feed().clone());
-        if was != feed.is_some() {
+        let feeding = &mut self.feeding;
+        server::switch(&mut self.server, on, || server::start(Arc::new(server::AppCore(handle)), feeding.feed(), &history::app_dir_now()));
+        self.feed_chat();
+    }
+
+    /// The chat feeds the hub while the server runs or the web view is open, and only then.
+    fn feed_chat(&mut self) {
+        if let Some(feed) = self.feeding.need(self.server.is_some() || self.web_view.is_some()) {
             self.with_chat(move |c, _| c.set_feed(feed));
         }
+    }
+
+    /// The menu's "Open Web View": its window opens, and the chat feeds the hub for it; open
+    /// already, it comes to the front.
+    fn open_web_view(&mut self) {
+        if let Some(window) = &self.web_view {
+            window.focus();
+            return;
+        }
+        let Some(handle) = self.handle.clone() else { return };
+        let closed = handle.clone();
+        let window = web_view::Window::open(
+            &web_view::page(),
+            move |text| handle.update(move |host, _| host.web_view_message(text)),
+            move || closed.update(|host, _| host.web_view_closed()),
+        );
+        match window {
+            Some(window) => {
+                eprintln!("Ailfred: the web view opened");
+                self.web_view = Some(window);
+                self.feed_chat();
+            }
+            None => eprintln!("Ailfred: the web view couldn't open"),
+        }
+    }
+
+    /// What the web view's page posted.
+    fn web_view_message(&mut self, text: String) {
+        if self.web_view.is_none() {
+            return;
+        }
+        match web_view::parse(&text) {
+            Some(web_view::Message::Join) => {
+                let Some(handle) = self.handle.clone() else { return };
+                self.web_view_joined += 1;
+                let joined = self.web_view_joined;
+                // In order, on the main thread, never dropped: the page holds the whole
+                // conversation anyway.
+                let sink: server::Sink = Box::new(move |frame| {
+                    handle.update_if(move |host, _| {
+                        host.web_view_receive(joined, &frame);
+                        false
+                    })
+                });
+                self.with_chat(move |c, _| c.join_local(sink));
+            }
+            Some(web_view::Message::Command { id, command }) => self.chat_command(command, Asker::WebView(id)),
+            Some(web_view::Message::Open(url)) => web_view::open_url(&url),
+            None => {}
+        }
+    }
+
+    /// A frame of the hub's for the page, if it's for its latest join.
+    fn web_view_receive(&mut self, joined: u64, frame: &server::Frame) {
+        if joined != self.web_view_joined {
+            return;
+        }
+        if let (Some(window), Some(js)) = (&self.web_view, web_view::receive_js(frame)) {
+            window.eval(&js);
+        }
+    }
+
+    fn web_view_answer(&mut self, id: &str, answer: &server::Answer) {
+        if let Some(window) = &self.web_view {
+            window.eval(&web_view::answer_js(id, answer));
+        }
+    }
+
+    /// The web view's window closed: it's let go, and the chat stops feeding the hub unless
+    /// the server needs it.
+    fn web_view_closed(&mut self) {
+        if self.web_view.take().is_none() {
+            return;
+        }
+        eprintln!("Ailfred: the web view closed");
+        self.web_view_joined += 1;
+        self.with_chat(|c, _| c.leave_local());
+        self.feed_chat();
     }
 
     /// A client joins the local server's stream.
@@ -970,15 +1067,31 @@ impl Host {
     /// (`ticket`); its answer goes back on the ticket. A message sent so starts the
     /// conversation as one sent here does.
     pub fn serve_command(&mut self, command: ailfred_protocol::command::Command, ticket: server::Ticket) {
+        self.chat_command(Ok(command), Asker::Server(ticket));
+    }
+
+    /// A client's command (refused already: `Err`), done in the chat as `POST /v1/commands`
+    /// does it; its answer goes back to `asker`.
+    fn chat_command(&mut self, command: Result<ailfred_protocol::command::Command, server::Answer>, asker: Asker) {
         let handle = self.handle.clone();
-        let sends = matches!(command, ailfred_protocol::command::Command::Run(_));
+        let sends = matches!(command, Ok(ailfred_protocol::command::Command::Run(_)));
         self.with_chat(move |c, tx| {
-            if !ticket.take() {
+            if let Asker::Server(ticket) = &asker
+                && !ticket.take()
+            {
                 return;
             }
-            let answered = c.command(command, std::time::Instant::now());
+            let answered = web_view::run(c, command, std::time::Instant::now());
             let taken = answered.status == 202;
-            ticket.answer(answered);
+            match asker {
+                Asker::Server(ticket) => ticket.answer(answered),
+                // Answered from the host, once the chat is let go.
+                Asker::WebView(id) => {
+                    if let Some(handle) = &handle {
+                        handle.update(move |host, _| host.web_view_answer(&id, &answered));
+                    }
+                }
+            }
             if taken {
                 tx.scroll_to_bottom("messages");
                 tx.animated();
@@ -1027,6 +1140,7 @@ impl Host {
             Action::OpenFolder => open(&app_env::screenshots_dir()),
             Action::OpenPermissionSettings => open(app_env::SCREEN_RECORDING_SETTINGS),
             Action::StopComputer => self.stop_computer_control(computer::session::Reason::Stopped),
+            Action::OpenWebView => self.open_web_view(),
             Action::ToggleLogin => {
                 let (Some(handle), Some(tray)) = (self.handle.clone(), &self.tray) else { return };
                 // muda already flipped the checkmark: its new state is the request. The service
@@ -1119,6 +1233,9 @@ fn host_init() -> Host {
         computer: None,
         panic_shortcut: HotKey::computer_panic(),
         server: None,
+        feeding: server::Feeding::default(),
+        web_view: None,
+        web_view_joined: 0,
         pi_stale: false,
     }
 }
@@ -1347,6 +1464,9 @@ fn main() {
             computer: None,
             panic_shortcut: HotKey::computer_panic(),
             server: None,
+            feeding: server::Feeding::default(),
+            web_view: None,
+            web_view_joined: 0,
             pi_stale: false,
         });
         // Runs on the main thread at the loop's first turn: the status item needs a running NSApp,

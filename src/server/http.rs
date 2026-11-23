@@ -77,11 +77,6 @@ impl Running {
         &self.url
     }
 
-    /// The hub its streams watch.
-    pub fn feed(&self) -> &Feed {
-        &self.feed
-    }
-
     /// Stops it (dropping it does the same).
     pub fn stop(self) {}
 }
@@ -109,7 +104,8 @@ pub fn forget(dir: &Path) {
     }
 }
 
-/// Serves `core` on a fresh loopback port with a fresh token, its streams watching `feed`, and
+/// Serves `core` on a fresh loopback port with a fresh token, its streams watching `feed` (its
+/// clients join it again if a server stopped on it before), and
 /// writes where and with what key into `dir`/`server.json` (0600, its folder 0700).
 pub fn start(core: Arc<dyn Core>, feed: Feed, dir: &Path) -> io::Result<Running> {
     start_with(core, feed, dir, Limits::DEFAULT)
@@ -125,6 +121,8 @@ pub fn start_with(core: Arc<dyn Core>, feed: Feed, dir: &Path, limits: Limits) -
     history::ensure_private_dir(dir)?;
     let file = dir.join(FILE);
     history::write_atomic(&file, &discovery(&url, &token))?;
+    // The web view may have kept the hub fed since the server last stopped on it.
+    feed.with(|hub| hub.reopen());
     let stopped = Arc::new(AtomicBool::new(false));
     let server = Arc::new(Server { gate: Gate::new(port, token), core, stopped: stopped.clone(), limits, open: Arc::default() });
     match thread::Builder::new().name("local-server".into()).spawn(move || accept(&listener, &server)) {
