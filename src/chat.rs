@@ -27,6 +27,9 @@ use crate::reply_view;
 use crate::settings;
 use crate::quick_input::{self, ACCENT, Attached, Escape};
 
+mod clients;
+#[cfg(test)]
+mod clients_tests;
 mod geometry;
 mod images;
 mod saving;
@@ -37,9 +40,9 @@ pub(crate) mod tests;
 mod view;
 
 pub use geometry::{Insets, insets, offset, side_pins, side_rect, thumb_size};
-pub use images::{Field, Image, Pasted, decode_pasted, lightbox, paste_lands, pasted_images, take_ids};
+pub use images::{Field, Image, Pasted, decode_pasted, decode_png, lightbox, paste_lands, pasted_images, take_ids};
 #[cfg(test)]
-pub use images::{decode_png, image_file_png};
+pub use images::image_file_png;
 pub use view::{HEADER_HEIGHT, body, dock_button, header, on_key, panel};
 
 /// The panel's width and its gap to the screen's edges, in points. Its corners are the input's
@@ -173,6 +176,14 @@ pub struct Chat {
     running_model: String,
     /// The model picker's list shows.
     models_open: bool,
+    /// The local server's hub, while it's on: what happens here reaches the apps watching
+    /// (`clients`).
+    feed: Option<crate::server::Feed>,
+    /// The run id a client's command gave the message being sent: its reply's run takes it.
+    client_run: Option<String>,
+    /// The questions that went out, by the interrupt ids a client may answer them with: their
+    /// reply stream and part.
+    asked: HashMap<String, (u64, usize)>,
     /// The streams whose runs were cancelled (the host ends their processes), for tests.
     #[cfg(test)]
     cancelled: Vec<u64>,
@@ -191,7 +202,7 @@ pub struct Chat {
 
 impl Chat {
     pub fn new(host: Option<AppHandle<Host>>) -> Self {
-        Chat { messages: Vec::new(), hidden: 0, draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0, replies: Vec::new(), next_token: 0, others: HashMap::new(), kept: HashMap::new(), scratch: TextEdit::new(""), away: false, windowed: false, session: None, conv: history::Meta::fresh(), running_model: String::new(), models_open: false, #[cfg(test)] cancelled: Vec::new(), #[cfg(test)] saved: Vec::new(), #[cfg(test)] title_asks: Vec::new(), #[cfg(test)] model: None, #[cfg(test)] requests: Vec::new() }
+        Chat { messages: Vec::new(), hidden: 0, draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0, replies: Vec::new(), next_token: 0, others: HashMap::new(), kept: HashMap::new(), scratch: TextEdit::new(""), away: false, windowed: false, session: None, conv: history::Meta::fresh(), running_model: String::new(), models_open: false, feed: None, client_run: None, asked: HashMap::new(), #[cfg(test)] cancelled: Vec::new(), #[cfg(test)] saved: Vec::new(), #[cfg(test)] title_asks: Vec::new(), #[cfg(test)] model: None, #[cfg(test)] requests: Vec::new() }
     }
 
     pub fn is_open(&self) -> bool {
@@ -238,6 +249,7 @@ impl Chat {
         self.reset_conversation();
         (self.preview, self.over, self.away) = (None, false, false);
         self.draft.focused = true;
+        self.announce();
     }
 
     /// Its pop-out button: the host moves it into its own window.
@@ -450,6 +462,7 @@ impl Chat {
         let mut reply = Reply::new(id, prompt);
         (reply.token, reply.state, reply.steered) = (token, reply::State::Queued, steer);
         self.replace_reply(reply);
+        self.note_run(token, id);
         // Quitting now keeps it, interrupted.
         self.save();
         if steer && let Some(request) = self.request_for(id, &model) {
@@ -490,6 +503,7 @@ impl Chat {
         let mut reply = Reply::new(id, prompt);
         (reply.token, reply.answer) = (token, answer);
         self.replace_reply(reply);
+        self.note_run(token, id);
         // Saved as it starts: quitting now leaves it interrupted.
         self.save();
         match script {
@@ -510,9 +524,16 @@ impl Chat {
     /// The next event of the reply stream `token`; one stopped or replaced takes none. A reply
     /// ending lets the next queued one go, unless it asks the user something.
     pub fn reply_event(&mut self, token: u64, event: Event, now: Instant) {
-        let Some(reply) = self.reply_mut(token) else { return };
+        let Some(at) = self.replies.iter().position(|r| r.token == token) else { return };
+        let sent = self.note_event(token, &event);
+        let question = matches!(event, Event::Ask { .. });
+        let reply = &mut self.replies[at];
         let was = reply.live();
         reply.apply(event, now);
+        if question {
+            self.note_question(at, sent);
+        }
+        let reply = &self.replies[at];
         if was && !reply.live() {
             let asks = reply.asks();
             self.reply_ended(token);
@@ -570,6 +591,7 @@ impl Chat {
         for r in &mut self.replies {
             r.steered = false;
         }
+        self.note_stop(&tokens);
         #[cfg(test)]
         self.cancelled.extend(&tokens);
         if let Some(host) = &self.host {
@@ -648,8 +670,21 @@ impl Chat {
     /// gets its reply (its token). None if nothing is picked or written, or it doesn't take an
     /// answer (answered, or closed).
     pub fn answer(&mut self, token: u64, part: usize) -> Option<u64> {
-        let other = self.others.get(&(token, part)).map_or("", |e| e.text.as_str());
-        let text = self.replies.iter_mut().find(|r| r.token == token)?.answer(part, other)?;
+        let other = self.others.get(&(token, part)).map_or(String::new(), |e| e.text.clone());
+        self.answer_with(token, &[(part, other)])
+    }
+
+    /// The same for questions `answers` of reply `token` at once (each its part and what was
+    /// written for it; nothing written: the options picked): those that take an answer get it,
+    /// and the answers go as one message (blank lines between), which gets its reply. None if
+    /// none took one.
+    pub fn answer_with(&mut self, token: u64, answers: &[(usize, String)]) -> Option<u64> {
+        let reply = self.replies.iter_mut().find(|r| r.token == token)?;
+        let texts: Vec<String> = answers.iter().filter_map(|(part, other)| reply.answer(*part, other)).collect();
+        if texts.is_empty() {
+            return None;
+        }
+        let text = texts.join("\n\n");
         let id = self.next_id();
         self.push(Message::text(id, text.clone()));
         Some(self.start_reply(id, text, true))
@@ -664,6 +699,7 @@ impl Chat {
     pub fn push(&mut self, message: Message) {
         if std::mem::replace(&mut self.over, false) {
             self.reset_conversation();
+            self.announce();
         }
         self.messages.push(message);
         self.draft.focused = true;

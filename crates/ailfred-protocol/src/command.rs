@@ -1,15 +1,16 @@
 //! What a client sends the core. AG-UI starts runs with a [`RunAgentInput`] and has no way to
 //! stop one, so commands are Ailfred's own envelope around it, tagged by `type`. Retrying a
-//! reply, a new conversation and picking a model come with the server (T20).
+//! reply, a new conversation and picking a model aren't commands yet.
 //!
 //! A run's `messages` are the complete history, as AG-UI requires, built as a snapshot builds
 //! it ([`history`]): the same ids and shapes a `MESSAGES_SNAPSHOT` of those turns holds.
 //! [`send`] adds the new user message `{run}-user`; [`answer`] adds none, its answer going in
 //! `resume`. The core takes an answer as a new user message (the app's chat pushes the
 //! answer's text as the next message), so a later snapshot shows it as the `user` message of
-//! the answering run, `{run}-user`: that's how an answer command and a snapshot line up. Which
-//! messages win when a client's history and the core's differ, a partial resume, and
-//! `status: cancelled` are the server's to decide (T20).
+//! the answering run, `{run}-user`: that's how an answer command and a snapshot line up. The
+//! server (the app's `server`, `docs/local-server.md`) keeps its own history: a run's earlier
+//! messages aren't replayed, a partial resume answers the questions it names, and
+//! `status: cancelled` is refused for now.
 
 use ailfred_core::turn::base64;
 use schemars::JsonSchema;
@@ -17,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::agui::{Content, ContentPart, Message, PROTOCOL_VERSION, PartSource, Resume, ResumeStatus, RunAgentInput};
-use crate::snapshot::{Turn, history};
+use crate::snapshot::{Turn, history, unbase64};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
@@ -78,9 +79,61 @@ pub fn user_message(id: &str, text: &str, pngs: &[&[u8]]) -> Message {
     Message::User { id: id.into(), content, name: None }
 }
 
+/// Why a user message's content can't be taken.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Unsaid {
+    /// A part that isn't text or an inline PNG image (a URL, another type, not base64, or
+    /// audio, video or a document).
+    NotPng,
+    /// Neither text nor an image.
+    Empty,
+}
+
+/// What a user message's `content` says, as [`user_message`] wrote it: its text (its text
+/// parts', joined) and its images as PNG bytes.
+pub fn user_said(content: &Content) -> Result<(String, Vec<Vec<u8>>), Unsaid> {
+    const SIGNATURE: &[u8] = b"\x89PNG\r\n\x1a\n";
+    let (text, pngs) = match content {
+        Content::Text(text) => (text.clone(), Vec::new()),
+        Content::Parts(parts) => {
+            let (mut text, mut pngs) = (String::new(), Vec::new());
+            for part in parts {
+                match part {
+                    ContentPart::Text { text: t } => text.push_str(t),
+                    ContentPart::Image { source: PartSource::Data { value, mime_type } } if mime_type == "image/png" => {
+                        let png = unbase64(value).filter(|b| b.starts_with(SIGNATURE)).ok_or(Unsaid::NotPng)?;
+                        pngs.push(png);
+                    }
+                    _ => return Err(Unsaid::NotPng),
+                }
+            }
+            (text, pngs)
+        }
+    };
+    if text.trim().is_empty() && pngs.is_empty() {
+        return Err(Unsaid::Empty);
+    }
+    Ok((text, pngs))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_user_message_says_its_text_and_pngs_back_and_refuses_an_image_not_inline_png() {
+        let png: &[u8] = b"\x89PNG\r\n\x1a\nrest";
+        let Message::User { content, .. } = user_message("m", "look", &[png]) else { unreachable!() };
+        assert_eq!(user_said(&content), Ok(("look".into(), vec![png.to_vec()])));
+        assert_eq!(user_said(&Content::Text("hi".into())), Ok(("hi".into(), Vec::new())));
+        assert_eq!(user_said(&Content::Text("  ".into())), Err(Unsaid::Empty));
+        let url = Content::Parts(vec![ContentPart::Image { source: PartSource::Url { value: "http://x/a.png".into(), mime_type: None } }]);
+        assert_eq!(user_said(&url), Err(Unsaid::NotPng));
+        let jpeg = Content::Parts(vec![ContentPart::Image { source: PartSource::Data { value: base64(b"jpeg"), mime_type: "image/jpeg".into() } }]);
+        assert_eq!(user_said(&jpeg), Err(Unsaid::NotPng));
+        let not_png = Content::Parts(vec![ContentPart::Image { source: PartSource::Data { value: base64(b"text"), mime_type: "image/png".into() } }]);
+        assert_eq!(user_said(&not_png), Err(Unsaid::NotPng), "the bytes must be a PNG's");
+    }
 
     #[test]
     fn a_stop_names_its_thread_and_run_and_a_run_flattens_its_input() {

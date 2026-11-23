@@ -27,6 +27,7 @@ mod quick_input;
 mod reply_view;
 mod screens;
 mod link;
+mod server;
 mod settings;
 mod settings_ui;
 mod shot;
@@ -119,6 +120,9 @@ pub struct Host {
     /// chord, held while it's on.
     computer: Option<computer::Running>,
     panic_shortcut: HotKey,
+    /// The local server, while Settings' switch is on: apps on this Mac watch and continue
+    /// the conversation.
+    server: Option<server::Running>,
     /// pi started before computer control was last switched: its tools are out of date, so it
     /// starts again for the next message.
     pi_stale: bool,
@@ -941,6 +945,53 @@ impl Host {
         }
     }
 
+    /// Settings' local-server switch (and its saved state at launch): on, the server starts and
+    /// the chat feeds its hub; off, it stops (its streams end, its discovery file goes).
+    pub fn set_local_server(&mut self, on: bool) {
+        let Some(handle) = self.handle.clone() else { return };
+        let was = self.server.is_some();
+        server::switch(&mut self.server, on, || server::start(Arc::new(server::AppCore(handle)), server::Feed::default(), &history::app_dir_now()));
+        let feed = self.server.as_ref().map(|r| r.feed().clone());
+        if was != feed.is_some() {
+            self.with_chat(move |c, _| c.set_feed(feed));
+        }
+    }
+
+    /// A client joins the local server's stream.
+    pub fn join_server(&mut self, watcher: std::sync::mpsc::SyncSender<server::Frame>) {
+        self.with_chat(move |c, _| c.join(watcher));
+    }
+
+    /// A client's command, for the chat, applied only if the server still waits for it
+    /// (`ticket`); its answer goes back on the ticket. A message sent so starts the
+    /// conversation as one sent here does.
+    pub fn serve_command(&mut self, command: ailfred_protocol::command::Command, ticket: server::Ticket) {
+        let handle = self.handle.clone();
+        let sends = matches!(command, ailfred_protocol::command::Command::Run(_));
+        self.with_chat(move |c, tx| {
+            if !ticket.take() {
+                return;
+            }
+            let answered = c.command(command, std::time::Instant::now());
+            let taken = answered.status == 202;
+            ticket.answer(answered);
+            if taken {
+                tx.scroll_to_bottom("messages");
+                tx.animated();
+            }
+            if let (true, true, Some(handle)) = (taken, sends, handle) {
+                handle.update(|host, _| host.client_sent());
+            }
+        });
+    }
+
+    /// A client sent a message: the input's shortcut brings the conversation back.
+    fn client_sent(&mut self) {
+        if !self.place.windowed() {
+            self.chat_started = true;
+        }
+    }
+
     /// Stop (the menu) or the panic chord: the session ends, and what was queued drops.
     pub fn stop_computer_control(&mut self, reason: computer::session::Reason) {
         if let Some(running) = &self.computer {
@@ -998,6 +1049,8 @@ impl Host {
                 }
             }
             Action::Quit => {
+                // Its discovery file goes with it.
+                self.server = None;
                 // What's queued to be saved is written first (a moment at most).
                 if let Some(writer) = &self.writer {
                     writer.flush(Duration::from_secs(2));
@@ -1056,6 +1109,7 @@ fn host_init() -> Host {
         chat_window_open: false,
         computer: None,
         panic_shortcut: HotKey::computer_panic(),
+        server: None,
         pi_stale: false,
     }
 }
@@ -1199,6 +1253,10 @@ fn main() {
         );
         let settings = Settings::open(installed);
         let computer_control = settings.computer_control();
+        // A crash or a kill leaves the discovery file behind: no client should find a server
+        // that's gone, switched on or not.
+        server::forget(&history::app_dir_now());
+        let local_server = settings.local_server();
         let initial_shortcuts = Some((settings.shortcut(), settings.quick_shortcut()));
         let (capture_shortcut, quick_shortcut) = (HotKey::capture(), HotKey::quick_input());
         let ui = SettingsUi::new(settings, handle.clone(), capture_shortcut.clone(), quick_shortcut.clone());
@@ -1279,6 +1337,7 @@ fn main() {
             chat_window_open: false,
             computer: None,
             panic_shortcut: HotKey::computer_panic(),
+            server: None,
             pi_stale: false,
         });
         // Runs on the main thread at the loop's first turn: the status item needs a running NSApp,
@@ -1288,6 +1347,9 @@ fn main() {
             host.register_saved_shortcuts();
             if computer_control {
                 host.set_computer_control(true);
+            }
+            if local_server {
+                host.set_local_server(true);
             }
         });
         // Off the UI thread: both talk to system services.

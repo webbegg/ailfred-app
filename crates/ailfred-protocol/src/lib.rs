@@ -34,8 +34,9 @@
 //! [`command::send`] adds the new user message `{run}-user`, [`command::answer`] the reply that
 //! asked is the last of. The core takes an answer as a new user message (the app's chat pushes
 //! its text as the next message), so a later snapshot shows it as the answering run's `user`
-//! message `{run}-user`: that's how the two line up. Which messages win when a client's history
-//! and the core's differ, a partial resume, and `status: cancelled` are left to the server (T20).
+//! message `{run}-user`: that's how the two line up. The server keeps its own history (a run's
+//! earlier messages aren't replayed), a partial resume answers the questions it names, and
+//! `status: cancelled` is refused for now (`docs/local-server.md`).
 //!
 //! ## Saved replies and snapshots
 //!
@@ -65,15 +66,19 @@
 //! The tests fail when the fixtures or schemas differ from what the code makes; after a
 //! deliberate change, rewrite them with `UPDATE_FIXTURES=1 cargo test -p ailfred-protocol`.
 //!
-//! ## Limits, for the server (T20)
+//! ## Limits, and how the server (the app's `server`, T20) handles them
 //!
 //! - Steered replies overlap on pi: the next reply's `Taken` comes before the previous one's
-//!   `Done`. On one thread's stream runs must not interleave (a client's replayer refuses it),
-//!   so the server starts the next run after the previous one finished.
+//!   `Done`. On one thread's stream runs must not interleave (a client's replayer refuses it):
+//!   the server's hub holds a later run's events and sends them once the earlier run's
+//!   `RUN_FINISHED` or `RUN_ERROR` is out. Each `RUN_STARTED` carries the user message it
+//!   answers in `input` ([`Encoder::with_input`](encode::Encoder::with_input)).
 //! - Run ids must be unique within a thread, since every other id derives from them: the server
-//!   mints them, or refuses a `runId` already used.
-//! - Retry reuses a message's saved run id (the app's `history::run_id`), so the server must
-//!   mint a fresh run id per run.
+//!   mints them (`{thread}-{token}-{n}`) and refuses a client's `runId` already used (409).
+//! - Retry reuses a message's saved run id (the app's `history::run_id`): the server mints a
+//!   fresh run id per live run, so a snapshot's (saved) run ids differ from the live ones, and a
+//!   client replaces its state on each `MESSAGES_SNAPSHOT` rather than merging by id.
+//! - A step's live `TOOL_CALL_RESULT` is cut to its last [`saved::OUTPUT_MAX`] bytes, as saved.
 //! - A second `StepEnd` for a step that ended is ignored; the same core step id twice in one run
 //!   isn't supported.
 //! - An answer picking several options travels as one string, joined with `", "`, as the core's
@@ -81,6 +86,10 @@
 
 pub mod agui;
 pub mod command;
+/// The checker tests hold lines to the official schema with (the app's too, with the
+/// `testing` feature); not in a normal build.
+#[cfg(any(test, feature = "testing"))]
+pub mod conformance;
 pub mod encode;
 pub mod replay;
 pub mod saved;

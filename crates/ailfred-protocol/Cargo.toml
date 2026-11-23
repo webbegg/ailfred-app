@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "Ailfred's wire protocol: the conversation as AG-UI 1.0 events, and the commands clients send back."
 
+[features]
+# The official-schema checker (`conformance`), for other crates' tests.
+testing = []
+
 [dependencies]
 ailfred-core = { path = "../ailfred-core" }
 # The JSON Schemas the TypeScript and Swift clients generate their types from.

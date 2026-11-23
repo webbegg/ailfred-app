@@ -41,6 +41,13 @@ pub enum Event {
         run_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         protocol_version: Option<String>,
+        /// The run that started this one as a run of its own (Ailfred's runs have none).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent_run_id: Option<String>,
+        /// What the run was asked: the server sends the user message a run answers here, so a
+        /// client that didn't send it sees it too.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input: Option<Box<RunAgentInput>>,
         #[serde(flatten)]
         base: Base,
     },

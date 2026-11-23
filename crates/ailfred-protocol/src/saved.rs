@@ -28,7 +28,8 @@ pub const INTERRUPTED: &str = "The reply was interrupted before it finished.";
 pub const OUTPUT_MAX: usize = 64 * 1024;
 
 /// `output`, or its last [`OUTPUT_MAX`] bytes (the marker "…" in them) cut at a character.
-fn tail(output: &str) -> String {
+/// The server cuts a live step's result the same way.
+pub fn tail(output: &str) -> String {
     const CUT: &str = "…";
     if output.len() <= OUTPUT_MAX {
         return output.to_owned();

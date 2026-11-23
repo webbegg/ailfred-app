@@ -19,6 +19,7 @@ impl Chat {
         self.replies.clear();
         self.others.clear();
         self.kept.clear();
+        self.asked.clear();
         self.draft.clear();
         self.shots.clear();
         self.conv = history::Meta::fresh();
@@ -171,6 +172,7 @@ impl Chat {
         // Long, it opens at its latest page.
         self.hidden = self.messages.len().saturating_sub(PAGE);
         self.session = loaded.session.and_then(|(session, index)| Some((session, self.messages.get(index)?.id)));
+        self.announce();
         if let Some(host) = &self.host {
             for (id, pngs) in to_decode {
                 host.update(move |host, _| host.decode_into_chat(id, pngs));

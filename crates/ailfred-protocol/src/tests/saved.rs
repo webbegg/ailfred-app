@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use ailfred_core::reply::{Event, Part, Reply, State, StepStatus, Tool};
 use serde_json::Value;
 
-use super::conformance::Spec;
+use crate::conformance::Spec;
 use super::digest;
 use crate::agui::{self, to_line};
 use crate::encode::STEP_OUTPUT;

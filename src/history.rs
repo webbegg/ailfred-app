@@ -37,7 +37,7 @@ mod writer;
 #[cfg(test)]
 pub use convert::reply_from;
 pub use convert::{Kept, read_reply, run_id, saved_reply};
-pub use store::{Loaded, load, scan};
+pub use store::{Loaded, ensure_private_dir, load, scan, write_atomic};
 // What the tests reach for; the app writes through the `Writer`.
 #[cfg(test)]
 pub use store::{LoadedMessage, patch_title, write_snapshot};
@@ -197,9 +197,20 @@ pub fn recent(mut entries: Vec<Entry>, limit: usize) -> Vec<Entry> {
     entries
 }
 
+/// `~/Library/Application Support/<app id>`: where the app keeps its files.
+pub fn app_dir(home: &Path, app_id: &str) -> PathBuf {
+    home.join("Library/Application Support").join(app_id)
+}
+
 /// `~/Library/Application Support/<app id>/conversations`.
 pub fn dir(home: &Path, app_id: &str) -> PathBuf {
-    home.join("Library/Application Support").join(app_id).join("conversations")
+    app_dir(home, app_id).join("conversations")
+}
+
+/// Where this build keeps its files.
+pub fn app_dir_now() -> PathBuf {
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    app_dir(&home, crate::settings::app_id(crate::app_env::in_bundle()))
 }
 
 /// Where this build keeps its conversations.
