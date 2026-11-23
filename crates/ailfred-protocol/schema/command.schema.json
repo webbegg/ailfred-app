@@ -514,7 +514,7 @@
           "type": "object"
         }
       ],
-      "description": "The user sends something: a new message (a steer, if a run goes: the core decides), or\nthe answers to the last run's questions in `resume`. Its `messages` are the whole\nconversation so far, as AG-UI requires, the replies included as assistant messages."
+      "description": "The user sends something: a new message (a steer, if a run goes: the core decides), or\nthe answers to the last run's questions in `resume`. Its `messages` are the complete\nhistory, as AG-UI requires, under the ids a snapshot of it uses (`send` and `answer`\nbuild it)."
     },
     {
       "description": "The user stops the run going.",

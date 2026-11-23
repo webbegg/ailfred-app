@@ -113,6 +113,72 @@ fn a_snapshots_ids_are_the_ones_its_runs_events_use() {
     assert_eq!((activity_type.as_str(), content.get("answered").and_then(Value::as_str)), ("ailfred:ask", Some("b.rs")));
 }
 
+/// `reply` through a snapshot as run `r-0`, and back.
+fn through_a_snapshot(reply: &Reply) -> (Vec<agui::Message>, Reply) {
+    let agui::Event::MessagesSnapshot { messages, .. } = messages_snapshot(&[Turn { run: "r-0", text: "q", pngs: &[], reply: Some(reply) }], 0) else { panic!("a snapshot") };
+    let back = conversation_from_snapshot(&messages).remove(0).reply.expect("its reply");
+    (messages, back)
+}
+
+fn ask_which() -> Event {
+    Event::Ask { prompt: "Which?".into(), options: vec!["A".into(), "B".into()], multi: false }
+}
+
+#[test]
+fn a_question_in_a_reply_that_failed_or_was_stopped_comes_back_closed() {
+    let failed = reply_of(1, "q", vec![ask_which(), Event::Fail("overloaded".into())]);
+    let mut stopped = reply_of(1, "q", vec![ask_which()]);
+    stopped.stop(Instant::now());
+    for reply in [failed, stopped] {
+        let (messages, mut back) = through_a_snapshot(&reply);
+        let Some(agui::Message::Activity { content, .. }) = messages.get(1) else { panic!("the question") };
+        assert_eq!(content.get("closed"), Some(&Value::Bool(true)), "nothing waits for its answer");
+        assert!(!back.asks(), "{:?}", reply.state);
+        assert_eq!(back.answer(0, "A"), None, "{:?}", reply.state);
+    }
+}
+
+#[test]
+fn a_closed_question_stays_closed_through_a_snapshot() {
+    let mut reply = reply_of(1, "q", vec![ask_which(), Event::Done]);
+    let Some(Part::Question(q)) = reply.parts.first_mut() else { panic!("a question") };
+    q.closed = true;
+    let (_, mut back) = through_a_snapshot(&reply);
+    assert!(!back.asks());
+    assert_eq!(back.answer(0, "A"), None);
+}
+
+#[test]
+fn an_unanswered_question_of_a_failed_reply_is_closed_even_without_the_flag() {
+    // Another producer's snapshot, which doesn't say `closed`.
+    let ask = serde_json::json!({ "interruptId": "i", "message": "Which?", "multi": false, "options": ["A"] });
+    let messages = [
+        agui::Message::User { id: "u".into(), content: agui::Content::Text("q".into()), name: None },
+        agui::Message::Activity { id: "a".into(), activity_type: "ailfred:ask".into(), content: ask.as_object().unwrap().clone() },
+        agui::Message::Activity { id: "e".into(), activity_type: "ailfred:error".into(), content: serde_json::json!({ "message": "overloaded" }).as_object().unwrap().clone() },
+    ];
+    let mut back = conversation_from_snapshot(&messages).remove(0).reply.unwrap();
+    assert_eq!(back.state, State::Failed);
+    assert!(!back.asks());
+    assert_eq!(back.answer(0, "A"), None);
+}
+
+#[test]
+fn an_open_question_of_a_done_reply_stays_answerable_and_an_answered_one_keeps_its_answer() {
+    let reply = reply_of(1, "q", vec![ask_which(), ask_which(), Event::Done]);
+    let mut answered = reply_of(1, "q", vec![ask_which(), ask_which(), Event::Done]);
+    answered.answer(0, "mine").expect("answered");
+    let (messages, mut back) = through_a_snapshot(&reply);
+    assert!(messages.iter().all(|m| !serde_json::to_string(m).unwrap().contains("closed")), "an open question isn't closed");
+    assert!(back.asks());
+    assert_eq!(back.answer(1, "B").as_deref(), Some("B"));
+    let (_, mut back) = through_a_snapshot(&answered);
+    let Some(Part::Question(q)) = back.parts.first() else { panic!("a question") };
+    assert_eq!((q.answered.as_deref(), q.closed), (Some("mine"), false));
+    assert_eq!(back.answer(0, "again"), None, "answered once");
+    assert_eq!(back.answer(1, "B").as_deref(), Some("B"), "the other still takes one");
+}
+
 #[test]
 fn what_a_snapshot_doesnt_carry_comes_back_as_said_in_the_docs() {
     // Stopped or interrupted comes back done; a step still running stays running.

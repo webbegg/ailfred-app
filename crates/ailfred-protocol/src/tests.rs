@@ -9,9 +9,10 @@ use ailfred_core::reply::{Event, Part, Reply, Tool};
 use serde_json::{Value, json};
 
 use crate::agui::{self, PROTOCOL_VERSION, RunAgentInput, to_line};
-use crate::command::{Command, answer_resume, user_message};
+use crate::command::{self, Command};
 use crate::encode::Encoder;
 use crate::replay::{Kind, Replayer, parse_line};
+use crate::snapshot::{Turn, history, messages_snapshot};
 
 mod conformance;
 mod saved;
@@ -110,21 +111,21 @@ fn encoded(s: &Script) -> Vec<agui::Event> {
     out
 }
 
-fn input(run: &str, messages: Vec<agui::Message>, resume: Option<Vec<agui::Resume>>) -> Box<RunAgentInput> {
-    let protocol_version = Some(PROTOCOL_VERSION.into());
-    Box::new(RunAgentInput { thread_id: THREAD.into(), run_id: run.into(), protocol_version, parent_run_id: None, state: None, messages, tools: None, context: None, forwarded_props: None, resume })
+/// The `question` fixture's run, what the user said to it, and its reply as the core has it.
+const QUESTION_RUN: &str = "run-question";
+const QUESTION_TEXT: &str = "Tidy up the error handling.";
+
+fn question_reply() -> Reply {
+    direct(scripts().iter().find(|s| s.name == "question").expect("the question script"))
 }
 
 fn commands() -> Vec<Command> {
-    // The `question` fixture's conversation: what the user asked, and the reply with the question
-    // (its text, under the id it streamed with).
-    let asked = vec![
-        user_message("msg-2", "Tidy up the error handling.", &[]),
-        agui::Message::Assistant { id: "run-question-text-1".into(), content: Some("I can change a few files.".into()), tool_calls: None, name: None },
-    ];
+    // The `question` fixture's conversation: what the user asked, and the reply with the question.
+    let reply = question_reply();
+    let asked = [Turn { run: QUESTION_RUN, text: QUESTION_TEXT, pngs: &[], reply: Some(&reply) }];
     vec![
-        Command::Run(input("run-image", vec![user_message("msg-1", "What's in this screenshot?", &[PNG])], None)),
-        Command::Run(input("run-answered", asked, Some(vec![answer_resume("run-question-ask-1", "src/a.rs, src/c.rs")]))),
+        command::send(THREAD, "run-image", &[], "What's in this screenshot?", &[PNG]),
+        command::answer(THREAD, "run-answered", &asked, "run-question-ask-1", "src/a.rs, src/c.rs"),
         Command::Stop { thread_id: THREAD.into(), run_id: "run-stop".into() },
     ]
 }
@@ -282,23 +283,38 @@ fn thinking_ended_by_a_taken_replays_as_two_thinkings_with_their_times() {
     assert_round_trips(vec![(0, think("a")), (150, ask("Which?")), (200, think("b")), (450, Kind::Event(Event::Done))]);
 }
 
-#[test]
-fn the_answering_run_carries_the_whole_conversation_its_question_came_in() {
-    let question = replayed(&fixture("question.jsonl"));
-    let answering = commands()
-        .into_iter()
-        .find_map(|c| match c {
-            Command::Run(input) if input.resume.is_some() => Some(input),
-            _ => None,
+/// The runs in `commands.jsonl`: the image run, then the answering run.
+fn runs() -> Vec<RunAgentInput> {
+    fixture("commands.jsonl")
+        .iter()
+        .filter_map(|line| match serde_json::from_str(line).unwrap() {
+            Command::Run(input) => Some(*input),
+            Command::Stop { .. } => None,
         })
-        .expect("an answering run");
-    match answering.messages.as_slice() {
-        [agui::Message::User { .. }, agui::Message::Assistant { id, content, .. }] => {
-            assert_eq!(id, "run-question-text-1", "the id it streamed under");
-            assert_eq!(content.as_deref(), question.history_text().as_deref());
-        }
-        other => panic!("the user's message and the reply with the question, not {other:?}"),
-    }
+        .collect()
+}
+
+#[test]
+fn the_answering_run_carries_the_history_a_snapshot_of_its_conversation_holds() {
+    let reply = question_reply();
+    let turns = [Turn { run: QUESTION_RUN, text: QUESTION_TEXT, pngs: &[], reply: Some(&reply) }];
+    let [image, answering] = runs().try_into().expect("two runs");
+    let agui::Event::MessagesSnapshot { messages: snapshot, .. } = messages_snapshot(&turns, T0) else { panic!("a snapshot") };
+    assert_eq!(answering.messages, history(&turns), "its complete history, under the snapshot's ids");
+    assert_eq!(history(&turns), snapshot);
+    let sent = Command::Run(Box::new(answering.clone()));
+    let round: Command = serde_json::from_str(&serde_json::to_string(&sent).unwrap()).unwrap();
+    assert_eq!(round, sent);
+    assert_eq!(answering.protocol_version.as_deref(), Some(PROTOCOL_VERSION));
+    // It answers the interrupt the question's run ended with.
+    let finished = parse_line(fixture("question.jsonl").last().unwrap()).unwrap().unwrap();
+    let agui::Event::RunFinished { outcome: Some(agui::RunOutcome::Interrupt { interrupts }), .. } = finished else { panic!("an interrupt") };
+    let resume = answering.resume.as_deref().expect("its answer");
+    assert_eq!(resume.iter().map(|r| r.interrupt_id.as_str()).collect::<Vec<_>>(), [interrupts[0].id.as_str()]);
+    assert_eq!(sent, command::answer(THREAD, &answering.run_id, &turns, &interrupts[0].id, "src/a.rs, src/c.rs"));
+    // A run with nothing before it holds only its own message.
+    let ids: Vec<String> = image.messages.iter().map(|m| serde_json::to_value(m).unwrap()["id"].as_str().unwrap().to_owned()).collect();
+    assert_eq!(ids, [format!("{}-user", image.run_id)]);
 }
 
 /// `schema` as the clients get it: pretty JSON, without the `null` schemars allows for an

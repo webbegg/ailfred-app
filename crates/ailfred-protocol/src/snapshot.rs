@@ -10,7 +10,7 @@
 //! | text | `assistant` `{run}-text-{n}` with the text as its content |
 //! | agent steps | `assistant` `{run}-steps-{n}` with a `toolCalls` entry per step (`{run}-step-{k}`, `k` counting the reply's steps from 1, as its saved events do; arguments `{"target":…}`), then a `tool` message `{run}-step-{k}-result` per step that ended: its output, and `error` if it failed |
 //! | diff | `activity` `ailfred:diff` `{run}-diff-{n}` `{"patch","path"}` |
-//! | question | `activity` `ailfred:ask` `{run}-ask-{n}` `{"interruptId","message","multi","options"}`, and `"answered"` once it is |
+//! | question | `activity` `ailfred:ask` `{run}-ask-{n}` `{"interruptId","message","multi","options"}`, and `"answered"` once it is; unanswered, `"closed": true` when nothing waits for its answer (it was closed, or its reply didn't end done: failed or stopped), and it comes back closed (so does an unanswered question of a reply that comes back failed, flag or not) |
 //! | error | `activity` `ailfred:error` `{run}-error-{n}` `{"message"}` |
 //!
 //! What a snapshot doesn't carry: how a reply ended, but for an error (a reply with one comes
@@ -53,6 +53,13 @@ pub struct Restored {
 
 /// The conversation `turns` as a `MESSAGES_SNAPSHOT` stamped `at` (ms since the epoch).
 pub fn messages_snapshot(turns: &[Turn], at: u64) -> agui::Event {
+    agui::Event::MessagesSnapshot { messages: history(turns), base: Base::at(at) }
+}
+
+/// The messages a snapshot of `turns` holds, under its ids: the complete history a run's
+/// `messages` carry too ([`command::send`](crate::command::send),
+/// [`command::answer`](crate::command::answer)).
+pub fn history(turns: &[Turn]) -> Vec<Message> {
     let mut messages = Vec::new();
     for turn in turns {
         messages.push(user_message(&format!("{}-user", turn.run), turn.text, turn.pngs));
@@ -60,7 +67,7 @@ pub fn messages_snapshot(turns: &[Turn], at: u64) -> agui::Event {
             reply_messages(reply, turn.run, &mut messages);
         }
     }
-    agui::Event::MessagesSnapshot { messages, base: Base::at(at) }
+    messages
 }
 
 fn reply_messages(reply: &Reply, run: &str, out: &mut Vec<Message>) {
@@ -103,6 +110,9 @@ fn reply_messages(reply: &Reply, run: &str, out: &mut Vec<Message>) {
                 let mut content = json!({ "interruptId": id, "message": q.prompt, "multi": q.multi, "options": q.options });
                 if let Some(answer) = &q.answered {
                     content["answered"] = json!(answer);
+                } else if !q.open() || reply.state != State::Done {
+                    // Nothing waits for its answer: closed already, or its run ended otherwise.
+                    content["closed"] = json!(true);
                 }
                 out.push(activity(id, ASK, content));
             }
@@ -167,8 +177,9 @@ pub fn conversation_from_snapshot(messages: &[Message]) -> Vec<Restored> {
                         let options = content.get("options").and_then(Value::as_array).map(|o| o.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect()).unwrap_or_default();
                         let multi = content.get("multi").and_then(Value::as_bool).unwrap_or(false);
                         reply.apply(Event::Ask { prompt: field("message"), options, multi }, now);
-                        if let (Some(Part::Question(q)), Some(answer)) = (reply.parts.last_mut(), content.get("answered").and_then(Value::as_str)) {
-                            q.answered = Some(answer.to_owned());
+                        if let Some(Part::Question(q)) = reply.parts.last_mut() {
+                            q.answered = content.get("answered").and_then(Value::as_str).map(str::to_owned);
+                            q.closed = q.answered.is_none() && content.get("closed").and_then(Value::as_bool) == Some(true);
                         }
                     }
                     ERROR => reply.apply(Event::Fail(field("message")), now),
@@ -187,10 +198,21 @@ pub fn conversation_from_snapshot(messages: &[Message]) -> Vec<Restored> {
 }
 
 /// A reply read whole: its thinking ends, and it's done unless it failed, its steps as they were.
+/// A failed one's questions not answered are closed, whatever the snapshot said: nothing waits
+/// for their answer.
 fn end(reply: &mut Reply, now: Instant) {
     reply.apply(Event::Taken, now);
     if reply.streaming() {
         reply.state = State::Done;
+    }
+    if reply.state == State::Failed {
+        for part in &mut reply.parts {
+            if let Part::Question(q) = part
+                && q.answered.is_none()
+            {
+                q.closed = true;
+            }
+        }
     }
 }
 

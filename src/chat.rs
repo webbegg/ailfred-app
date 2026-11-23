@@ -153,6 +153,9 @@ pub struct Chat {
     /// The questions' "something else" fields, by reply token and part: the user's own answer
     /// as they write it (the reply only gets its text when they answer).
     others: HashMap<(u64, usize), TextEdit>,
+    /// What loaded replies keep of what was saved, by token: events this build didn't make them
+    /// from whole, written back as they were (`history::Kept`).
+    kept: HashMap<u64, history::Kept>,
     /// A text field for a question gone meanwhile.
     scratch: TextEdit,
     /// The user scrolled back from the latest: what comes keeps their place, and a button
@@ -188,7 +191,7 @@ pub struct Chat {
 
 impl Chat {
     pub fn new(host: Option<AppHandle<Host>>) -> Self {
-        Chat { messages: Vec::new(), hidden: 0, draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0, replies: Vec::new(), next_token: 0, others: HashMap::new(), scratch: TextEdit::new(""), away: false, windowed: false, session: None, conv: history::Meta::fresh(), running_model: String::new(), models_open: false, #[cfg(test)] cancelled: Vec::new(), #[cfg(test)] saved: Vec::new(), #[cfg(test)] title_asks: Vec::new(), #[cfg(test)] model: None, #[cfg(test)] requests: Vec::new() }
+        Chat { messages: Vec::new(), hidden: 0, draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0, replies: Vec::new(), next_token: 0, others: HashMap::new(), kept: HashMap::new(), scratch: TextEdit::new(""), away: false, windowed: false, session: None, conv: history::Meta::fresh(), running_model: String::new(), models_open: false, #[cfg(test)] cancelled: Vec::new(), #[cfg(test)] saved: Vec::new(), #[cfg(test)] title_asks: Vec::new(), #[cfg(test)] model: None, #[cfg(test)] requests: Vec::new() }
     }
 
     pub fn is_open(&self) -> bool {
@@ -455,12 +458,14 @@ impl Chat {
         token
     }
 
-    /// `reply` takes the place of its message's reply, whose question fields go with it.
+    /// `reply` takes the place of its message's reply, whose question fields and kept events go
+    /// with it.
     fn replace_reply(&mut self, reply: Reply) {
         self.replies.retain(|r| r.id != reply.id);
         self.replies.push(reply);
         let replies = &self.replies;
         self.others.retain(|(token, _), _| replies.iter().any(|r| r.token == *token));
+        self.kept.retain(|token, _| replies.iter().any(|r| r.token == *token));
     }
 
     /// `request` goes to the model for the reply `token`.
