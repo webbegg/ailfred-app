@@ -2,15 +2,22 @@
 import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 
+/// The base64 SHA-256 of `text`'s UTF-8 bytes: a CSP hash source's.
+async function sha256(text: string): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
+  return btoa(String.fromCharCode(...digest));
+}
+
 /// The page is one file the app loads as a string (`docs/web-view.md`): its script and styles
 /// go inline, as a classic script at the end of the body (no `type="module"`, no `crossorigin`),
-/// and no other file is written.
+/// and no other file is written. The CSP's `script-src` becomes that script's hash: no other
+/// script (an inline handler, a `javascript:` URL, an injected `<script>`) runs.
 function inlineAll(): Plugin {
   return {
     name: "ailfred-inline-all",
     apply: "build",
     enforce: "post",
-    generateBundle(_options, bundle) {
+    async generateBundle(_options, bundle) {
       const page = bundle["index.html"];
       if (!page || page.type !== "asset") this.error("no index.html in the bundle");
       let html = String(page.source);
@@ -33,6 +40,10 @@ function inlineAll(): Plugin {
       // Replacer functions: `$` in the code is not a pattern.
       html = html.replace("</head>", () => `<style>${style}</style>\n</head>`);
       html = html.replace("</body>", () => `<script>${script}</script>\n</body>`);
+      const scriptSrc = /script-src [^;"]*/g;
+      if (html.match(scriptSrc)?.length !== 1) this.error("expected one script-src in the CSP of index.html");
+      const hash = await sha256(script);
+      html = html.replace(scriptSrc, () => `script-src 'sha256-${hash}'`);
       page.source = html;
     },
   };

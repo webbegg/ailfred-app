@@ -4,13 +4,14 @@
 //! checked by hand (it needs a window server).
 
 use std::cell::Cell;
+use std::io::Write;
 
 use block2::DynBlock;
 use objc2::rc::Retained;
-use objc2::runtime::{Bool, ProtocolObject, Sel};
+use objc2::runtime::{AnyObject, Bool, ProtocolObject, Sel};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
-use objc2_app_kit::{NSApplication, NSBackingStoreType, NSEvent, NSEventModifierFlags, NSResponder, NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWorkspace};
-use objc2_foundation::{NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL};
+use objc2_app_kit::{NSApplication, NSBackingStoreType, NSEvent, NSEventModifierFlags, NSResponder, NSView, NSWindow, NSWindowDelegate, NSWindowStyleMask, NSWorkspace};
+use objc2_foundation::{NSArray, NSNotification, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString, NSURL};
 use objc2_web_kit::{
     WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate, WKNavigationType, WKScriptMessage, WKScriptMessageHandler, WKUIDelegate,
     WKUserContentController, WKWebView, WKWebViewConfiguration, WKWindowFeatures,
@@ -24,7 +25,15 @@ const HANDLER: &str = "ailfred";
 const SIZE: (f64, f64) = (520.0, 720.0);
 const MIN_SIZE: (f64, f64) = (360.0, 420.0);
 
+/// A line on stderr from a delegate method: never a panic (`eprintln!` panics if stderr is
+/// gone), which would unwind into WebKit.
+fn note(line: std::fmt::Arguments) {
+    let _ = writeln!(std::io::stderr(), "{line}");
+}
+
 struct Ivars {
+    /// The page, loaded again if its content process ends.
+    html: String,
     /// What the page posted (its text), for the app.
     on_message: Box<dyn Fn(String)>,
     /// The window is closing.
@@ -46,6 +55,13 @@ define_class!(
     unsafe impl WKScriptMessageHandler for Delegate {
         #[unsafe(method(userContentController:didReceiveScriptMessage:))]
         fn did_receive(&self, _: &WKUserContentController, message: &WKScriptMessage) {
+            // Only the page's, in the main frame: every frame may post to the handler.
+            let frame = unsafe { message.frameInfo() };
+            let url = unsafe { frame.request() }.URL().and_then(|u| u.absoluteString()).map(|s| s.to_string()).unwrap_or_default();
+            if !bridge::from_page(unsafe { frame.isMainFrame() }, &url) {
+                note(format_args!("Ailfred: the web view ignored a message from another frame ({} chars of URL)", url.chars().count()));
+                return;
+            }
             // Only strings: the page posts its messages as JSON text.
             let body = unsafe { message.body() };
             if let Ok(text) = body.downcast::<NSString>() {
@@ -71,7 +87,7 @@ define_class!(
                     decide.call((WKNavigationActionPolicy::Allow,));
                 }
                 Navigation::Cancel => {
-                    eprintln!("Ailfred: the web view stayed on its page ({} chars of URL)", url.chars().count());
+                    note(format_args!("Ailfred: the web view stayed on its page ({} chars of URL)", url.chars().count()));
                     decide.call((WKNavigationActionPolicy::Cancel,));
                 }
                 Navigation::Open(url) => {
@@ -79,6 +95,15 @@ define_class!(
                     open_url(&url);
                 }
             }
+        }
+
+        // The page's content process ended (it crashed, or macOS reclaimed it): the page loads
+        // again, as at first, and its `join` gets a fresh snapshot.
+        #[unsafe(method(webViewWebContentProcessDidTerminate:))]
+        fn content_process_ended(&self, web_view: &WKWebView) {
+            note(format_args!("Ailfred: the web view's page ended; loading it again"));
+            self.ivars().loaded.set(false);
+            unsafe { web_view.loadHTMLString_baseURL(&NSString::from_str(&self.ivars().html), None) };
         }
     }
 
@@ -113,13 +138,38 @@ define_class!(
             let flags = event.modifierFlags() & NSEventModifierFlags::DeviceIndependentFlagsMask;
             let command = flags.contains(NSEventModifierFlags::Command) && !flags.intersects(NSEventModifierFlags::Control | NSEventModifierFlags::Option);
             let key = event.charactersIgnoringModifiers().map(|k| k.to_string()).unwrap_or_default();
-            if command && let Some(action) = super::edit_action(&key, flags.contains(NSEventModifierFlags::Shift)).and_then(selector) {
+            if command && let Some(action) = super::edit_action(&key, event.keyCode(), flags.contains(NSEventModifierFlags::Shift)).and_then(selector) {
                 let app = NSApplication::sharedApplication(self.mtm());
                 if unsafe { app.sendAction_to_from(action, None, Some(self)) } {
                     return Bool::YES;
                 }
             }
             unsafe { msg_send![super(self), performKeyEquivalent: event] }
+        }
+    }
+);
+
+define_class!(
+    // SAFETY: WKWebView may be subclassed; `PageView` adds no ivars and doesn't implement Drop.
+    #[unsafe(super(WKWebView, NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "AilfredWebViewPage"]
+    struct PageView;
+
+    impl PageView {
+        // WebKit hands its context menu here before showing it: the items that would navigate
+        // or download go (`super::menu_item_kept`).
+        #[unsafe(method(willOpenMenu:withEvent:))]
+        fn will_open_menu(&self, menu: &AnyObject, event: &NSEvent) {
+            let items: Retained<NSArray<AnyObject>> = unsafe { msg_send![menu, itemArray] };
+            for i in 0..items.count() {
+                let item = items.objectAtIndex(i);
+                let id: Option<Retained<NSString>> = unsafe { msg_send![&*item, identifier] };
+                if !super::menu_item_kept(&id.map(|s| s.to_string()).unwrap_or_default()) {
+                    let _: () = unsafe { msg_send![menu, removeItem: &*item] };
+                }
+            }
+            unsafe { msg_send![super(self), willOpenMenu: menu, withEvent: event] }
         }
     }
 );
@@ -154,7 +204,7 @@ impl Window {
     pub fn open(html: &str, on_message: impl Fn(String) + 'static, on_close: impl Fn() + 'static) -> Option<Window> {
         let mtm = MainThreadMarker::new()?;
         let delegate: Retained<Delegate> = {
-            let this = Delegate::alloc(mtm).set_ivars(Ivars { on_message: Box::new(on_message), on_close: Box::new(on_close), loaded: Cell::new(false) });
+            let this = Delegate::alloc(mtm).set_ivars(Ivars { html: html.to_owned(), on_message: Box::new(on_message), on_close: Box::new(on_close), loaded: Cell::new(false) });
             unsafe { msg_send![super(this), init] }
         };
         let controller = unsafe { WKUserContentController::new(mtm) };
@@ -165,7 +215,8 @@ impl Window {
             config.preferences().setJavaScriptCanOpenWindowsAutomatically(false);
         }
         let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(SIZE.0, SIZE.1));
-        let web_view = unsafe { WKWebView::initWithFrame_configuration(WKWebView::alloc(mtm), frame, &config) };
+        let page: Retained<PageView> = unsafe { msg_send![PageView::alloc(mtm), initWithFrame: frame, configuration: &*config] };
+        let web_view: Retained<WKWebView> = Retained::into_super(page);
         unsafe {
             web_view.setNavigationDelegate(Some(ProtocolObject::from_ref(&*delegate)));
             web_view.setUIDelegate(Some(ProtocolObject::from_ref(&*delegate)));
@@ -230,6 +281,6 @@ pub fn open_url(url: &str) {
         return;
     }
     if !NSWorkspace::sharedWorkspace().openURL(&ns) {
-        eprintln!("Ailfred: the browser didn't open a link ({} chars)", url.chars().count());
+        note(format_args!("Ailfred: the browser didn't open a link ({} chars)", url.chars().count()));
     }
 }

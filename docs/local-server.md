@@ -90,7 +90,9 @@ connection closes (no chunked encoding).
 - Stop ends a run `RUN_FINISHED` outcome `cancelled`; a failure `RUN_ERROR`; a model process that
   died `RUN_ERROR` code `ailfred:lost`. A step's `TOOL_CALL_RESULT` is cut to its last 64 KiB.
 - Run ids: a run a client started keeps the client's `runId`; others get one minted,
-  `{conversation}-{token}-{n}`. A snapshot names replies by their saved run ids
+  `{conversation}-{token}-{n}`. A reply already going when the server starts (or the web view
+  opens) is a run named anew: a client joining gets it from its `RUN_STARTED`, what came so
+  far encoded from the reply as it stands, then live. A snapshot names replies by their saved run ids
   (`{conversation}-{index}`), which differ from the live ones: on each `MESSAGES_SNAPSHOT`,
   replace your state; don't merge by id.
 - In a snapshot, a question nothing waits for (answered, closed, or in a reply that failed or
@@ -139,8 +141,7 @@ still uses tiny_http 0.12 and has the two problems this server was rebuilt to av
 
 - Tools a client offers (`tools`, e.g. its own capture): T21.
 - Retry, a new conversation and picking a model as commands.
-- A reply already going when the server starts shows on clients once it's done, in the next
-  snapshot. A window Retry shows as a new run answering the same message until the next
+- A window Retry shows as a new run answering the same message until the next
   snapshot puts it in place.
 
 ## Example

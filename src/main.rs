@@ -130,6 +130,9 @@ pub struct Host {
     /// an earlier join, or an earlier window, are dropped).
     web_view: Option<web_view::Window>,
     web_view_joined: u64,
+    /// Which web view window is open: what an earlier one queued (messages, its close, its
+    /// commands' answers) is dropped.
+    web_view_windows: web_view::Windows,
     /// pi started before computer control was last switched: its tools are out of date, so it
     /// starts again for the next message.
     pi_stale: bool,
@@ -142,8 +145,8 @@ type ChatUpdate = Box<dyn FnOnce(&mut Chat, &mut Tx) + Send>;
 enum Asker {
     /// A local server's client, if the server still waits for it.
     Server(server::Ticket),
-    /// The web view's page, by the command's id.
-    WebView(String),
+    /// The web view's page, by its window and the command's id.
+    WebView { window: u64, id: String },
 }
 
 impl Host {
@@ -989,10 +992,11 @@ impl Host {
         }
         let Some(handle) = self.handle.clone() else { return };
         let closed = handle.clone();
+        let n = self.web_view_windows.open();
         let window = web_view::Window::open(
             &web_view::page(),
-            move |text| handle.update(move |host, _| host.web_view_message(text)),
-            move || closed.update(|host, _| host.web_view_closed()),
+            move |text| handle.update(move |host, _| host.web_view_message(n, text)),
+            move || closed.update(move |host, _| host.web_view_closed(n)),
         );
         match window {
             Some(window) => {
@@ -1000,13 +1004,16 @@ impl Host {
                 self.web_view = Some(window);
                 self.feed_chat();
             }
-            None => eprintln!("Ailfred: the web view couldn't open"),
+            None => {
+                self.web_view_windows.close(n);
+                eprintln!("Ailfred: the web view couldn't open");
+            }
         }
     }
 
-    /// What the web view's page posted.
-    fn web_view_message(&mut self, text: String) {
-        if self.web_view.is_none() {
+    /// What the web view's window `n` posted, if it's still the one open.
+    fn web_view_message(&mut self, n: u64, text: String) {
+        if self.web_view.is_none() || !self.web_view_windows.is_open(n) {
             return;
         }
         match web_view::parse(&text) {
@@ -1024,7 +1031,7 @@ impl Host {
                 });
                 self.with_chat(move |c, _| c.join_local(sink));
             }
-            Some(web_view::Message::Command { id, command }) => self.chat_command(command, Asker::WebView(id)),
+            Some(web_view::Message::Command { id, command }) => self.chat_command(command, Asker::WebView { window: n, id }),
             Some(web_view::Message::Open(url)) => web_view::open_url(&url),
             None => {}
         }
@@ -1040,7 +1047,11 @@ impl Host {
         }
     }
 
-    fn web_view_answer(&mut self, id: &str, answer: &server::Answer) {
+    /// The answer to command `id` of window `n`, if it's still the one open.
+    fn web_view_answer(&mut self, n: u64, id: &str, answer: &server::Answer) {
+        if !self.web_view_windows.is_open(n) {
+            return;
+        }
         if let Some(window) = &self.web_view {
             window.eval(&web_view::answer_js(id, answer));
         }
@@ -1048,8 +1059,8 @@ impl Host {
 
     /// The web view's window closed: it's let go, and the chat stops feeding the hub unless
     /// the server needs it.
-    fn web_view_closed(&mut self) {
-        if self.web_view.take().is_none() {
+    fn web_view_closed(&mut self, n: u64) {
+        if !self.web_view_windows.close(n) || self.web_view.take().is_none() {
             return;
         }
         eprintln!("Ailfred: the web view closed");
@@ -1086,9 +1097,9 @@ impl Host {
             match asker {
                 Asker::Server(ticket) => ticket.answer(answered),
                 // Answered from the host, once the chat is let go.
-                Asker::WebView(id) => {
+                Asker::WebView { window, id } => {
                     if let Some(handle) = &handle {
-                        handle.update(move |host, _| host.web_view_answer(&id, &answered));
+                        handle.update(move |host, _| host.web_view_answer(window, &id, &answered));
                     }
                 }
             }
@@ -1236,6 +1247,7 @@ fn host_init() -> Host {
         feeding: server::Feeding::default(),
         web_view: None,
         web_view_joined: 0,
+        web_view_windows: web_view::Windows::default(),
         pi_stale: false,
     }
 }
@@ -1467,6 +1479,7 @@ fn main() {
             feeding: server::Feeding::default(),
             web_view: None,
             web_view_joined: 0,
+            web_view_windows: web_view::Windows::default(),
             pi_stale: false,
         });
         // Runs on the main thread at the loop's first turn: the status item needs a running NSApp,

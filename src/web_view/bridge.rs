@@ -86,6 +86,12 @@ pub fn openable(url: &str) -> bool {
     web && host && !url.chars().any(|c| c.is_whitespace() || c.is_control())
 }
 
+/// A script message is the page's, to read, only from the main frame showing the page
+/// (`about:blank`): a frame of any other kind is ignored, whatever the CSP lets in.
+pub fn from_page(main_frame: bool, url: &str) -> bool {
+    main_frame && url == PAGE_URL
+}
+
 /// What starts a navigation, as the navigation delegate tells it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {

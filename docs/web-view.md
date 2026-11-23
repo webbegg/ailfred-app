@@ -7,10 +7,11 @@ The web view does not use the local server (`docs/local-server.md`): it needs no
 ## The page
 
 - `npm --prefix web run build` writes one self-contained file, `web/dist/index.html`: the script and styles are inlined, so nothing is fetched.
-- The app loads that file's text with `loadHTMLString:baseURL:` (base URL nil). It finds it at `Contents/Resources/web/index.html` in the bundle (copied by `scripts/bundle-mac`), else at `<repo>/web/dist/index.html` in a dev build. Without it, the window says how to build it.
-- Its Content-Security-Policy, in a `<meta>` tag: `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:`. No network at all.
+- The app loads that file's text with `loadHTMLString:baseURL:` (base URL nil). Run from an app bundle, it reads only `Contents/Resources/web/index.html` (copied by `scripts/bundle-mac`, which always runs `npm ci --ignore-scripts` first); outside a bundle, a debug build (`cargo run`) reads `<repo>/web/dist/index.html`. Without it, the window says how to build it.
+- Its Content-Security-Policy, in a `<meta>` tag: `default-src 'none'; script-src 'sha256-…'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'`. The build (`inlineAll` in `web/vite.config.ts`) writes the inlined script's hash into `script-src` (`web/index.html` has `'none'` there), so no other script runs: no inline handler, no `javascript:` URL. No network at all. `npm run dev` drops the CSP.
+- The app reads only messages posted from the main frame showing the page (`about:blank`). If the page's content process ends, the page loads again and joins afresh. Its context menu has no item that navigates or downloads (Open Link, Download Linked File, Search the Web, …).
 - The page never navigates. The app lets through only the first load (`about:blank`, the HTML string) and a reload of it; it cancels every other navigation and refuses new windows (`window.open`, `target=_blank`). A link the user activates, or the page asks to open (see `open` below), goes to the default browser, only for `http:` and `https:`.
-- The window is one at a time: **Open Web View** again brings it to the front. Closing it lets go of the web view; the chat stops feeding the hub unless the local server runs. The Web Inspector is on in debug builds only. ⌘X, ⌘C, ⌘V, ⌘A, ⌘Z, ⇧⌘Z and ⌘W work in it (the app has no Edit menu; the window sends them).
+- The window is one at a time: **Open Web View** again brings it to the front. Closing it lets go of the web view; the chat stops feeding the hub unless the local server runs. The Web Inspector is on in debug builds only. ⌘X, ⌘C, ⌘V, ⌘A, ⌘Z, ⇧⌘Z and ⌘W work in it (the app has no Edit menu; the window sends them), on a layout that isn't Latin too (by the key's place, as on ANSI). Messages and answers queued for a window that closed never reach the next one.
 - Model text is rendered as Markdown with raw HTML skipped.
 
 ## The bridge

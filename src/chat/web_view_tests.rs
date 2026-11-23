@@ -6,11 +6,13 @@ use std::sync::mpsc::SyncSender;
 use std::time::Instant;
 
 use ailfred_protocol::command::{self, Command};
+use ailfred_protocol::replay::{Kind, Replayer, parse_value};
 use serde_json::Value;
 
 use super::tests::sent;
 use super::*;
-use crate::server::tests::{PNG, got, local};
+use crate::reply::Part;
+use crate::server::tests::{PNG, got, local, watcher};
 use crate::server::{Answer, COMMANDS, Core, Feed, Feeding, Frame, Gate, Head, Outcome, serve};
 use crate::web_view::{self, Message};
 
@@ -55,6 +57,90 @@ fn with_the_server_off_an_open_web_view_keeps_the_hub_fed_and_joining_mid_reply_
     let events = got(&again);
     assert_eq!(types(&events), ["MESSAGES_SNAPSHOT"]);
     assert_eq!(events[0]["messages"].as_array().map(Vec::len), Some(4));
+}
+
+/// `events` replayed as a client would, from the run's `RUN_STARTED` on: its lifecycle holds,
+/// and the reply it rebuilds says `text`, ended.
+fn replays_to(events: &[Value], text: &str) {
+    let (mut replayer, mut rebuilt, now) = (Replayer::new(), Reply::new(0, ""), Instant::now());
+    for e in events {
+        let event = parse_value(e).unwrap().unwrap();
+        for update in replayer.replay(&event).unwrap_or_else(|err| panic!("{e}: {err}")) {
+            match update.kind {
+                Kind::Event(e) => rebuilt.apply(e, now),
+                Kind::Stop => rebuilt.stop(now),
+            }
+        }
+    }
+    assert!(!rebuilt.streaming(), "it ended");
+    let said: String = rebuilt.parts.iter().filter_map(|p| if let Part::Text(t) = p { Some(t.as_str()) } else { None }).collect();
+    assert_eq!(said, text);
+}
+
+#[test]
+fn opening_the_web_view_mid_reply_gives_the_page_that_run_from_its_start_then_live_to_its_end() {
+    let mut feeding = Feeding::default();
+    let mut c = on_claude();
+    let id = sent(&mut c, "a");
+    let token = c.ask(id).unwrap();
+    c.reply_event(token, Event::Text("A".into()), Instant::now());
+    // The web view opens mid-reply, the server off: a fresh hub.
+    c.set_feed(feeding.need(true).unwrap());
+    let (sink, web) = local();
+    c.join_local(sink);
+    c.reply_event(token, Event::Text("B".into()), Instant::now());
+    c.reply_event(token, Event::Text("C".into()), Instant::now());
+    c.reply_event(token, Event::Done, Instant::now());
+    let events = got(&web);
+    assert_eq!(
+        types(&events),
+        ["MESSAGES_SNAPSHOT", "RUN_STARTED", "TEXT_MESSAGE_START", "TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_END", "RUN_FINISHED"]
+    );
+    assert_eq!(events[0]["messages"].as_array().map(Vec::len), Some(0), "without the run going: {}", events[0]);
+    assert_eq!(events[1]["input"]["messages"][0]["content"].as_str(), Some("a"), "the run from its start");
+    replays_to(&events[1..], "ABC");
+
+    // Closed and opened again mid-reply: the same, and Stop works.
+    let id = sent(&mut c, "b");
+    let token = c.ask(id).unwrap();
+    c.reply_event(token, Event::Text("X".into()), Instant::now());
+    c.leave_local();
+    c.set_feed(feeding.need(false).unwrap());
+    c.reply_event(token, Event::Text("Y".into()), Instant::now());
+    c.set_feed(feeding.need(true).unwrap());
+    let (sink, web) = local();
+    c.join_local(sink);
+    c.reply_event(token, Event::Text("Z".into()), Instant::now());
+    let events = got(&web);
+    assert_eq!(types(&events), ["MESSAGES_SNAPSHOT", "RUN_STARTED", "TEXT_MESSAGE_START", "TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_CONTENT"]);
+    assert_eq!(events[0]["messages"].as_array().map(Vec::len), Some(2), "the first message and its reply only");
+    assert_eq!(events[2..].iter().filter_map(|e| e["delta"].as_str()).collect::<String>(), "XYZ");
+    let run = events[1]["runId"].as_str().unwrap().to_owned();
+    let thread = c.conv.id.clone();
+    assert_eq!(c.command(Command::Stop { thread_id: thread, run_id: run }, Instant::now()).status, 202, "Stop finds it");
+    let mut all = events[1..].to_vec();
+    all.extend(got(&web));
+    assert_eq!(all.last().unwrap()["type"], "RUN_FINISHED", "{all:?}");
+    replays_to(&all, "XYZ");
+}
+
+#[test]
+fn a_server_starting_mid_reply_gives_a_client_that_run_from_its_start_then_live_to_its_end() {
+    let mut feeding = Feeding::default();
+    let mut c = on_claude();
+    let id = sent(&mut c, "a");
+    let token = c.ask(id).unwrap();
+    c.reply_event(token, Event::Text("A".into()), Instant::now());
+    // The server starts on the hub, then the chat is told.
+    let _server = feeding.feed();
+    c.set_feed(feeding.need(true).unwrap());
+    let (tx, client) = watcher();
+    c.join(tx);
+    c.reply_event(token, Event::Text("B".into()), Instant::now());
+    c.reply_event(token, Event::Done, Instant::now());
+    let events = got(&client);
+    assert_eq!(types(&events), ["MESSAGES_SNAPSHOT", "RUN_STARTED", "TEXT_MESSAGE_START", "TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_CONTENT", "TEXT_MESSAGE_END", "RUN_FINISHED"]);
+    replays_to(&events[1..], "AB");
 }
 
 #[test]
