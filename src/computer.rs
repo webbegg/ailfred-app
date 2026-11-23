@@ -5,15 +5,20 @@
 //! The rules are pure modules with their tests: the rate limit, screenshot geometry, key
 //! combos, the apps never targeted, which actions ask first, and the session the user grants.
 //! `Desktop` is the seam to the real Mac (`macos`): screenshots, input events, and what the
-//! Accessibility API says is under a point. The tools that use them come in the next slices;
-//! until then nothing calls them (remove this allow once they do).
+//! Accessibility API says is under a point. `mcp` serves the tools over JSON-RPC behind those
+//! guards, and `control` holds the session the app shares with it. The HTTP server that wires
+//! them up comes in a later slice; until then nothing calls them (remove this allow once it does).
 #![allow(dead_code, unused_imports)]
 
 pub mod blocklist;
+pub mod control;
 pub mod coords;
 pub mod encode;
+#[cfg(test)]
+mod fake;
 pub mod keys;
 mod macos;
+pub mod mcp;
 pub mod rate;
 pub mod risk;
 pub mod session;
@@ -96,4 +101,33 @@ pub trait Desktop: Send + Sync {
     fn window_owner_at(&self, at: Point) -> Option<AppIdentity>;
     /// Brings an app back to the front (after a dialog took the focus).
     fn activate(&self, pid: i32);
+}
+
+/// Native dialogs Ailfred shows itself, out of the model's reach.
+pub trait Dialogs: Send + Sync {
+    /// "Allow Ailfred to see and control this Mac for 30 minutes?" (Allow / Deny).
+    fn ask_grant(&self) -> bool;
+    /// A per-action confirmation showing the action and its target.
+    fn confirm(&self, message: &str) -> bool;
+}
+
+pub trait Clock: Send + Sync {
+    /// Unix epoch milliseconds.
+    fn now_ms(&self) -> u64;
+    fn sleep_ms(&self, ms: u64);
+}
+
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now_ms(&self) -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or_default()
+    }
+
+    fn sleep_ms(&self, ms: u64) {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
 }
