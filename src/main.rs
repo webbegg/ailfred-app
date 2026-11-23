@@ -686,8 +686,7 @@ impl Host {
         }
         self.pi.get_or_insert_with(|| {
             let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-            let data = home.join("Library/Application Support").join(settings::APP_ID).join("pi");
-            pi_setup::Pi::start(pi_setup::pi_binary(&home), data, home)
+            pi_setup::Pi::start(pi_setup::pi_binary(&home), pi_data(&home), home)
         })
     }
 
@@ -935,6 +934,11 @@ impl Host {
         if !on && let Err(e) = model::claude_code::write_computer_config(&model::claude_code::private_dir_now(), None) {
             eprintln!("Ailfred: removing Claude Code's computer tools failed: {e}");
         }
+        // Nor the one in pi's mcp.json until pi next starts.
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+        if !on && let Err(e) = pi_setup::forget_computer_token(&pi_data(&home)) {
+            eprintln!("Ailfred: removing pi's computer tools failed: {e}");
+        }
         // The panic chord is held only while computer control is on.
         if let Some(handle) = &self.handle {
             let chord = computer::PANIC_SHORTCUT.parse::<rune::Shortcut>().ok();
@@ -1062,6 +1066,11 @@ impl Host {
 }
 
 /// A link the system opened with Ailfred (`ailfred://…`; it comes from anyone who can run `open`).
+/// Where Ailfred's pi keeps its folders, under the user's `home`.
+fn pi_data(home: &std::path::Path) -> std::path::PathBuf {
+    home.join("Library/Application Support").join(settings::APP_ID).join("pi")
+}
+
 fn on_link(host: &mut Host, url: &str, _: &mut Tx) {
     match link::parse(url) {
         Some(link::Link::Toggle) => host.toggle_quick_input(),

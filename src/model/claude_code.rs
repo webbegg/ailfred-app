@@ -69,6 +69,10 @@ fn lean(system: &str, model: &str) -> Vec<String> {
 /// Computer control's tools for one run, while Settings' switch is on: the `computer` MCP server
 /// (`--mcp-config`, still strict: no other server), its tools allowed without Claude Code's own
 /// prompt (there's none to show in `-p`; Ailfred asks the user itself). `config`: None, no tools.
+///
+/// A limit: every action's screenshot stays in its context. pi gets an extension that leaves all
+/// but the latest out of what it sends its model (`pi_setup::computer_tools`); Claude Code has no
+/// such hook, so a long run grows in context and cost with every step.
 pub fn with_computer(mut args: Vec<String>, config: Option<&Path>) -> Vec<String> {
     if let Some(config) = config {
         let server = format!("mcp__{}", crate::pi_setup::COMPUTER_SERVER);
