@@ -26,7 +26,8 @@ done
 IDENTITY=${MAC_APP_SIGN:--}
 [ "$IDENTITY" = "-" ] && echo "bundle-mac: signing ad hoc; Screen Recording will be asked again after each reinstall" >&2
 
-cargo build --release --locked >&2
+# Settings shows it (src/settings_ui.rs); cargo rebuilds when it changes.
+AILFRED_BUILD="$BUILD" cargo build --release --locked >&2
 
 APP="$TARGET/bundle/$NAME.app"
 rm -rf "$APP"
