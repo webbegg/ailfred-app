@@ -9,7 +9,7 @@ its own window).
 
    ```
    <folder>/ailfred-app        this repository
-   <folder>/_references/rune   https://github.com/anomalyco/rune (the commit CI pins:
+   <folder>/_references/rune   https://github.com/anomalyco/rune (the commit pinned as
                                 RUNE_REV in .github/workflows/check.yml)
    ```
 

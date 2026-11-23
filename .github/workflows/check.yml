@@ -1,9 +1,11 @@
 name: check
 
-# scripts/check (build, clippy with warnings as errors, tests) on a Mac, for each pull request
-# and each push to master. Rune is a path dependency beside the repository
-# (../_references/rune): the job checks it out there, at the commit RUNE_REV names. Bump
-# RUNE_REV when the app needs a newer Rune.
+# Only what needs no Mac: the UI-free crates (ailfred-core, ailfred-protocol) on Linux, for
+# each pull request and each push to master. macOS runners are slow to get and costly, so the
+# app itself is checked locally: `scripts/check` is the gate before every commit.
+# Rune is a path dependency beside the repository (../_references/rune) that the workspace's
+# manifest names, so the job checks it out there, at the commit RUNE_REV names (nothing of it
+# is built here). Bump RUNE_REV when the app needs a newer Rune.
 on:
   pull_request:
   push:
@@ -24,9 +26,12 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
-    runs-on: macos-15
-    timeout-minutes: 75
+  core:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: ailfred-app
     steps:
       - uses: actions/checkout@v4
         with:
@@ -38,12 +43,19 @@ jobs:
           path: _references/rune
       # rustup installs the toolchain rust-toolchain.toml names (with clippy) on first use.
       - name: Toolchain
-        working-directory: ailfred-app
         run: rustup show active-toolchain || rustup toolchain install
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ailfred-app
-          key: rune-${{ env.RUNE_REV }}
-      - name: scripts/check
-        working-directory: ailfred-app
-        run: scripts/check
+      - name: The core crates stay UI-free
+        run: |
+          for crate in ailfred-core ailfred-protocol; do
+            if cargo tree --locked -p "$crate" -e normal --prefix none | grep -E '^(rune|objc2)'; then
+              echo "$crate depends on Rune or objc2" >&2
+              exit 1
+            fi
+          done
+      - name: clippy
+        run: cargo clippy --locked -p ailfred-core -p ailfred-protocol --all-targets -- -D warnings
+      - name: test
+        run: cargo test --locked -p ailfred-core -p ailfred-protocol

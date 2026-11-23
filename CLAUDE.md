@@ -12,9 +12,10 @@ own window) with Claude. Words used here and in the UI: see `CONTEXT.md`.
   starting the other: they share the global shortcuts. `scripts/bundle-mac` only builds and signs
   the bundle; `scripts/make-dmg` packs it; `scripts/make-signing-identity` makes the local
   signing identity once per Mac. Installing and removing: `docs/install.md`.
-- Rune is a path dependency (`../_references/rune`, plus the vendored crates in `[patch]`). CI
-  (`.github/workflows/check.yml`) checks Rune out there at `RUNE_REV` and runs `scripts/check` on
-  a Mac; the check script stays the gate before a commit.
+- Rune is a path dependency (`../_references/rune`, plus the vendored crates in `[patch]`). The
+  app is checked locally only (macOS runners are slow and costly): `scripts/check` is the gate
+  before a commit. CI (`.github/workflows/check.yml`, Rune pinned at `RUNE_REV`) runs on Linux
+  and covers only the UI-free crates: they stay free of Rune and objc2, clippy, their tests.
 
 ## Layout
 - One module per component in `src/`. A big one is `foo.rs` with child files in `src/foo/`

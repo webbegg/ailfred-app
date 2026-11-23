@@ -1,6 +1,6 @@
 #!/bin/bash
-# The gate before a commit or a PR; CI runs it too (.github/workflows/check.yml, with Rune checked
-# out beside the repo at a pinned commit).
+# The gate before a commit or a PR, run locally on a Mac: CI checks only the UI-free crates, on
+# Linux (.github/workflows/check.yml), so this is the only check of the app itself.
 # Each step in order, over the whole workspace (the app and crates/ailfred-core), stopping at the
 # first failure:
 #   1. build everything (the app, the core, their tests and examples)
