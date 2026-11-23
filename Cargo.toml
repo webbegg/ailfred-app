@@ -39,6 +39,10 @@ rune = { version = "0.0.1", path = "../_references/rune/crates/rune", features =
 rune-kit = { version = "0.0.1", path = "../_references/rune/crates/rune-kit", features = ["markdown"] }
 tray-icon = "0.26"
 
+[dev-dependencies]
+# The local server's tests hold every line it sends to the official AG-UI schema.
+ailfred-protocol = { path = "crates/ailfred-protocol", features = ["testing"] }
+
 # Rune ships patched copies of these crates; a dependency's `[patch]` doesn't apply to the
 # workspace that depends on it, so an app that builds Rune repeats them.
 [patch.crates-io]

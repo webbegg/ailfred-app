@@ -4,7 +4,7 @@
 use ailfred_core::reply::{Event, Tool};
 use serde_json::{Map, Value, json};
 
-use crate::agui::{self, Base, Content, Interrupt, PROTOCOL_VERSION, ReasoningRole, RunOutcome, TextRole, ToolRole};
+use crate::agui::{self, Base, Content, Interrupt, PROTOCOL_VERSION, ReasoningRole, RunAgentInput, RunOutcome, TextRole, ToolRole};
 
 /// What a custom event carrying more of a step's output is called.
 pub const STEP_OUTPUT: &str = "ailfred:step_output";
@@ -31,6 +31,8 @@ pub struct Encoder {
     diffs: u32,
     /// The questions asked, sent again as the interrupts the run ends with.
     asks: Vec<Interrupt>,
+    /// What `RUN_STARTED` says the run was asked (`with_input`).
+    input: Option<Box<RunAgentInput>>,
 }
 
 /// A step of the run: its output so far is its result's content.
@@ -42,7 +44,14 @@ struct Step {
 
 impl Encoder {
     pub fn new(thread_id: impl Into<String>, run_id: impl Into<String>) -> Self {
-        Encoder { thread: thread_id.into(), run: run_id.into(), started: false, over: false, text: None, texts: 0, thinking: None, thoughts: 0, steps: Vec::new(), diffs: 0, asks: Vec::new() }
+        Encoder { thread: thread_id.into(), run: run_id.into(), started: false, over: false, text: None, texts: 0, thinking: None, thoughts: 0, steps: Vec::new(), diffs: 0, asks: Vec::new(), input: None }
+    }
+
+    /// The same, its `RUN_STARTED` carrying `input`: what the run was asked (the server puts
+    /// the user message it answers there).
+    pub fn with_input(mut self, input: RunAgentInput) -> Self {
+        self.input = Some(Box::new(input));
+        self
     }
 
     /// The events for `event`, which came at `at` (ms since the epoch); none once the run is over.
@@ -169,7 +178,7 @@ impl Encoder {
     fn start(&mut self, at: u64, out: &mut Vec<agui::Event>) {
         if !self.started {
             self.started = true;
-            out.push(agui::Event::RunStarted { thread_id: self.thread.clone(), run_id: self.run.clone(), protocol_version: Some(PROTOCOL_VERSION.into()), base: Base::at(at) });
+            out.push(agui::Event::RunStarted { thread_id: self.thread.clone(), run_id: self.run.clone(), protocol_version: Some(PROTOCOL_VERSION.into()), parent_run_id: None, input: self.input.take(), base: Base::at(at) });
         }
     }
 

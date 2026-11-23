@@ -232,7 +232,7 @@ fn said(content: &Content) -> (String, Vec<Vec<u8>>) {
 }
 
 /// Standard base64 back into bytes; None if it isn't.
-fn unbase64(coded: &str) -> Option<Vec<u8>> {
+pub(crate) fn unbase64(coded: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(coded.len() * 3 / 4);
     let (mut acc, mut bits) = (0u32, 0u32);
     for c in coded.bytes() {

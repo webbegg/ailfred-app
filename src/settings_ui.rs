@@ -2,7 +2,8 @@
 //! with what happened to a saved one that was taken at startup), the save folder, the model
 //! (Claude's version and the Anthropic API key, which lives in the Keychain), whether Screen
 //! Recording is on (with the way to System Settings), whether the model may control the Mac (and
-//! then whether Accessibility is on), and whether animations play under the system's Reduce Motion.
+//! then whether Accessibility is on), whether apps on this Mac may reach the conversation (the local
+//! server), and whether animations play under the system's Reduce Motion.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -16,9 +17,10 @@ use crate::model;
 use crate::settings::{HotKey, Settings, ShortcutFor};
 
 /// The window's size in points.
-pub const SIZE: (f32, f32) = (480.0, 780.0);
+pub const SIZE: (f32, f32) = (480.0, 840.0);
 
 pub const COMPUTER_CONTROL_LABEL: &str = "Let the model control this Mac";
+pub const LOCAL_SERVER_LABEL: &str = "Local server";
 
 pub struct SettingsUi {
     settings: Settings,
@@ -50,6 +52,8 @@ pub struct SettingsUi {
     computer_control: bool,
     accessibility: Option<bool>,
     check_accessibility: fn() -> bool,
+    /// Settings' local-server switch.
+    local_server: bool,
 }
 
 /// Where replies come from with pi picked.
@@ -69,8 +73,10 @@ impl SettingsUi {
         let ignore_reduce_motion = settings.ignore_reduce_motion();
         let model = settings.model();
         let computer_control = settings.computer_control();
+        let local_server = settings.local_server();
         SettingsUi {
             computer_control,
+            local_server,
             accessibility: None,
             check_accessibility: crate::app_env::accessibility_allowed_quiet,
             settings,
@@ -186,6 +192,16 @@ impl SettingsUi {
         }
     }
 
+    /// The local-server switch: kept, and handed to the app, which starts or stops the server.
+    fn toggle_local_server(&mut self) {
+        self.local_server = !self.local_server;
+        self.settings.set_local_server(self.local_server);
+        let on = self.local_server;
+        if let Some(host) = &self.host {
+            host.update(move |host, _| host.set_local_server(on));
+        }
+    }
+
     fn toggle_reduce_motion(&mut self) {
         self.ignore_reduce_motion = !self.ignore_reduce_motion;
         self.settings.set_ignore_reduce_motion(self.ignore_reduce_motion);
@@ -199,6 +215,7 @@ impl SettingsUi {
         let quick_recorder = ShortcutRecorderState::new(settings.quick_shortcut());
         SettingsUi {
             computer_control: settings.computer_control(),
+            local_server: settings.local_server(),
             accessibility: None,
             check_accessibility: crate::app_env::accessibility_allowed_quiet,
             quick_recorder,
@@ -296,6 +313,13 @@ pub fn view(s: &SettingsUi, cx: &mut Cx<SettingsUi>) -> El {
                 .label(COMPUTER_CONTROL_LABEL)
                 .description("With pi or Claude Code, the model can see the screen, click and type. Each 30-minute session asks you first, and so does every action that sends, pays, buys or deletes.")
                 .on_toggle(|s: &mut SettingsUi| s.toggle_computer_control())
+                .build(k),
+        )
+        .child(
+            Checkbox::new(s.local_server)
+                .label(LOCAL_SERVER_LABEL)
+                .description("Lets apps on this Mac show and continue your conversation. They need the key Ailfred writes for them.")
+                .on_toggle(|s: &mut SettingsUi| s.toggle_local_server())
                 .build(k),
         )
         .child(
@@ -516,6 +540,19 @@ mod tests {
         let says = els.iter().find(|e| e.key.as_deref() == Some("accessibility")).and_then(|e| e.text.clone()).unwrap_or_default();
         assert!(says.contains("Accessibility: Off"), "{says:?}");
         assert!(els.iter().any(|e| e.role == "button" && e.label.as_deref() == Some("Open Accessibility Settings…")));
+    }
+
+    #[test]
+    fn the_local_server_switch_is_off_and_turning_it_on_keeps_it() {
+        let rt = frames(ui());
+        let switch = shown(&rt).into_iter().find(|e| e.role == "checkbox" && e.label.as_deref() == Some(LOCAL_SERVER_LABEL));
+        assert!(switch.is_some(), "the switch is there");
+        let mut s = ui();
+        assert!(!s.local_server, "off by default");
+        s.toggle_local_server();
+        assert!(s.local_server && s.settings.local_server(), "on, and kept");
+        s.toggle_local_server();
+        assert!(!s.local_server && !s.settings.local_server(), "off again");
     }
 
     #[test]

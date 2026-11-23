@@ -49,6 +49,7 @@ const QUICK_SHORTCUT: &str = "quick_shortcut";
 const FOLDER: &str = "folder";
 const IGNORE_REDUCE_MOTION: &str = "ignore_reduce_motion";
 const COMPUTER_CONTROL: &str = "computer_control";
+const LOCAL_SERVER: &str = "local_server";
 const MODEL: &str = "model";
 
 /// Whether the views animate even under the system's Reduce Motion, until set (also before the
@@ -181,6 +182,17 @@ impl Settings {
     pub fn set_computer_control(&mut self, on: bool) {
         if let Err(e) = self.prefs.set(COMPUTER_CONTROL, &on) {
             eprintln!("Ailfred: saving the computer control setting failed: {e}");
+        }
+    }
+
+    /// Serve the conversation to apps on this Mac (`crate::server`): off until turned on.
+    pub fn local_server(&self) -> bool {
+        self.prefs.get::<bool>(LOCAL_SERVER).unwrap_or(false)
+    }
+
+    pub fn set_local_server(&mut self, on: bool) {
+        if let Err(e) = self.prefs.set(LOCAL_SERVER, &on) {
+            eprintln!("Ailfred: saving the local server setting failed: {e}");
         }
     }
 }
@@ -453,6 +465,16 @@ mod tests {
         assert!(s.computer_control());
         s.set_computer_control(false);
         assert!(!s.computer_control());
+    }
+
+    #[test]
+    fn the_local_server_is_off_until_turned_on_and_stays_as_set() {
+        let mut s = Settings::with(Prefs::memory());
+        assert!(!s.local_server(), "off by default: no app reaches the conversation");
+        s.set_local_server(true);
+        assert!(s.local_server());
+        s.set_local_server(false);
+        assert!(!s.local_server());
     }
 
 

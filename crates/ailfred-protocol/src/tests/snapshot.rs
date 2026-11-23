@@ -5,7 +5,7 @@ use std::time::Instant;
 use ailfred_core::reply::{Event, Part, Reply, State, Tool};
 use serde_json::Value;
 
-use super::conformance::Spec;
+use crate::conformance::Spec;
 use super::{PNG, digest};
 use crate::agui::{self, to_line};
 use crate::saved::reply_events;

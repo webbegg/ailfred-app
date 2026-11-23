@@ -94,5 +94,11 @@ needs you (a question), an error, or replied (while the chat was hidden). The me
 shows it with a badge, its tooltip in words.
 _Avoid_: agent state, activity
 
+**Local server**:
+The switch in Settings that lets apps on this Mac show and continue the conversation in the chat
+(the same one, over AG-UI on `127.0.0.1`), with the key Ailfred writes for them in `server.json`.
+A **client** is such an app (`docs/local-server.md`).
+_Avoid_: API, daemon
+
 **Host**:
 The windowless app at the root (`main.rs`) that owns every window, the tray and the shortcuts.

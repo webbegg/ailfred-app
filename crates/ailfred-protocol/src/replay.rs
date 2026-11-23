@@ -302,7 +302,7 @@ mod tests {
         let mut r = Replayer::new();
         let mut kinds = Vec::new();
         for e in [
-            agui::Event::RunStarted { thread_id: "t".into(), run_id: "r".into(), protocol_version: None, base: base() },
+            agui::Event::RunStarted { thread_id: "t".into(), run_id: "r".into(), protocol_version: None, parent_run_id: None, input: None, base: base() },
             agui::Event::ToolCallStart { tool_call_id: "c".into(), tool_call_name: "weather".into(), parent_message_id: None, base: base() },
             agui::Event::ToolCallArgs { tool_call_id: "c".into(), delta: "{\"city\":".into(), base: base() },
             agui::Event::ToolCallArgs { tool_call_id: "c".into(), delta: "\"Paris\"}".into(), base: base() },

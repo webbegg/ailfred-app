@@ -106,6 +106,22 @@
         }
       ]
     },
+    "Context": {
+      "description": "A named piece of what's around the conversation, for the agent.",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "description",
+        "value"
+      ],
+      "type": "object"
+    },
     "FunctionCall": {
       "properties": {
         "arguments": {
@@ -403,6 +419,85 @@
       ],
       "type": "string"
     },
+    "Resume": {
+      "description": "An answer to one [`Interrupt`] (the schema's `ResumeEntry`).",
+      "properties": {
+        "interruptId": {
+          "type": "string"
+        },
+        "metadata": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "payload": {
+          "description": "The answer itself (Ailfred's: `{\"answer\": \"…\"}`)."
+        },
+        "status": {
+          "$ref": "#/$defs/ResumeStatus"
+        }
+      },
+      "required": [
+        "interruptId",
+        "status"
+      ],
+      "type": "object"
+    },
+    "ResumeStatus": {
+      "enum": [
+        "resolved",
+        "cancelled"
+      ],
+      "type": "string"
+    },
+    "RunAgentInput": {
+      "description": "What starts a run: the conversation, and the answers to the last run's questions.",
+      "properties": {
+        "context": {
+          "items": {
+            "$ref": "#/$defs/Context"
+          },
+          "type": "array"
+        },
+        "forwardedProps": true,
+        "messages": {
+          "items": {
+            "$ref": "#/$defs/Message"
+          },
+          "type": "array"
+        },
+        "parentRunId": {
+          "type": "string"
+        },
+        "protocolVersion": {
+          "type": "string"
+        },
+        "resume": {
+          "items": {
+            "$ref": "#/$defs/Resume"
+          },
+          "type": "array"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "state": true,
+        "threadId": {
+          "type": "string"
+        },
+        "tools": {
+          "items": {
+            "$ref": "#/$defs/Tool"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "threadId",
+        "runId",
+        "messages"
+      ],
+      "type": "object"
+    },
     "RunOutcome": {
       "description": "Why a run ended, tagged by `type`. More may come in a later version.",
       "oneOf": [
@@ -463,6 +558,25 @@
       ],
       "type": "string"
     },
+    "Tool": {
+      "description": "A tool the client offers the agent.",
+      "properties": {
+        "description": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "parameters": {
+          "description": "A JSON Schema of its arguments."
+        }
+      },
+      "required": [
+        "name",
+        "description"
+      ],
+      "type": "object"
+    },
     "ToolCall": {
       "description": "A call an assistant message made.",
       "properties": {
@@ -497,10 +611,22 @@
     {
       "description": "A run starts.",
       "properties": {
+        "input": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/RunAgentInput"
+            }
+          ],
+          "description": "What the run was asked: the server sends the user message a run answers here, so a\nclient that didn't send it sees it too."
+        },
         "metadata": {
           "additionalProperties": true,
           "description": "Extra information; Ailfred's own sits under the key `ailfred`.",
           "type": "object"
+        },
+        "parentRunId": {
+          "description": "The run that started this one as a run of its own (Ailfred's runs have none).",
+          "type": "string"
         },
         "protocolVersion": {
           "type": "string"
