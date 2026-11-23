@@ -71,6 +71,12 @@ fn identity_of(pid: i32, name: &str) -> AppIdentity {
     }
 }
 
+/// Posts at the HID tap, as if from the real mouse and keyboard, so it reaches whatever is under
+/// the pointer or has focus (Gentle Dot does the same). Not `CGEventPostToPid`: many apps drop
+/// mouse events sent to their process, the cursor wouldn't move, and a window of another app
+/// on top would still be what the user sees clicked. The target is checked instead: before each
+/// post the handler asks who owns the window under the point (keys: the frontmost and focused
+/// apps) and refuses a blocked or changed one (`mcp.rs`, `still_pointer_target`).
 fn post_event(event: Option<CFRetained<CGEvent>>) -> Result<(), String> {
     let event = event.ok_or("macOS could not create the input event")?;
     CGEvent::post(CGEventTapLocation::HIDEventTap, Some(&event));
