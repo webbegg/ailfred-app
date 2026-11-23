@@ -27,7 +27,9 @@ own window) with Claude. Words used here and in the UI: see `CONTEXT.md`.
   `crate::reply` and the rest read as before. UI state (text fields) stays in the app.
   `crates/ailfred-protocol` is the wire protocol later clients speak: the core's reply as AG-UI
   1.0 events and back, the commands, JSON Schemas and JSONL fixtures every client replays
-  (`UPDATE_FIXTURES=1` rewrites them). It depends on the core only; the app doesn't use it yet.
+  (`UPDATE_FIXTURES=1` rewrites them), a saved reply's events (`saved.rs`) and the messages
+  snapshot a joining client gets (`snapshot.rs`). It depends on the core only; the app uses it
+  to save replies whole (`src/history/convert.rs`).
 - `main.rs` holds the `Host`: the windowless app that owns the overlay, the quick input, the chat
   window, the tray and the shortcuts, and routes the chat between side panel and window.
 - macOS-only calls (`objc2-*`) stay in small modules (`capture.rs`, `login.rs`, `screens.rs`,

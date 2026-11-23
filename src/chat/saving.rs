@@ -40,10 +40,11 @@ impl Chat {
         let messages = self
             .messages
             .iter()
-            .map(|m| history::SavedMessage {
+            .enumerate()
+            .map(|(i, m)| history::SavedMessage {
                 text: m.text.clone(),
                 pngs: m.files.clone(),
-                reply: self.replies.iter().find(|r| r.id == m.id).map(history::saved_reply),
+                reply: self.replies.iter().find(|r| r.id == m.id).map(|r| history::saved_reply(r, &self.conv.id, &history::run_id(&self.conv.id, i))),
             })
             .collect();
         let session = self.session.as_ref().and_then(|(id, ends_at)| {

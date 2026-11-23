@@ -103,6 +103,7 @@ name = "ailfred"
 version = "0.1.0"
 dependencies = [
  "ailfred-core",
+ "ailfred-protocol",
  "block2 0.6.2",
  "dispatch2",
  "image",

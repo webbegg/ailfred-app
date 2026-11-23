@@ -15,7 +15,7 @@ use super::{fixture, scripts};
 
 const SPEC: &str = include_str!("../../spec/ag-ui-1.0.schema.json");
 
-struct Spec {
+pub(super) struct Spec {
     defs: Map<String, Value>,
 }
 
@@ -28,7 +28,7 @@ struct Shape {
 }
 
 impl Spec {
-    fn load() -> Self {
+    pub(super) fn load() -> Self {
         let spec: Value = serde_json::from_str(SPEC).unwrap();
         Spec { defs: spec["$defs"].as_object().unwrap().clone() }
     }
@@ -174,7 +174,7 @@ impl Spec {
     }
 
     /// What's wrong with `value` as definition `def`.
-    fn errors(&self, value: &Value, def: &str) -> Vec<String> {
+    pub(super) fn errors(&self, value: &Value, def: &str) -> Vec<String> {
         let mut errors = Vec::new();
         self.check(value, &json!({ "$ref": format!("#/$defs/{def}") }), def, &mut errors);
         errors

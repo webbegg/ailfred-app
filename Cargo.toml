@@ -11,6 +11,8 @@ resolver = "3"
 
 [dependencies]
 ailfred-core = { path = "crates/ailfred-core" }
+# Saved replies keep their AG-UI events.
+ailfred-protocol = { path = "crates/ailfred-protocol" }
 block2 = "0.6"
 # Computer control's dialogs run on the main queue (already built through objc2).
 dispatch2 = { version = "0.3", default-features = false, features = ["std"] }

@@ -14,6 +14,8 @@ use crate::encode::Encoder;
 use crate::replay::{Kind, Replayer, parse_line};
 
 mod conformance;
+mod saved;
+mod snapshot;
 
 const THREAD: &str = "thread-1";
 
@@ -211,7 +213,7 @@ fn digest(r: &Reply) -> String {
             Part::Text(t) => format!("text {t:?}"),
             Part::Agent(a) => a.steps.iter().map(|s| format!("step {:?} {:?} {:?} {:?}", s.tool, s.target, s.output, s.status)).collect::<Vec<_>>().join("\n"),
             Part::Diff(d) => format!("diff {:?} {:?}", d.path, d.patch),
-            Part::Question(q) => format!("question {:?} {:?} multi={}", q.prompt, q.options, q.multi),
+            Part::Question(q) => format!("question {:?} {:?} multi={} answered={:?}", q.prompt, q.options, q.multi, q.answered),
             Part::Error(e) => format!("error {e:?}"),
         };
         out.push_str(&line);

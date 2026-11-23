@@ -165,6 +165,9 @@ pub struct Question {
     pub picked: Vec<usize>,
     /// What the user answered; then it's read only.
     pub answered: Option<String>,
+    /// Nothing waits for its answer any more (it was asked in a reply loaded from disk, and the
+    /// model's process is a new one): read only, unanswered.
+    pub closed: bool,
 }
 
 // A reply holds a handful of parts: boxing the big ones would buy nothing.
@@ -212,9 +215,9 @@ impl Reply {
         self.streaming() || (self.state == State::Queued && self.steered)
     }
 
-    /// It ended with a question the user hasn't answered.
+    /// It ended with a question the user hasn't answered, and can.
     pub fn asks(&self) -> bool {
-        self.parts.iter().any(|p| matches!(p, Part::Question(q) if q.answered.is_none()))
+        self.parts.iter().any(|p| matches!(p, Part::Question(q) if q.open()))
     }
 
     /// What the model is told it answered, in a later message's history: its text, if it
@@ -272,7 +275,7 @@ impl Reply {
                 self.parts.push(Part::Diff(Diff { path, patch, added, removed, open, applied: false }));
             }
             Event::Ask { prompt, options, multi } => {
-                self.parts.push(Part::Question(Question { prompt, options, multi, picked: Vec::new(), answered: None }));
+                self.parts.push(Part::Question(Question { prompt, options, multi, picked: Vec::new(), answered: None, closed: false }));
             }
             Event::Fail(message) => {
                 self.end_steps(StepStatus::Failed);
@@ -367,10 +370,10 @@ impl Reply {
 
     /// The user's answer to question `part`: what they wrote in its "something else" field
     /// (`other`, kept by the client), else the options picked (in their order); it then shows as
-    /// answered. None if nothing is picked or written, or it was answered already.
+    /// answered. None if nothing is picked or written, or it was answered already or is closed.
     pub fn answer(&mut self, part: usize, other: &str) -> Option<String> {
         let Some(Part::Question(q)) = self.parts.get_mut(part) else { return None };
-        if q.answered.is_some() {
+        if !q.open() {
             return None;
         }
         let other = other.trim();
@@ -390,9 +393,14 @@ impl Reply {
 }
 
 impl Question {
+    /// It still takes an answer: not answered, not closed.
+    pub fn open(&self) -> bool {
+        self.answered.is_none() && !self.closed
+    }
+
     /// Option `i` clicked: picked alone (single) or toggled (multi).
     pub fn pick(&mut self, i: usize) {
-        if self.answered.is_some() || i >= self.options.len() {
+        if !self.open() || i >= self.options.len() {
             return;
         }
         if self.multi {
@@ -538,6 +546,20 @@ mod tests {
         assert_eq!(r.answer(1, "").as_deref(), Some("B"), "single: the last pick");
         assert_eq!(r.answer(2, "  "), None, "nothing picked");
         assert_eq!(r.answer(2, "  my own  ").as_deref(), Some("my own"));
+    }
+
+    #[test]
+    fn a_closed_question_takes_no_pick_and_no_answer_and_asks_nothing() {
+        let mut r = run(vec![Event::Ask { prompt: "Which?".into(), options: vec!["A".into(), "B".into()], multi: false }, Event::Done]);
+        assert!(r.asks());
+        let Part::Question(q) = &mut r.parts[0] else { panic!("question") };
+        q.closed = true;
+        q.pick(1);
+        assert!(q.picked.is_empty(), "no pick");
+        q.picked = vec![1];
+        assert_eq!(r.answer(0, ""), None);
+        assert_eq!(r.answer(0, "my own"), None);
+        assert!(!r.asks(), "nothing to answer");
     }
 
     #[test]

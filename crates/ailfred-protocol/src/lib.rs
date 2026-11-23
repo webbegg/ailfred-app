@@ -30,11 +30,21 @@
 //! `{"answer": "…"}`); that run's `messages` are, as AG-UI requires, the whole conversation so
 //! far, the reply that asked included (as an assistant message with its text).
 //!
+//! ## Saved replies and snapshots
+//!
+//! [`saved`] turns a finished reply back into one run's events, and those events into the same
+//! reply: a saved conversation keeps its replies so (the app's `history`). [`snapshot`] makes a
+//! conversation one `MESSAGES_SNAPSHOT` for a client that joins it, and reads one back; its
+//! docs say what a snapshot doesn't carry.
+//!
 //! ## Ids
 //!
 //! Derived from the run's id `{run}`: text messages `{run}-text-{n}`, a reasoning span
 //! (`REASONING_START`/`END`) `{run}-reasoning-{n}` and its message `{run}-thinking-{n}`, steps `{run}-step-{id}` (the core's step id) with their result message
 //! `{run}-step-{id}-result`, diffs `{run}-diff-{n}`, questions `{run}-ask-{n}`; `n` counts from 1.
+//! A saved reply's steps, and a snapshot's, are numbered `1, 2, …` in the order they came; a
+//! snapshot's assistant message with a run of steps' calls is `{run}-steps-{n}`, a user message
+//! `{run}-user`, an error `{run}-error-{n}`.
 //!
 //! ## Fixtures and schemas
 //!
@@ -53,6 +63,8 @@
 //!   after the previous one finished.
 //! - Run ids must be unique within a thread, since every other id derives from them: the server
 //!   mints them, or refuses a `runId` already used.
+//! - Retry reuses a message's saved run id (the app's `history::run_id`), so the server must
+//!   mint a fresh run id per run.
 //! - A second `StepEnd` for a step that ended is ignored; the same core step id twice in one run
 //!   isn't supported.
 //! - An answer picking several options travels as one string, joined with `", "`, as the core's
@@ -62,6 +74,8 @@ pub mod agui;
 pub mod command;
 pub mod encode;
 pub mod replay;
+pub mod saved;
+pub mod snapshot;
 
 #[cfg(test)]
 mod tests;

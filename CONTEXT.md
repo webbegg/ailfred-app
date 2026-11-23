@@ -46,7 +46,9 @@ _Avoid_: session, thread
 
 **Conversation file**:
 A conversation on disk: `<id>.json` in `conversations/` under the app's settings folder (owner-only,
-written to a `.tmp` and renamed), its shots as `<id>/<n>.png` beside it. A damaged field falls back
+written to a `.tmp` and renamed), its shots as `<id>/<n>.png` beside it. Each reply keeps its text
+(what any version reads) and its run's AG-UI events with its answers, so steps, diffs and
+questions come back; events that don't replay leave it to its text. A damaged field falls back
 to its default; a file that won't parse is skipped and left alone. Written by one thread, never
 the main one.
 _Avoid_: history file, save file
