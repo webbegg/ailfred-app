@@ -14,7 +14,8 @@ cd "$(dirname "$0")/.."
 NAME=Ailfred
 ID=com.ailfred
 EXE=ailfred
-VERSION=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+# The app's package (the workspace also holds crates/ailfred-core).
+VERSION=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "ailfred"))')
 TARGET=$(cargo metadata --format-version 1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
 BUILD=$(git rev-list --count HEAD 2>/dev/null || echo 1)
 
@@ -27,7 +28,7 @@ IDENTITY=${MAC_APP_SIGN:--}
 [ "$IDENTITY" = "-" ] && echo "bundle-mac: signing ad hoc; Screen Recording will be asked again after each reinstall" >&2
 
 # Settings shows it (src/settings_ui.rs); cargo rebuilds when it changes.
-AILFRED_BUILD="$BUILD" cargo build --release --locked >&2
+AILFRED_BUILD="$BUILD" cargo build --release --locked -p ailfred >&2
 
 APP="$TARGET/bundle/$NAME.app"
 rm -rf "$APP"

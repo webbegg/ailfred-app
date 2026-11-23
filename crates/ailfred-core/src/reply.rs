@@ -3,8 +3,6 @@
 
 use std::time::{Duration, Instant};
 
-use rune::TextEdit;
-
 /// One piece of a streaming reply, in the order a model sends them.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
@@ -165,8 +163,6 @@ pub struct Question {
     pub options: Vec<String>,
     pub multi: bool,
     pub picked: Vec<usize>,
-    /// "Something else": the user's own answer.
-    pub other: TextEdit,
     /// What the user answered; then it's read only.
     pub answered: Option<String>,
 }
@@ -276,7 +272,7 @@ impl Reply {
                 self.parts.push(Part::Diff(Diff { path, patch, added, removed, open, applied: false }));
             }
             Event::Ask { prompt, options, multi } => {
-                self.parts.push(Part::Question(Question { prompt, options, multi, picked: Vec::new(), other: TextEdit::new(""), answered: None }));
+                self.parts.push(Part::Question(Question { prompt, options, multi, picked: Vec::new(), answered: None }));
             }
             Event::Fail(message) => {
                 self.end_steps(StepStatus::Failed);
@@ -369,15 +365,15 @@ impl Reply {
         out.join("\n\n")
     }
 
-    /// The user's answer to question `part`: the options picked (in their order) or what they
-    /// wrote, which then shows as answered. None if nothing is picked or written, or it was
-    /// answered already.
-    pub fn answer(&mut self, part: usize) -> Option<String> {
+    /// The user's answer to question `part`: what they wrote in its "something else" field
+    /// (`other`, kept by the client), else the options picked (in their order); it then shows as
+    /// answered. None if nothing is picked or written, or it was answered already.
+    pub fn answer(&mut self, part: usize, other: &str) -> Option<String> {
         let Some(Part::Question(q)) = self.parts.get_mut(part) else { return None };
         if q.answered.is_some() {
             return None;
         }
-        let other = q.other.text.trim();
+        let other = other.trim();
         let answer = if !other.is_empty() {
             other.to_owned()
         } else {
@@ -537,12 +533,11 @@ mod tests {
         q(&mut r, 0).pick(0);
         q(&mut r, 1).pick(0);
         q(&mut r, 1).pick(1);
-        assert_eq!(r.answer(0).as_deref(), Some("A, C"));
-        assert_eq!(r.answer(0), None, "answered once");
-        assert_eq!(r.answer(1).as_deref(), Some("B"), "single: the last pick");
-        assert_eq!(r.answer(2), None, "nothing picked");
-        q(&mut r, 2).other = TextEdit::new("  my own  ");
-        assert_eq!(r.answer(2).as_deref(), Some("my own"));
+        assert_eq!(r.answer(0, "").as_deref(), Some("A, C"));
+        assert_eq!(r.answer(0, ""), None, "answered once");
+        assert_eq!(r.answer(1, "").as_deref(), Some("B"), "single: the last pick");
+        assert_eq!(r.answer(2, "  "), None, "nothing picked");
+        assert_eq!(r.answer(2, "  my own  ").as_deref(), Some("my own"));
     }
 
     #[test]

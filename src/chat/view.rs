@@ -242,7 +242,7 @@ pub fn body<S: 'static>(s: &Chat, header: El, lens: fn(&mut S) -> &mut Chat) -> 
     for (i, m) in s.messages.iter().enumerate().skip(s.hidden) {
         thread = thread.child(message(i, m, &t));
         if let Some(r) = s.reply_to(m.id) {
-            thread = thread.child(reply_view::view(r, goes_on == Some(r.token), lens));
+            thread = thread.child(reply_view::view(s, r, goes_on == Some(r.token), lens));
         }
     }
     let messages = col()

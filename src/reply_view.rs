@@ -4,7 +4,7 @@
 use std::time::Instant;
 
 use rune::tok::{self, Family};
-use rune::{Color, Cursor, Cycle, El, Icon, Span, TextStyle, Transition, Tx, col, el, icon, oklch, rich, row, text, text_input};
+use rune::{Color, Cursor, Cycle, El, Icon, Span, TextEdit, TextStyle, Transition, Tx, col, el, icon, oklch, rich, row, text, text_input};
 use rune_kit::{CodeFrame, Markdown, MarkdownStyle, glyphs};
 
 use crate::chat::Chat;
@@ -38,9 +38,9 @@ type Lens<S> = fn(&mut S) -> &mut Chat;
 /// What an interrupted reply asks, when it's the conversation's last.
 pub const INTERRUPTED_ASK: &str = "I was interrupted. Continue?";
 
-/// Reply `r` in a window whose state `S` holds the chat at `lens`; `goes_on`: it offers
-/// Continue (`Chat::continuable`).
-pub fn view<S: 'static>(r: &Reply, goes_on: bool, lens: Lens<S>) -> El {
+/// Reply `r` of `chat` in a window whose state `S` holds the chat at `lens`; `goes_on`: it
+/// offers Continue (`Chat::continuable`).
+pub fn view<S: 'static>(chat: &Chat, r: &Reply, goes_on: bool, lens: Lens<S>) -> El {
     let t = tok::theme(true);
     let token = r.token;
     let mut out = col().key(format!("reply-{token}")).w_full().gap(10.0).hover_group().transition(Transition::opacity());
@@ -56,7 +56,7 @@ pub fn view<S: 'static>(r: &Reply, goes_on: bool, lens: Lens<S>) -> El {
             Part::Text(source) => markdown::<S>(source, live, &t),
             Part::Agent(a) => agent(token, j, a, &t, lens),
             Part::Diff(d) => diff(token, j, d, &t, lens),
-            Part::Question(q) => question(token, j, q, &t, lens),
+            Part::Question(q) => question(token, j, q, chat.question_field(token, j), &t, lens),
             Part::Error(message) => error(token, message, &t, lens),
         };
         out = out.child(part.key(format!("p{j}")).transition(Transition::opacity()));
@@ -374,7 +374,10 @@ fn diff<S: 'static>(token: u64, j: usize, d: &Diff, t: &tok::Theme, lens: Lens<S
     out
 }
 
-fn question<S: 'static>(token: u64, j: usize, q: &Question, t: &tok::Theme, lens: Lens<S>) -> El {
+/// Question `q`, its "something else" field `other` (none until the user edits it).
+fn question<S: 'static>(token: u64, j: usize, q: &Question, other: Option<&TextEdit>, t: &tok::Theme, lens: Lens<S>) -> El {
+    let blank = TextEdit::new("");
+    let other = other.unwrap_or(&blank);
     let open = q.answered.is_none();
     let mut card = col()
         .w_full()
@@ -428,13 +431,13 @@ fn question<S: 'static>(token: u64, j: usize, q: &Question, t: &tok::Theme, lens
     if let Some(answer) = &q.answered {
         return card.child(text(format!("Answered: {answer}")).key("answered").font(SMALL).color(t.text_secondary).wrap());
     }
-    let ready = !q.picked.is_empty() || !q.other.text.trim().is_empty();
+    let ready = !q.picked.is_empty() || !other.text.trim().is_empty();
     let answer = move |s: &mut S, tx: &mut Tx| {
         if lens(s).answer(token, j).is_some() {
             tx.scroll_to_bottom("messages");
         }
     };
-    let field = text_input(&q.other, SMALL.lh(18.0))
+    let field = text_input(other, SMALL.lh(18.0))
         .key("other")
         .label("Something else")
         .w_full()

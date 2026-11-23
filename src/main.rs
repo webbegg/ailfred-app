@@ -18,24 +18,24 @@ mod export;
 mod history;
 mod login;
 mod marks;
-mod mock_model;
 mod model;
 mod output;
-mod pi;
 mod pi_setup;
 mod icons;
 mod keychain;
 mod quick_input;
-mod reply;
 mod reply_view;
 mod screens;
 mod link;
 mod settings;
 mod settings_ui;
 mod shot;
-mod spawn;
 mod status;
 mod tray;
+
+// The engine and the conversation model, shared with other clients: `crate::reply` and the
+// rest read as before.
+use ailfred_core::{mock_model, pi, reply};
 
 use std::sync::Arc;
 use std::time::Duration;

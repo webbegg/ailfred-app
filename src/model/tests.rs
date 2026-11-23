@@ -98,14 +98,6 @@ fn a_backend_never_prints_its_key() {
 // What goes to the model.
 
 #[test]
-fn base64_is_the_standard_padded_one() {
-    for (plain, coded) in [("", ""), ("f", "Zg=="), ("fo", "Zm8="), ("foo", "Zm9v"), ("foob", "Zm9vYg=="), ("fooba", "Zm9vYmE="), ("foobar", "Zm9vYmFy")] {
-        assert_eq!(base64(plain.as_bytes()), coded);
-    }
-    assert_eq!(base64(&[0xfb, 0xff, 0xfe]), "+//+", "the + and / alphabet");
-}
-
-#[test]
 fn a_message_goes_as_its_captures_then_its_text_and_a_capture_alone_has_no_text_block() {
     let blocks = user_content("what is this?", &[png(b"foo"), png(b"foob")]);
     assert_eq!(

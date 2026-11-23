@@ -21,6 +21,10 @@ own window) with Claude. Words used here and in the UI: see `CONTEXT.md`.
   (`geometry.rs`, `view.rs`, `tests.rs`, …), never `mod.rs`; the root re-exports what others use.
 - Logic lives in plain types and functions without `Tx`, `Cx` or a window in their signature, so
   tests can call them; views only draw state and send events back.
+- A Cargo workspace: the app at the root, and `crates/ailfred-core` with what doesn't draw: the
+  conversation model (`reply.rs`), the engines (`pi.rs`, `mock_model.rs`), `spawn.rs` and
+  `turn.rs`. The core never depends on Rune or `objc2-*`; `main.rs` imports its modules, so
+  `crate::reply` and the rest read as before. UI state (text fields) stays in the app.
 - `main.rs` holds the `Host`: the windowless app that owns the overlay, the quick input, the chat
   window, the tray and the shortcuts, and routes the chat between side panel and window.
 - macOS-only calls (`objc2-*`) stay in small modules (`capture.rs`, `login.rs`, `screens.rs`,

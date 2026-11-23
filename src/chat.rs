@@ -13,6 +13,7 @@ use rune::{
 };
 use rune_kit::glyphs;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -149,6 +150,9 @@ pub struct Chat {
     replies: Vec<Reply>,
     /// The last reply stream started: its events come back with it.
     next_token: u64,
+    /// The questions' "something else" fields, by reply token and part: the user's own answer
+    /// as they write it (the reply only gets its text when they answer).
+    others: HashMap<(u64, usize), TextEdit>,
     /// A text field for a question gone meanwhile.
     scratch: TextEdit,
     /// The user scrolled back from the latest: what comes keeps their place, and a button
@@ -184,7 +188,7 @@ pub struct Chat {
 
 impl Chat {
     pub fn new(host: Option<AppHandle<Host>>) -> Self {
-        Chat { messages: Vec::new(), hidden: 0, draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0, replies: Vec::new(), next_token: 0, scratch: TextEdit::new(""), away: false, windowed: false, session: None, conv: history::Meta::fresh(), running_model: String::new(), models_open: false, #[cfg(test)] cancelled: Vec::new(), #[cfg(test)] saved: Vec::new(), #[cfg(test)] title_asks: Vec::new(), #[cfg(test)] model: None, #[cfg(test)] requests: Vec::new() }
+        Chat { messages: Vec::new(), hidden: 0, draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0, replies: Vec::new(), next_token: 0, others: HashMap::new(), scratch: TextEdit::new(""), away: false, windowed: false, session: None, conv: history::Meta::fresh(), running_model: String::new(), models_open: false, #[cfg(test)] cancelled: Vec::new(), #[cfg(test)] saved: Vec::new(), #[cfg(test)] title_asks: Vec::new(), #[cfg(test)] model: None, #[cfg(test)] requests: Vec::new() }
     }
 
     pub fn is_open(&self) -> bool {
@@ -442,14 +446,21 @@ impl Chat {
         let steer = model == model::PI && self.running_model == model::PI && !by_mock(false, &model, mock_model::requested());
         let mut reply = Reply::new(id, prompt);
         (reply.token, reply.state, reply.steered) = (token, reply::State::Queued, steer);
-        self.replies.retain(|r| r.id != id);
-        self.replies.push(reply);
+        self.replace_reply(reply);
         // Quitting now keeps it, interrupted.
         self.save();
         if steer && let Some(request) = self.request_for(id, &model) {
             self.send_request(token, model::Request { steer: true, ..request });
         }
         token
+    }
+
+    /// `reply` takes the place of its message's reply, whose question fields go with it.
+    fn replace_reply(&mut self, reply: Reply) {
+        self.replies.retain(|r| r.id != reply.id);
+        self.replies.push(reply);
+        let replies = &self.replies;
+        self.others.retain(|(token, _), _| replies.iter().any(|r| r.token == *token));
     }
 
     /// `request` goes to the model for the reply `token`.
@@ -473,8 +484,7 @@ impl Chat {
         self.running_model = if script.is_some() { String::new() } else { model.clone() };
         let mut reply = Reply::new(id, prompt);
         (reply.token, reply.answer) = (token, answer);
-        self.replies.retain(|r| r.id != id);
-        self.replies.push(reply);
+        self.replace_reply(reply);
         // Saved as it starts: quitting now leaves it interrupted.
         self.save();
         match script {
@@ -621,13 +631,19 @@ impl Chat {
         if self.question_mut(token, part).is_none() {
             return &mut self.scratch;
         }
-        &mut self.question_mut(token, part).expect("just found").other
+        self.others.entry((token, part)).or_insert_with(|| TextEdit::new(""))
+    }
+
+    /// The field as drawn: none until the user edits it.
+    pub fn question_field(&self, token: u64, part: usize) -> Option<&TextEdit> {
+        self.others.get(&(token, part))
     }
 
     /// The user answers question `part` of reply `token`: the answer goes as their message and
     /// gets its reply (its token). None if nothing is picked or written.
     pub fn answer(&mut self, token: u64, part: usize) -> Option<u64> {
-        let text = self.reply_mut(token)?.answer(part)?;
+        let other = self.others.get(&(token, part)).map_or("", |e| e.text.as_str());
+        let text = self.replies.iter_mut().find(|r| r.token == token)?.answer(part, other)?;
         let id = self.next_id();
         self.push(Message::text(id, text.clone()));
         Some(self.start_reply(id, text, true))

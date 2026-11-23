@@ -1,0 +1,9 @@
+[package]
+name = "ailfred-core"
+version = "0.1.0"
+edition = "2024"
+description = "Ailfred's engine and conversation model, without any UI: shared by its clients."
+
+[dependencies]
+libc = "0.2"
+serde_json = "1"

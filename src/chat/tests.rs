@@ -447,6 +447,30 @@ fn answering_a_question_sends_the_answer_and_gets_its_reply() {
     assert_eq!(c.answer(token, 0), None, "once");
 }
 
+#[test]
+fn the_users_own_words_answer_over_the_picks_and_a_retried_reply_starts_with_an_empty_field() {
+    let mut c = Chat::new(None);
+    let id = sent(&mut c, "ask");
+    let ask = |c: &mut Chat, token| {
+        let ask = Event::Ask { prompt: "Which?".into(), options: vec!["Tabs".into(), "Page".into()], multi: false };
+        c.reply_event(token, ask, Instant::now());
+        c.reply_event(token, Event::Done, Instant::now());
+    };
+    let token = c.ask(id).unwrap();
+    ask(&mut c, token);
+    assert!(c.question_field(token, 0).is_none(), "no field until it's edited");
+    *c.question_other(token, 0) = TextEdit::new("draft");
+    assert_eq!(c.question_field(token, 0).map(|e| e.text.as_str()), Some("draft"));
+    // Retried, the question is new: what was written for the old one is gone.
+    let retried = c.retry(token).expect("retried");
+    ask(&mut c, retried);
+    assert!(c.question_field(token, 0).is_none() && c.question_field(retried, 0).is_none());
+    c.pick(retried, 0, 0);
+    *c.question_other(retried, 0) = TextEdit::new("  Both, side by side  ");
+    c.answer(retried, 0).expect("answered");
+    assert_eq!(c.messages.last().map(|m| m.text.as_str()), Some("Both, side by side"), "their words win over the pick");
+}
+
 pub(crate) fn tiny() -> Image {
     Image::from_rgba(1, 1, vec![0; 4])
 }
