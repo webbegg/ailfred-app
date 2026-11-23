@@ -23,10 +23,12 @@ pub enum Action {
     OpenPermissionSettings,
     Settings,
     Quit,
+    /// Ends computer control's session (shown only while one runs).
+    StopComputer,
 }
 
 impl Action {
-    const ALL: [(Action, &'static str); 9] = [
+    const ALL: [(Action, &'static str); 10] = [
         (Action::Capture, "capture"),
         (Action::CaptureWindow, "capture-window"),
         (Action::CaptureFullScreen, "capture-full-screen"),
@@ -36,6 +38,7 @@ impl Action {
         (Action::OpenPermissionSettings, "permission"),
         (Action::Settings, "settings"),
         (Action::Quit, "quit"),
+        (Action::StopComputer, "stop-computer"),
     ];
     fn id(self) -> &'static str {
         Action::ALL.iter().find(|(a, _)| *a == self).map(|(_, id)| *id).unwrap_or("")
@@ -77,9 +80,18 @@ pub struct Tray {
     permission: MenuItem,
     permission_shown: bool,
     can_login: bool,
-    /// What the icon shows now.
+    /// "Stop Controlling the Mac", at the top while the model controls it.
+    stop_computer: MenuItem,
+    controlling: bool,
+    /// What the icon shows now, and the status it was last given.
     glyph: Glyph,
     tooltip: String,
+    status: Status,
+}
+
+/// The tooltip for `status`; while the model controls the Mac, that, and how to stop it.
+fn tooltip(status: &Status, controlling: bool) -> String {
+    if controlling { "Ailfred is controlling your Mac (⌥⇧Esc stops it)".into() } else { status.tooltip() }
 }
 
 impl Tray {
@@ -136,19 +148,53 @@ impl Tray {
             }
         }));
         let recent = Submenu::with_id("recent", "Recent", true);
-        Ok(Tray { icon, capture, quick, menu, recent, recent_shown: false, login, permission, permission_shown: false, can_login, glyph: Glyph::Plain, tooltip: "Ailfred".into() })
+        let panic = crate::computer::PANIC_SHORTCUT.parse::<Accelerator>().ok();
+        let stop_computer = MenuItem::with_id(Action::StopComputer.id(), "Stop Controlling the Mac", true, panic);
+        Ok(Tray {
+            icon,
+            capture,
+            quick,
+            menu,
+            recent,
+            recent_shown: false,
+            login,
+            permission,
+            permission_shown: false,
+            can_login,
+            stop_computer,
+            controlling: false,
+            glyph: Glyph::Plain,
+            tooltip: "Ailfred".into(),
+            status: Status::Idle,
+        })
+    }
+
+    /// The model controls the Mac (a session runs) or not: the icon and tooltip say so over
+    /// anything else, and "Stop Controlling the Mac" heads the menu meanwhile.
+    pub fn set_controlling(&mut self, controlling: bool) {
+        if controlling != self.controlling {
+            let done = if controlling { self.menu.insert(&self.stop_computer, 0) } else { self.menu.remove(&self.stop_computer) };
+            if let Err(e) = done {
+                eprintln!("Ailfred: updating the menu failed: {e}");
+            }
+            // The icon says so even if the menu couldn't.
+            self.controlling = controlling;
+        }
+        let status = self.status.clone();
+        self.set_status(&status);
     }
 
     /// The icon and its tooltip show `status` (each set only when it changes).
     pub fn set_status(&mut self, status: &Status) {
-        let glyph = Glyph::of(status);
+        self.status = status.clone();
+        let glyph = Glyph::shown(status, self.controlling);
         if glyph != self.glyph {
             match glyph_icon(glyph).and_then(|icon| self.icon.set_icon_templated(Some(icon)).map_err(|e| e.to_string())) {
                 Ok(()) => self.glyph = glyph,
                 Err(e) => eprintln!("Ailfred: updating the menu-bar icon failed: {e}"),
             }
         }
-        let tooltip = status.tooltip();
+        let tooltip = tooltip(status, self.controlling);
         if tooltip != self.tooltip {
             if let Err(e) = self.icon.set_tooltip(Some(&tooltip)) {
                 eprintln!("Ailfred: updating the menu-bar tooltip failed: {e}");
@@ -258,9 +304,16 @@ pub enum Glyph {
     Asking,
     Replied,
     Failed,
+    /// The model controls the Mac: a square badge.
+    Controlling,
 }
 
 impl Glyph {
+    /// What the icon shows: `status`'s look, or, while the model controls the Mac, that.
+    pub fn shown(status: &Status, controlling: bool) -> Glyph {
+        if controlling { Glyph::Controlling } else { Glyph::of(status) }
+    }
+
     pub fn of(status: &Status) -> Glyph {
         match status {
             Status::Idle => Glyph::Plain,
@@ -310,6 +363,8 @@ fn glyph_rgba(glyph: Glyph) -> Vec<u8> {
                 let off = (dx - dy).abs().min((dx + dy).abs()) / std::f32::consts::SQRT_2;
                 cover(CROSS_HALF - off).min(cover(r - d))
             }
+            // A square about as big as the circle it stands for.
+            Glyph::Controlling => cover(0.95 * r - dx.abs().max(dy.abs())),
         };
         let cut = cover(d - r - DOT_GAP);
         *a = ((f32::from(*a) * cut).max(255.0 * badge)).round() as u8;
@@ -329,6 +384,7 @@ mod tests {
         assert_eq!(Pick::from_id("recent:20240101-000000-abcd"), Some(Pick::Recent("20240101-000000-abcd".into())));
         assert_eq!(Pick::from_id("recent"), None, "the submenu itself picks nothing");
         assert_eq!(Pick::from_id("nope"), None);
+        assert_eq!(Pick::from_id("stop-computer"), Some(Pick::Action(Action::StopComputer)));
     }
 
     #[test]
@@ -347,7 +403,25 @@ mod tests {
         assert!(want.iter().map(|&a| u32::from(a)).sum::<u32>() > 2000, "it has ink");
     }
 
-    const GLYPHS: [Glyph; 7] = [Glyph::Plain, Glyph::Faded, Glyph::Thinking, Glyph::Working, Glyph::Asking, Glyph::Replied, Glyph::Failed];
+    const GLYPHS: [Glyph; 8] =
+        [Glyph::Plain, Glyph::Faded, Glyph::Thinking, Glyph::Working, Glyph::Asking, Glyph::Replied, Glyph::Failed, Glyph::Controlling];
+
+    #[test]
+    fn while_the_model_controls_the_mac_the_icon_and_tooltip_say_so_over_anything_else() {
+        let statuses = [Status::Idle, Status::Thinking, Status::Working("Clicking".into()), Status::NeedsYou("?".into()), Status::Error("no".into())];
+        for status in &statuses {
+            assert_eq!(Glyph::shown(status, true), Glyph::Controlling, "{status:?}");
+            assert_eq!(Glyph::shown(status, false), Glyph::of(status), "{status:?}");
+            assert_eq!(tooltip(status, true), "Ailfred is controlling your Mac (⌥⇧Esc stops it)");
+            assert_eq!(tooltip(status, false), status.tooltip());
+        }
+        // A square badge: its corner is inked, unlike the dot's and the diamond's.
+        let alpha = |g: Glyph| -> Vec<u8> { glyph_rgba(g).as_chunks::<4>().0.iter().map(|p| p[3]).collect() };
+        let [cx, cy, _] = DOT;
+        let corner = |a: &[u8]| a[(cy + 2.5 * PX) as usize * SIZE + (cx + 2.5 * PX) as usize];
+        let (square, dot) = (corner(&alpha(Glyph::Controlling)), corner(&alpha(Glyph::Replied)));
+        assert!(square > 200 && dot < 60, "square {square}, dot {dot}");
+    }
 
     #[test]
     fn the_menu_bar_mark_keeps_a_margin_like_the_other_menu_bar_icons() {

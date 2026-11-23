@@ -115,8 +115,10 @@ pub struct Host {
     /// What Ailfred is doing, for the menu-bar icon (its dot, too, when a reply ended while
     /// the chat was off screen).
     status: status::Tracker,
-    /// Computer control's tools, served once it was first turned on in Settings.
+    /// Computer control's tools, served once it was first turned on in Settings, and its panic
+    /// chord, held while it's on.
     computer: Option<computer::Running>,
+    panic_shortcut: HotKey,
 }
 
 /// Something for the chat, wherever it is.
@@ -897,7 +899,15 @@ impl Host {
     /// served (started the first time); off, they refuse everything and the session ends.
     pub fn set_computer_control(&mut self, on: bool) {
         if on && self.computer.is_none() {
-            match computer::start(|state| eprintln!("Ailfred: computer control {state:?}")) {
+            let handle = self.handle.clone();
+            let notify = move |state: &computer::session::StateEvent| {
+                eprintln!("Ailfred: computer control {state:?}");
+                let active = state.active;
+                if let Some(handle) = &handle {
+                    handle.update(move |host, _| host.show_computer_control(active));
+                }
+            };
+            match computer::start(notify) {
                 Ok(running) => {
                     eprintln!("Ailfred: computer control's tools are served at {}", running.endpoint.url);
                     self.computer = Some(running);
@@ -907,6 +917,28 @@ impl Host {
         }
         if let Some(running) = &self.computer {
             computer::set_enabled(running, on);
+        }
+        // The panic chord is held only while computer control is on.
+        if let Some(handle) = &self.handle {
+            let chord = computer::PANIC_SHORTCUT.parse::<rune::Shortcut>().ok();
+            match self.panic_shortcut.replace(handle, chord.as_ref().filter(|_| on)) {
+                Ok(()) => eprintln!("Ailfred: computer control {}", if on { "on (⌥⇧Esc stops it)" } else { "off" }),
+                Err(e) => eprintln!("Ailfred: the panic shortcut (⌥⇧Esc) isn't available: {e}; Stop is in the menu"),
+            }
+        }
+    }
+
+    /// Stop (the menu) or the panic chord: the session ends, and what was queued drops.
+    pub fn stop_computer_control(&mut self, reason: computer::session::Reason) {
+        if let Some(running) = &self.computer {
+            running.control.end(reason);
+        }
+    }
+
+    /// A session started or ended: the menu-bar icon says so.
+    fn show_computer_control(&mut self, active: bool) {
+        if let Some(tray) = &mut self.tray {
+            tray.set_controlling(active);
         }
     }
 
@@ -926,6 +958,7 @@ impl Host {
             Action::QuickInput => self.show_input_or_chat(),
             Action::OpenFolder => open(&app_env::screenshots_dir()),
             Action::OpenPermissionSettings => open(app_env::SCREEN_RECORDING_SETTINGS),
+            Action::StopComputer => self.stop_computer_control(computer::session::Reason::Stopped),
             Action::ToggleLogin => {
                 let (Some(handle), Some(tray)) = (self.handle.clone(), &self.tray) else { return };
                 // muda already flipped the checkmark: its new state is the request. The service
@@ -1009,6 +1042,7 @@ fn host_init() -> Host {
         status: status::Tracker::default(),
         chat_window_open: false,
         computer: None,
+        panic_shortcut: HotKey::computer_panic(),
     }
 }
 
@@ -1230,6 +1264,7 @@ fn main() {
             status: status::Tracker::default(),
             chat_window_open: false,
             computer: None,
+            panic_shortcut: HotKey::computer_panic(),
         });
         // Runs on the main thread at the loop's first turn: the status item needs a running NSApp,
         // and runtime shortcut registration needs the host started.
