@@ -5,12 +5,17 @@ edition = "2024"
 
 [dependencies]
 block2 = "0.6"
+# Computer control's screenshots go to the model as JPEG (Rune already builds this crate).
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 libc = "0.2"
 objc2 = "0.6"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "libc", "NSRunningApplication", "NSWorkspace"] }
+# The Accessibility API: what computer control's guards read under a point.
+objc2-application-services = { version = "0.3.2", default-features = false, features = ["std", "libc", "AXError", "AXUIElement", "AXValue", "HIServices"] }
 objc2-core-foundation = "0.3.2"
 objc2-core-graphics = "0.3.2"
 objc2-core-text = "0.3.2"
-objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSError", "NSString"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSError", "NSString", "NSValue"] }
 objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-core-graphics", "SCShareableContent", "SCStream", "SCScreenshotManager", "libc"] }
 objc2-security = { version = "0.3.2", default-features = false, features = ["std", "SecItem", "SecBase"] }
 objc2-service-management = "0.3.2"
