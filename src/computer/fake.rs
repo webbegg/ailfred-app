@@ -58,8 +58,9 @@ impl Default for FakeDesktop {
             during_focused_element: Mutex::new(None),
             fail_post: Mutex::new(None),
             owner_at: Mutex::new(Box::new(move |_| Some(owner.clone()))),
-            elements: Mutex::new(Vec::new()),
-            focus: Mutex::new(None),
+            // A readable spot and focus, nothing risky in them (empty would tell nothing, and ask).
+            elements: Mutex::new(vec![AxElement { role: "AXGroup".into(), ..AxElement::default() }]),
+            focus: Mutex::new(Some(Focus { element: AxElement { role: "AXTextArea".into(), title: Some("Notes".into()), ..AxElement::default() }, ..Focus::default() })),
             opened: Mutex::new(Vec::new()),
             activated: Mutex::new(Vec::new()),
             activates_to: Mutex::new(None),

@@ -836,6 +836,34 @@ fn harmless_actions_are_not_confirmed() {
 }
 
 #[test]
+fn where_the_app_tells_nothing_a_click_or_return_asks_and_a_delete_shortcut_always_does() {
+    let rig = rig_with(true, false);
+    rig.ready();
+    rig.desktop.elements.lock().unwrap().clear();
+    *rig.desktop.focus.lock().unwrap() = None;
+    for (name, arguments) in [("click", json!({"x": 10, "y": 10})), ("key", json!({"combo": "return"})), ("type", json!({"text": "ok\n"}))] {
+        let result = rig.call(name, arguments);
+        assert!(first_text(&result).contains("declined"), "{name}: {result}");
+    }
+    let asked = rig.dialogs.confirmations.lock().unwrap().clone();
+    assert!(asked.len() == 3 && asked.iter().all(|a| a.contains("Accessibility")), "{asked:?}");
+    assert!(rig.desktop.events().is_empty());
+    let rig = rig_with(true, false);
+    rig.ready();
+    // A file selected in a Finder list.
+    *rig.desktop.focus.lock().unwrap() = Some(Focus { element: AxElement { role: "AXRow".into(), title: Some("Report.pdf".into()), ..AxElement::default() }, ..Focus::default() });
+    let result = rig.call("key", json!({"combo": "cmd+backspace"}));
+    assert!(first_text(&result).contains("declined"), "{result}");
+    // Typing words with nothing to read presses nothing; it doesn't ask.
+    rig.desktop.elements.lock().unwrap().clear();
+    *rig.desktop.focus.lock().unwrap() = None;
+    assert!(!is_error(&rig.call("type", json!({"text": "two words"}))));
+    let asked = rig.dialogs.confirmations.lock().unwrap().clone();
+    assert!(asked.len() == 1 && asked[0].contains("cmd+delete"), "{asked:?}");
+    assert!(rig.desktop.events().iter().all(|e| matches!(e, InputEvent::Text(_))), "only the typed words");
+}
+
+#[test]
 fn a_drag_over_a_risky_button_is_confirmed() {
     let rig = rig_with(true, false);
     rig.ready();
