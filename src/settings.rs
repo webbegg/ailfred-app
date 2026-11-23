@@ -286,33 +286,136 @@ impl HotKey {
     /// system would refuse holding it twice).
     pub fn replace(&self, host: &AppHandle<Host>, shortcut: Option<&Shortcut>) -> Result<(), ShortcutError> {
         let mut current = self.current.lock().unwrap_or_else(|e| e.into_inner());
-        if let (Some((_, held)), Some(s)) = (&*current, shortcut)
-            && held == s
-        {
-            return Ok(());
-        }
-        let new = match shortcut {
-            Some(s) => Some((host.register_shortcut(s.clone(), self.action)?, s.clone())),
-            None => None,
-        };
-        if let Some((old, _)) = &*current
-            && let Err(e) = host.unregister_shortcut(*old)
-        {
-            // Keep tracking the old one rather than lose its id; release the new one instead.
-            eprintln!("Ailfred: releasing the old shortcut failed: {e}");
-            if let Some((new, _)) = new {
-                let _ = host.unregister_shortcut(new);
-            }
-            return Err(e);
-        }
-        *current = new;
-        Ok(())
+        swap(&mut current, shortcut, |s| host.register_shortcut(s.clone(), self.action), |id| host.unregister_shortcut(id))
     }
+}
+
+/// [`HotKey::replace`]'s steps on the registration held (`current`), with the system's
+/// `register` and `unregister` passed in.
+fn swap<I: Copy, E: std::fmt::Display>(
+    current: &mut Option<(I, Shortcut)>,
+    shortcut: Option<&Shortcut>,
+    register: impl FnOnce(&Shortcut) -> Result<I, E>,
+    mut unregister: impl FnMut(I) -> Result<(), E>,
+) -> Result<(), E> {
+    if let (Some((_, held)), Some(s)) = (&*current, shortcut)
+        && held == s
+    {
+        return Ok(());
+    }
+    let new = match shortcut {
+        Some(s) => Some((register(s)?, s.clone())),
+        None => None,
+    };
+    if let Some((old, _)) = &*current
+        && let Err(e) = unregister(*old)
+    {
+        // Keep tracking the old one rather than lose its id; release the new one instead.
+        eprintln!("Ailfred: releasing the old shortcut failed: {e}");
+        if let Some((new, _)) = new {
+            let _ = unregister(new);
+        }
+        return Err(e);
+    }
+    *current = new;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A system shortcut registry: ids from 1, `refuse` and `stuck` say which calls fail, and
+    /// every call is logged in order.
+    #[derive(Default)]
+    struct Registry {
+        next: u32,
+        held: Vec<u32>,
+        log: Vec<String>,
+        refuse: bool,
+        stuck: Option<u32>,
+    }
+
+    fn swap_in(registry: &std::cell::RefCell<Registry>, current: &mut Option<(u32, Shortcut)>, chord: Option<&str>) -> Result<(), String> {
+        let shortcut = chord.map(|c| c.parse::<Shortcut>().unwrap());
+        let register = |_: &Shortcut| {
+            let mut r = registry.borrow_mut();
+            r.log.push("register".to_string());
+            if r.refuse {
+                return Err("taken".to_string());
+            }
+            r.next += 1;
+            let id = r.next;
+            r.held.push(id);
+            Ok(id)
+        };
+        let unregister = |id: u32| {
+            let mut r = registry.borrow_mut();
+            r.log.push(format!("unregister {id}"));
+            if r.stuck == Some(id) {
+                return Err("busy".to_string());
+            }
+            r.held.retain(|&h| h != id);
+            Ok(())
+        };
+        swap(current, shortcut.as_ref(), register, unregister)
+    }
+
+    #[test]
+    fn a_new_chord_is_registered_before_the_old_one_is_released() {
+        let registry = std::cell::RefCell::new(Registry::default());
+        let mut current = None;
+        swap_in(&registry, &mut current, Some("ctrl+alt+k")).unwrap();
+        swap_in(&registry, &mut current, Some("ctrl+alt+j")).unwrap();
+        let r = registry.borrow();
+        assert_eq!(r.log[1..], ["register", "unregister 1"], "{:?}", r.log);
+        assert_eq!((r.held.clone(), current.map(|(id, _)| id)), (vec![2], Some(2)));
+    }
+
+    #[test]
+    fn a_refused_chord_leaves_the_old_one_working() {
+        let registry = std::cell::RefCell::new(Registry::default());
+        let mut current = None;
+        swap_in(&registry, &mut current, Some("ctrl+alt+k")).unwrap();
+        registry.borrow_mut().refuse = true;
+        assert_eq!(swap_in(&registry, &mut current, Some("ctrl+alt+j")), Err("taken".into()));
+        let r = registry.borrow();
+        assert_eq!(r.held, [1], "the old one is still registered");
+        assert_eq!(current, Some((1, "ctrl+alt+k".parse().unwrap())));
+    }
+
+    #[test]
+    fn the_chord_already_held_is_kept_without_registering_it_again() {
+        let registry = std::cell::RefCell::new(Registry::default());
+        let mut current = None;
+        swap_in(&registry, &mut current, Some("ctrl+alt+k")).unwrap();
+        swap_in(&registry, &mut current, Some("ctrl+alt+k")).unwrap();
+        assert_eq!(registry.borrow().log.len(), 1, "{:?}", registry.borrow().log);
+        assert_eq!(current.map(|(id, _)| id), Some(1));
+    }
+
+    #[test]
+    fn no_shortcut_releases_the_one_held() {
+        let registry = std::cell::RefCell::new(Registry::default());
+        let mut current = None;
+        swap_in(&registry, &mut current, None).unwrap();
+        swap_in(&registry, &mut current, Some("ctrl+alt+k")).unwrap();
+        swap_in(&registry, &mut current, None).unwrap();
+        assert!(registry.borrow().held.is_empty());
+        assert_eq!(current, None);
+    }
+
+    #[test]
+    fn an_old_chord_that_cannot_be_released_stays_tracked_and_the_new_one_is_let_go() {
+        let registry = std::cell::RefCell::new(Registry::default());
+        let mut current = None;
+        swap_in(&registry, &mut current, Some("ctrl+alt+k")).unwrap();
+        registry.borrow_mut().stuck = Some(1);
+        assert_eq!(swap_in(&registry, &mut current, Some("ctrl+alt+j")), Err("busy".into()));
+        let r = registry.borrow();
+        assert_eq!(r.held, [1], "the new one was released: {:?}", r.log);
+        assert_eq!(current.map(|(id, _)| id), Some(1), "its id isn't lost");
+    }
 
     #[test]
     fn shortcut_defaults_clears_and_round_trips() {
