@@ -16,7 +16,7 @@ use crate::model;
 use crate::settings::{HotKey, Settings, ShortcutFor};
 
 /// The window's size in points.
-pub const SIZE: (f32, f32) = (480.0, 760.0);
+pub const SIZE: (f32, f32) = (480.0, 780.0);
 
 pub const COMPUTER_CONTROL_LABEL: &str = "Let the model control this Mac";
 
@@ -308,7 +308,17 @@ pub fn view(s: &SettingsUi, cx: &mut Cx<SettingsUi>) -> El {
     if let Some(error) = &s.error {
         page = page.child(text(error.clone()).wrap().font(k.ty.small).color(k.c.text_weak));
     }
-    page
+    page.child(text(version_line(option_env!("AILFRED_BUILD"))).key("version").font(k.ty.small).color(k.c.text_weak))
+}
+
+/// "Ailfred 0.1.0 (build 119)": the version and the build number scripts/bundle-mac stamps in
+/// (`AILFRED_BUILD`, the same as the bundle's CFBundleVersion); a plain `cargo build` has none.
+fn version_line(build: Option<&str>) -> String {
+    let version = env!("CARGO_PKG_VERSION");
+    match build.filter(|b| !b.is_empty()) {
+        Some(build) => format!("Ailfred {version} (build {build})"),
+        None => format!("Ailfred {version} (development build)"),
+    }
 }
 
 /// Screen Recording, on or off; off, the way to turn it on. Then Accessibility the same way, when
@@ -526,8 +536,16 @@ mod tests {
         s.error = Some("Couldn't save the key in the Keychain: The user name or passphrase you entered is not correct.".into());
         let rt = frames(s);
         inside(&rt);
+        assert!(shown(&rt).iter().any(|e| e.key.as_deref() == Some("version")), "the version is shown, at the bottom");
         let low = shown(&rt).iter().filter(|e| e.key.is_some() || !e.role.is_empty()).filter(|e| e.rect[3] < SIZE.1 - 1.0).map(|e| e.rect[1] + e.rect[3]).fold(0.0, f32::max);
         assert!(low + 24.0 <= SIZE.1, "the lowest ends at {low}");
+    }
+
+    #[test]
+    fn the_version_names_the_build_a_bundle_was_made_from_and_says_so_when_it_wasnt() {
+        assert_eq!(version_line(Some("119")), format!("Ailfred {} (build 119)", env!("CARGO_PKG_VERSION")));
+        assert_eq!(version_line(None), format!("Ailfred {} (development build)", env!("CARGO_PKG_VERSION")));
+        assert_eq!(version_line(Some("")), version_line(None));
     }
 
     #[test]
