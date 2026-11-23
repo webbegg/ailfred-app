@@ -17,6 +17,7 @@ impl Chat {
         self.messages.clear();
         self.hidden = 0;
         self.replies.clear();
+        self.others.clear();
         self.draft.clear();
         self.shots.clear();
         self.conv = history::Meta::fresh();

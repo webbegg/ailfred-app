@@ -102,6 +102,7 @@ dependencies = [
 name = "ailfred"
 version = "0.1.0"
 dependencies = [
+ "ailfred-core",
  "block2 0.6.2",
  "dispatch2",
  "image",
@@ -123,6 +124,14 @@ dependencies = [
  "serde_json",
  "tiny_http",
  "tray-icon",
+]
+
+[[package]]
+name = "ailfred-core"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
 ]
 
 [[package]]

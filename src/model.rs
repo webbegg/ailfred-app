@@ -22,6 +22,7 @@ mod title;
 #[cfg(test)]
 mod title_tests;
 
+pub use ailfred_core::turn::{Turn, base64};
 pub use process::Run;
 pub use title::{TIMEOUT as TITLE_TIMEOUT, request as title_request, start as ask_title};
 
@@ -98,14 +99,6 @@ pub fn status(keychain: bool, env: bool, claude: Option<&Path>) -> String {
 pub fn status_now() -> String {
     let env = std::env::var("ANTHROPIC_API_KEY").is_ok_and(|k| !k.trim().is_empty());
     status(crate::keychain::exists(), env, claude_code::find().as_deref())
-}
-
-/// One earlier exchange of the conversation: what the user sent and what came back.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Turn {
-    pub text: String,
-    pub pngs: Vec<Arc<Vec<u8>>>,
-    pub reply: String,
 }
 
 /// One message to answer, with the conversation before it.
@@ -209,23 +202,6 @@ fn pump(run: &Run, kind: stream::Kind, cmd: Command, input: Vec<u8>, sink: &mut 
         Ok(outcome) => errors::broke_off(kind, decoder.stray(), &outcome.stderr, outcome.success),
     };
     sink(Item::Event(Event::Fail(message)));
-}
-
-/// Standard base64 of `bytes`, padded.
-pub fn base64(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let n = chunk.iter().enumerate().fold(0u32, |n, (i, b)| n | (*b as u32) << (16 - 8 * i));
-        for i in 0..4 {
-            if i <= chunk.len() {
-                out.push(ALPHABET[(n >> (18 - 6 * i) & 63) as usize] as char);
-            } else {
-                out.push('=');
-            }
-        }
-    }
-    out
 }
 
 /// A user message's content blocks: its captures as base64 PNG images, then its text.

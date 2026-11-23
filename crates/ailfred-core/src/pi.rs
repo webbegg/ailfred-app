@@ -36,7 +36,7 @@ pub struct Prompt {
 
 /// The conversation before a message (its turns), for a pi session that has none of it: a
 /// transcript, its captures named but not sent again. Empty without turns.
-pub fn context(turns: &[crate::model::Turn]) -> String {
+pub fn context(turns: &[crate::turn::Turn]) -> String {
     if turns.is_empty() {
         return String::new();
     }
@@ -432,7 +432,7 @@ impl Core {
     fn prompt_command(&self, prompt: &Prompt) -> Value {
         let mut command = json!({"type": "prompt", "message": prompt.text});
         if !prompt.pngs.is_empty() {
-            let images: Vec<Value> = prompt.pngs.iter().map(|png| json!({"type": "image", "mimeType": "image/png", "data": crate::model::base64(png)})).collect();
+            let images: Vec<Value> = prompt.pngs.iter().map(|png| json!({"type": "image", "mimeType": "image/png", "data": crate::turn::base64(png)})).collect();
             command["images"] = Value::Array(images);
         }
         command
@@ -557,7 +557,6 @@ impl PiEngine {
     }
 
     /// Runs `command` (pi with `--mode rpc` among its arguments) once, not again when it ends.
-    #[cfg(test)]
     pub fn spawn(command: Command) -> std::io::Result<Self> {
         Self::start(command, None, SHUTDOWN_GRACE)
     }
@@ -1292,7 +1291,7 @@ mod tests {
 
     #[test]
     fn the_conversation_so_far_reads_as_a_transcript() {
-        use crate::model::Turn;
+        use crate::turn::Turn;
         let turns = [
             Turn { text: "What's 2+2?".into(), pngs: vec![Arc::new(vec![1])], reply: "4.".into() },
             Turn { text: "And 3+3?".into(), pngs: Vec::new(), reply: "6.".into() },
@@ -1407,71 +1406,6 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(3));
         // Gone and reaped: no zombie answers a signal 0.
         assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
-    }
-
-    /// The real pi, set up as Ailfred's own (the user's sign-ins and model, nothing else of
-    /// theirs), in a scratch data folder: `cargo test real_pi -- --ignored`.
-    #[test]
-    #[ignore = "talks to the real pi and its model"]
-    fn real_pi_answers() {
-        let data = std::env::temp_dir().join("ailfred-real-pi");
-        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
-        let pi = crate::pi_setup::pi_binary(&home).expect("pi installed");
-        let mut engine = crate::pi_setup::start(&pi, &data, &home).expect("pi starts");
-        let (sink, rx) = channel();
-        engine.send(prompt("Reply with exactly the word: pong"), sink);
-        let mut got = Vec::new();
-        while let Ok(e) = rx.recv_timeout(Duration::from_secs(120)) {
-            let end = matches!(e, Event::Done | Event::Fail(_));
-            got.push(e);
-            if end {
-                break;
-            }
-        }
-        eprintln!("{got:?}");
-        let text: String = got.iter().filter_map(|e| if let Event::Text(t) = e { Some(t.as_str()) } else { None }).collect();
-        assert_eq!(got.last(), Some(&Event::Done), "{got:?}");
-        assert!(text.to_lowercase().contains("pong"), "{text}");
-    }
-
-    /// A message steered in while pi runs a tool gets a reply of its own: `cargo test
-    /// real_pi_takes -- --ignored`.
-    #[test]
-    #[ignore = "talks to the real pi and its model"]
-    fn real_pi_takes_a_steer() {
-        let data = std::env::temp_dir().join("ailfred-real-pi");
-        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
-        let pi = crate::pi_setup::pi_binary(&home).expect("pi installed");
-        let mut engine = crate::pi_setup::start(&pi, &data, &home).expect("pi starts");
-        let (a, a_rx) = channel();
-        engine.send(prompt("Run the shell command `sleep 6; echo ok` with your bash tool, then say what it printed."), a);
-        let mut first = Vec::new();
-        while let Ok(e) = a_rx.recv_timeout(Duration::from_secs(120)) {
-            let step = matches!(e, Event::Step { .. });
-            first.push(e);
-            if step {
-                break;
-            }
-        }
-        let (b, b_rx) = channel();
-        engine.send(steer("Also: end your answer with the word: steered"), b);
-        let drain = |rx: &Receiver<Event>, got: &mut Vec<Event>| {
-            while let Ok(e) = rx.recv_timeout(Duration::from_secs(120)) {
-                let end = matches!(e, Event::Done | Event::Fail(_));
-                got.push(e);
-                if end {
-                    break;
-                }
-            }
-        };
-        drain(&a_rx, &mut first);
-        let mut second = Vec::new();
-        drain(&b_rx, &mut second);
-        eprintln!("first: {first:?}\nsecond: {second:?}");
-        assert_eq!(first.last(), Some(&Event::Done), "{first:?}");
-        assert_eq!(second.last(), Some(&Event::Done), "{second:?}");
-        let text: String = second.iter().filter_map(|e| if let Event::Text(t) = e { Some(t.as_str()) } else { None }).collect();
-        assert!(text.to_lowercase().contains("steered"), "{text}");
     }
 
     #[test]

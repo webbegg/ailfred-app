@@ -3,7 +3,13 @@ name = "ailfred"
 version = "0.1.0"
 edition = "2024"
 
+# The app at the root; its engine and conversation model, without UI, in crates/ailfred-core.
+[workspace]
+members = ["crates/ailfred-core"]
+resolver = "3"
+
 [dependencies]
+ailfred-core = { path = "crates/ailfred-core" }
 block2 = "0.6"
 # Computer control's dialogs run on the main queue (already built through objc2).
 dispatch2 = { version = "0.3", default-features = false, features = ["std"] }

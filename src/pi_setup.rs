@@ -335,8 +335,11 @@ fn login_path_with(shell: &Path, app_path: &OsString, wait: std::time::Duration)
 mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::mpsc::Receiver;
+    use std::time::Duration;
 
     use super::*;
+    use crate::reply::Event;
 
     /// A fresh folder for one test.
     fn scratch(name: &str) -> PathBuf {
@@ -600,5 +603,86 @@ mod tests {
         assert_eq!(marked("motd\n__AILFRED__/a:/b__AILFRED__\nbye", m).as_deref(), Some("/a:/b"));
         assert_eq!(marked("no markers", m), None);
         assert_eq!(marked("__AILFRED____AILFRED__", m), None, "an empty PATH is no PATH");
+    }
+
+    // The real pi, driven through the engine as the app starts it.
+
+    fn channel() -> (crate::pi::Sink, Receiver<Event>) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let tx = Mutex::new(tx);
+        (Arc::new(move |e| drop(tx.lock().unwrap().send(e))), rx)
+    }
+
+    fn prompt(text: &str) -> crate::pi::Prompt {
+        crate::pi::Prompt { text: text.into(), ..crate::pi::Prompt::default() }
+    }
+
+    fn steer(text: &str) -> crate::pi::Prompt {
+        crate::pi::Prompt { text: text.into(), steer: true, ..crate::pi::Prompt::default() }
+    }
+
+    /// The real pi, set up as Ailfred's own (the user's sign-ins and model, nothing else of
+    /// theirs), in a scratch data folder: `cargo test real_pi -- --ignored`.
+    #[test]
+    #[ignore = "talks to the real pi and its model"]
+    fn real_pi_answers() {
+        let data = std::env::temp_dir().join("ailfred-real-pi");
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+        let pi = pi_binary(&home).expect("pi installed");
+        let mut engine = start(&pi, &data, &home).expect("pi starts");
+        let (sink, rx) = channel();
+        engine.send(prompt("Reply with exactly the word: pong"), sink);
+        let mut got = Vec::new();
+        while let Ok(e) = rx.recv_timeout(Duration::from_secs(120)) {
+            let end = matches!(e, Event::Done | Event::Fail(_));
+            got.push(e);
+            if end {
+                break;
+            }
+        }
+        eprintln!("{got:?}");
+        let text: String = got.iter().filter_map(|e| if let Event::Text(t) = e { Some(t.as_str()) } else { None }).collect();
+        assert_eq!(got.last(), Some(&Event::Done), "{got:?}");
+        assert!(text.to_lowercase().contains("pong"), "{text}");
+    }
+
+    /// A message steered in while pi runs a tool gets a reply of its own: `cargo test
+    /// real_pi_takes -- --ignored`.
+    #[test]
+    #[ignore = "talks to the real pi and its model"]
+    fn real_pi_takes_a_steer() {
+        let data = std::env::temp_dir().join("ailfred-real-pi");
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+        let pi = pi_binary(&home).expect("pi installed");
+        let mut engine = start(&pi, &data, &home).expect("pi starts");
+        let (a, a_rx) = channel();
+        engine.send(prompt("Run the shell command `sleep 6; echo ok` with your bash tool, then say what it printed."), a);
+        let mut first = Vec::new();
+        while let Ok(e) = a_rx.recv_timeout(Duration::from_secs(120)) {
+            let step = matches!(e, Event::Step { .. });
+            first.push(e);
+            if step {
+                break;
+            }
+        }
+        let (b, b_rx) = channel();
+        engine.send(steer("Also: end your answer with the word: steered"), b);
+        let drain = |rx: &Receiver<Event>, got: &mut Vec<Event>| {
+            while let Ok(e) = rx.recv_timeout(Duration::from_secs(120)) {
+                let end = matches!(e, Event::Done | Event::Fail(_));
+                got.push(e);
+                if end {
+                    break;
+                }
+            }
+        };
+        drain(&a_rx, &mut first);
+        let mut second = Vec::new();
+        drain(&b_rx, &mut second);
+        eprintln!("first: {first:?}\nsecond: {second:?}");
+        assert_eq!(first.last(), Some(&Event::Done), "{first:?}");
+        assert_eq!(second.last(), Some(&Event::Done), "{second:?}");
+        let text: String = second.iter().filter_map(|e| if let Event::Text(t) = e { Some(t.as_str()) } else { None }).collect();
+        assert!(text.to_lowercase().contains("steered"), "{text}");
     }
 }

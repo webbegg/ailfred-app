@@ -1,8 +1,9 @@
 #!/bin/bash
 # The gate before a commit or a PR; CI runs it too (.github/workflows/check.yml, with Rune checked
 # out beside the repo at a pinned commit).
-# Each step in order, stopping at the first failure:
-#   1. build everything (the app, its tests and examples)
+# Each step in order, over the whole workspace (the app and crates/ailfred-core), stopping at the
+# first failure:
+#   1. build everything (the app, the core, their tests and examples)
 #   2. clippy over Ailfred's own code, warnings as errors (Rune's warnings don't count)
 #   3. the tests, with settings in a scratch folder so they never touch a real one
 # Usage: scripts/check [test name filter]
@@ -12,14 +13,14 @@ cd "$(dirname "$0")/.."
 step() { printf '\n== %s\n' "$1"; }
 
 step "build"
-cargo build --all-targets --message-format short
+cargo build --workspace --all-targets --message-format short
 
 step "clippy"
-cargo clippy --all-targets --message-format short -- -D warnings
+cargo clippy --workspace --all-targets --message-format short -- -D warnings
 
 step "test"
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
-RUNE_PREFS_DIR="$scratch" cargo test ${1:+"$1"}
+RUNE_PREFS_DIR="$scratch" cargo test --workspace ${1:+"$1"}
 
 printf '\nAll checks passed.\n'
