@@ -1,8 +1,8 @@
 //! The Settings window: the capture's and the quick input's shortcuts (rune-kit's recorders,
 //! with what happened to a saved one that was taken at startup), the save folder, the model
 //! (Claude's version and the Anthropic API key, which lives in the Keychain), whether Screen
-//! Recording is on (with the way to System Settings), and whether animations play under the
-//! system's Reduce Motion.
+//! Recording is on (with the way to System Settings), whether the model may control the Mac (and
+//! then whether Accessibility is on), and whether animations play under the system's Reduce Motion.
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
@@ -16,7 +16,9 @@ use crate::model;
 use crate::settings::{HotKey, Settings, ShortcutFor};
 
 /// The window's size in points.
-pub const SIZE: (f32, f32) = (480.0, 620.0);
+pub const SIZE: (f32, f32) = (480.0, 760.0);
+
+pub const COMPUTER_CONTROL_LABEL: &str = "Let the model control this Mac";
 
 pub struct SettingsUi {
     settings: Settings,
@@ -43,6 +45,11 @@ pub struct SettingsUi {
     screen_recording: Option<bool>,
     /// How it's checked (the system's; a fake in tests).
     check_screen_recording: fn() -> bool,
+    /// Settings' computer-control switch, and whether Accessibility is on as last checked (only
+    /// while the switch is on: nothing else needs it).
+    computer_control: bool,
+    accessibility: Option<bool>,
+    check_accessibility: fn() -> bool,
 }
 
 /// Where replies come from with pi picked.
@@ -61,7 +68,11 @@ impl SettingsUi {
         let folder = settings.folder();
         let ignore_reduce_motion = settings.ignore_reduce_motion();
         let model = settings.model();
+        let computer_control = settings.computer_control();
         SettingsUi {
+            computer_control,
+            accessibility: None,
+            check_accessibility: crate::app_env::accessibility_allowed_quiet,
             settings,
             recorder,
             quick_recorder,
@@ -89,6 +100,7 @@ impl SettingsUi {
 
     /// Asks whether Screen Recording is on (cheap, no prompt); a change shows in the menu too.
     fn check_permissions(&mut self) {
+        self.accessibility = self.computer_control.then(|| (self.check_accessibility)());
         let allowed = (self.check_screen_recording)();
         if self.screen_recording.replace(allowed) == Some(allowed) {
             return;
@@ -162,6 +174,18 @@ impl SettingsUi {
         *slot = Some(notice);
     }
 
+    /// The computer-control switch: kept, handed to the app (which serves the tools or stops),
+    /// and, turned on, Accessibility is looked at.
+    fn toggle_computer_control(&mut self) {
+        self.computer_control = !self.computer_control;
+        self.settings.set_computer_control(self.computer_control);
+        self.check_permissions();
+        let on = self.computer_control;
+        if let Some(host) = &self.host {
+            host.update(move |host, _| host.set_computer_control(on));
+        }
+    }
+
     fn toggle_reduce_motion(&mut self) {
         self.ignore_reduce_motion = !self.ignore_reduce_motion;
         self.settings.set_ignore_reduce_motion(self.ignore_reduce_motion);
@@ -174,6 +198,9 @@ impl SettingsUi {
         let recorder = ShortcutRecorderState::new(settings.shortcut());
         let quick_recorder = ShortcutRecorderState::new(settings.quick_shortcut());
         SettingsUi {
+            computer_control: settings.computer_control(),
+            accessibility: None,
+            check_accessibility: crate::app_env::accessibility_allowed_quiet,
             quick_recorder,
             capture_notice: None,
             quick_notice: None,
@@ -261,9 +288,16 @@ pub fn view(s: &SettingsUi, cx: &mut Cx<SettingsUi>) -> El {
         .child(col().gap(8.0).child(label("Save screenshots to")).child(folder))
         .child(model_section);
     if let Some(allowed) = s.screen_recording {
-        page = page.child(permissions(allowed, k, label("Permissions")));
+        page = page.child(permissions(allowed, s.accessibility, k, label("Permissions")));
     }
     page = page
+        .child(
+            Checkbox::new(s.computer_control)
+                .label(COMPUTER_CONTROL_LABEL)
+                .description("With pi or Claude Code, the model can see the screen, click and type. Each 30-minute session asks you first, and so does every action that sends, pays, buys or deletes.")
+                .on_toggle(|s: &mut SettingsUi| s.toggle_computer_control())
+                .build(k),
+        )
         .child(
             Checkbox::new(s.ignore_reduce_motion)
                 .label("Show animations even with Reduce Motion on")
@@ -277,8 +311,9 @@ pub fn view(s: &SettingsUi, cx: &mut Cx<SettingsUi>) -> El {
     page
 }
 
-/// Screen Recording, on or off; off, the way to turn it on.
-fn permissions(allowed: bool, k: &Kit, title: El) -> El {
+/// Screen Recording, on or off; off, the way to turn it on. Then Accessibility the same way, when
+/// computer control needs it (`Some`).
+fn permissions(allowed: bool, accessibility: Option<bool>, k: &Kit, title: El) -> El {
     let line = if allowed {
         "Screen Recording: On, so Ailfred can capture the screen."
     } else {
@@ -288,6 +323,18 @@ fn permissions(allowed: bool, k: &Kit, title: El) -> El {
     if !allowed {
         let open = Button::new("Open System Settings…").on_press(|_: &mut SettingsUi| crate::open(crate::app_env::SCREEN_RECORDING_SETTINGS)).build(k);
         section = section.child(row().child(open));
+    }
+    if let Some(on) = accessibility {
+        let line = if on {
+            "Accessibility: On, so the model can click and type."
+        } else {
+            "Accessibility: Off. Computer control needs it to click and type: turn on Ailfred there."
+        };
+        section = section.child(text(line).key("accessibility").wrap().font(k.ty.ui).color(k.c.text_weak));
+        if !on {
+            let open = Button::new("Open Accessibility Settings…").on_press(|_: &mut SettingsUi| crate::open(crate::app_env::ACCESSIBILITY_SETTINGS)).build(k);
+            section = section.child(row().child(open));
+        }
     }
     section
 }
@@ -434,10 +481,34 @@ mod tests {
     }
 
     #[test]
+    fn computer_control_is_off_and_turning_it_on_keeps_it_and_shows_accessibility() {
+        let mut s = ui();
+        s.check_accessibility = || false;
+        s.refresh_status();
+        let rt = frames(s);
+        let els = shown(&rt);
+        let switch = els.iter().find(|e| e.role == "checkbox" && e.label.as_deref() == Some(COMPUTER_CONTROL_LABEL));
+        assert!(switch.is_some(), "the switch is there");
+        assert!(!els.iter().any(|e| e.key.as_deref() == Some("accessibility")), "not needed while it's off");
+        let mut s = ui();
+        s.check_accessibility = || false;
+        s.refresh_status();
+        s.toggle_computer_control();
+        assert!(s.computer_control && s.settings.computer_control(), "on, and kept");
+        let rt = frames(s);
+        let els = shown(&rt);
+        let says = els.iter().find(|e| e.key.as_deref() == Some("accessibility")).and_then(|e| e.text.clone()).unwrap_or_default();
+        assert!(says.contains("Accessibility: Off"), "{says:?}");
+        assert!(els.iter().any(|e| e.role == "button" && e.label.as_deref() == Some("Open Accessibility Settings…")));
+    }
+
+    #[test]
     fn the_worst_case_fits_screen_recording_off_and_both_shortcuts_taken() {
         let mut s = ui();
         s.check_screen_recording = || false;
+        s.check_accessibility = || false;
         s.refresh_status();
+        s.toggle_computer_control();
         let taken = |s: &str| -> Shortcut { s.parse().unwrap() };
         let started = crate::settings::start_shortcuts(
             &[(Some(taken("ctrl+alt+shift+cmd+j")), crate::settings::DEFAULT_SHORTCUT), (Some(taken("ctrl+alt+shift+cmd+k")), crate::settings::DEFAULT_QUICK_SHORTCUT)],

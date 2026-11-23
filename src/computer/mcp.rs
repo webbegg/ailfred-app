@@ -39,6 +39,8 @@ const TEXT_CHUNK_UNITS: usize = 20;
 
 const STOPPED: &str = "Computer control was stopped; this action was dropped.";
 const NOT_ALLOWED: &str = "Computer control was not allowed by the user. Nothing was done.";
+/// Settings' switch is off: no tool runs, and no session is asked for.
+const OFF: &str = "Computer control is off. The user can turn it on in Ailfred's Settings. Nothing was done.";
 const NEEDS_PERMISSION: &str = "Ailfred needs the";
 const GRANT_IT: &str = "Ask the user to grant it in Ailfred's Settings → Permissions.";
 const NEEDS_SCREENSHOT: &str = "Take a screenshot first: coordinates are pixels of the latest screenshot.";
@@ -426,6 +428,9 @@ impl Helper {
     }
 
     fn run(&self, epoch: u64, call: Call) -> Result<Content, Failed> {
+        if !self.control.enabled() {
+            return Err(OFF.into());
+        }
         // A batch counts each of its steps instead (`pace`).
         let counted = !matches!(call.tool, Tool::Batch { .. });
         if counted && !lock(&self.limiter).try_acquire(self.clock.now_ms()) {
@@ -433,6 +438,10 @@ impl Helper {
         }
         self.check_permissions(&call.tool)?;
         let mut latest = lock(&self.actions);
+        // Turned off while this call waited for the one before it.
+        if !self.control.enabled() {
+            return Err(OFF.into());
+        }
         self.control.expire(self.clock.now_ms());
         if self.control.epoch() != epoch {
             return Err(STOPPED.into());

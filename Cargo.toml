@@ -5,11 +5,13 @@ edition = "2024"
 
 [dependencies]
 block2 = "0.6"
+# Computer control's dialogs run on the main queue (already built through objc2).
+dispatch2 = { version = "0.3", default-features = false, features = ["std"] }
 # Computer control's screenshots go to the model as JPEG (Rune already builds this crate).
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 libc = "0.2"
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "libc", "NSRunningApplication", "NSWorkspace"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "libc", "NSAlert", "NSApplication", "NSButton", "NSControl", "NSResponder", "NSRunningApplication", "NSView", "NSWorkspace"] }
 # The Accessibility API: what computer control's guards read under a point.
 objc2-application-services = { version = "0.3.2", default-features = false, features = ["std", "libc", "AXError", "AXUIElement", "AXValue", "HIServices"] }
 objc2-core-foundation = "0.3.2"
@@ -22,6 +24,8 @@ objc2-service-management = "0.3.2"
 png = "0.18"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Serves computer control's tools to the model on a loopback port.
+tiny_http = "0.12"
 rune = { version = "0.0.1", path = "../_references/rune/crates/rune", features = ["native-file-dialog"] }
 rune-kit = { version = "0.0.1", path = "../_references/rune/crates/rune-kit", features = ["markdown"] }
 tray-icon = "0.26"

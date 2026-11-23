@@ -37,6 +37,7 @@ fn rig_with(allow: bool, confirm: bool) -> Rig {
     let states = Arc::new(Mutex::new(Vec::new()));
     let sink = states.clone();
     let control = Arc::new(Control::new(move |event| sink.lock().unwrap().push(event.clone())));
+    control.set_enabled(true);
     let helper = Helper::new(desktop.clone(), dialogs.clone(), clock.clone(), control.clone(), TOKEN.into(), OWN_PID);
     Rig { helper, desktop, dialogs, clock, control, states }
 }
@@ -177,6 +178,34 @@ fn an_unknown_tool_is_a_protocol_error() {
 }
 
 // --- Session grant ---
+
+#[test]
+fn while_computer_control_is_off_every_tool_is_refused_without_asking() {
+    let rig = rig();
+    rig.control.set_enabled(false);
+    for (name, arguments) in [("screenshot", json!({})), ("list_apps", json!({})), ("open_app", json!({"name": "Notes"}))] {
+        let result = rig.call(name, arguments);
+        assert!(is_error(&result), "{name}");
+        assert_eq!(first_text(&result), OFF, "{name}");
+    }
+    assert_eq!(rig.dialogs.grants.load(Ordering::SeqCst), 0);
+    assert_eq!(rig.desktop.captures.load(Ordering::SeqCst), 0);
+    assert!(rig.desktop.opened.lock().unwrap().is_empty());
+    // Back on, it asks for a session as usual.
+    rig.control.set_enabled(true);
+    rig.ready();
+    assert_eq!(rig.dialogs.grants.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn turning_it_off_mid_session_drops_the_next_action() {
+    let rig = rig();
+    rig.ready();
+    rig.control.set_enabled(false);
+    let result = rig.call("click", json!({"x": 10, "y": 10}));
+    assert_eq!(first_text(&result), OFF);
+    assert!(rig.desktop.events().is_empty());
+}
 
 #[test]
 fn deny_returns_a_tool_error_and_starts_nothing() {

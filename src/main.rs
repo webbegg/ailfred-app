@@ -115,6 +115,8 @@ pub struct Host {
     /// What Ailfred is doing, for the menu-bar icon (its dot, too, when a reply ended while
     /// the chat was off screen).
     status: status::Tracker,
+    /// Computer control's tools, served once it was first turned on in Settings.
+    computer: Option<computer::Running>,
 }
 
 /// Something for the chat, wherever it is.
@@ -891,6 +893,23 @@ impl Host {
         }
     }
 
+    /// Settings' computer-control switch (and its saved state at launch): on, the tools are
+    /// served (started the first time); off, they refuse everything and the session ends.
+    pub fn set_computer_control(&mut self, on: bool) {
+        if on && self.computer.is_none() {
+            match computer::start(|state| eprintln!("Ailfred: computer control {state:?}")) {
+                Ok(running) => {
+                    eprintln!("Ailfred: computer control's tools are served at {}", running.endpoint.url);
+                    self.computer = Some(running);
+                }
+                Err(e) => eprintln!("Ailfred: computer control couldn't start: {e}"),
+            }
+        }
+        if let Some(running) = &self.computer {
+            computer::set_enabled(running, on);
+        }
+    }
+
     fn set_permission(&mut self, allowed: bool) {
         if let Some(tray) = &mut self.tray {
             tray.set_permission(allowed);
@@ -989,6 +1008,7 @@ fn host_init() -> Host {
         recent: Vec::new(),
         status: status::Tracker::default(),
         chat_window_open: false,
+        computer: None,
     }
 }
 
@@ -1130,6 +1150,7 @@ fn main() {
             QuickInput::new(Some(handle.clone())),
         );
         let settings = Settings::open(installed);
+        let computer_control = settings.computer_control();
         let initial_shortcuts = Some((settings.shortcut(), settings.quick_shortcut()));
         let (capture_shortcut, quick_shortcut) = (HotKey::capture(), HotKey::quick_input());
         let ui = SettingsUi::new(settings, handle.clone(), capture_shortcut.clone(), quick_shortcut.clone());
@@ -1208,12 +1229,16 @@ fn main() {
             recent: Vec::new(),
             status: status::Tracker::default(),
             chat_window_open: false,
+            computer: None,
         });
         // Runs on the main thread at the loop's first turn: the status item needs a running NSApp,
         // and runtime shortcut registration needs the host started.
-        handle.update(|host, _| {
+        handle.update(move |host, _| {
             host.add_tray();
             host.register_saved_shortcuts();
+            if computer_control {
+                host.set_computer_control(true);
+            }
         });
         // Off the UI thread: both talk to system services.
         std::thread::spawn(move || {

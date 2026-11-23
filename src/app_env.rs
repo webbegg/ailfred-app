@@ -47,6 +47,14 @@ pub fn screenshots_dir() -> String {
 /// System Settings' Screen Recording list (Privacy & Security).
 pub const SCREEN_RECORDING_SETTINGS: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture";
 
+pub const ACCESSIBILITY_SETTINGS: &str = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility";
+
+/// Whether Accessibility is allowed (computer control clicks and types through it), without prompting.
+pub fn accessibility_allowed_quiet() -> bool {
+    // SAFETY: a plain query.
+    unsafe { objc2_application_services::AXIsProcessTrusted() }
+}
+
 /// Whether Screen Recording is allowed, without prompting or logging.
 pub fn screen_recording_allowed_quiet() -> bool {
     CGPreflightScreenCaptureAccess()

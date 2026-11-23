@@ -1,19 +1,37 @@
 //! The session shared by the MCP handler and the app (Stop, the tray item, the panic shortcut,
 //! the timeout watcher). Every transition is reported to `notify`, for what shows it.
+//!
+//! It also holds Settings' switch: off (the default, until the app reads the setting), every
+//! tool is refused before anything else happens.
 
 use super::session::{Reason, Session, StateEvent};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 type Notify = Box<dyn Fn(&StateEvent) + Send + Sync>;
 
 pub struct Control {
     session: Mutex<Session>,
     notify: Notify,
+    enabled: AtomicBool,
 }
 
 impl Control {
     pub fn new(notify: impl Fn(&StateEvent) + Send + Sync + 'static) -> Self {
-        Control { session: Mutex::new(Session::default()), notify: Box::new(notify) }
+        Control { session: Mutex::new(Session::default()), notify: Box::new(notify), enabled: AtomicBool::new(false) }
+    }
+
+    /// Settings' switch is on.
+    pub fn enabled(&self) -> bool {
+        self.enabled.load(Ordering::SeqCst)
+    }
+
+    /// Turns computer control on or off; off also ends the session, so what was queued drops.
+    pub fn set_enabled(&self, on: bool) {
+        self.enabled.store(on, Ordering::SeqCst);
+        if !on {
+            self.end(Reason::Stopped);
+        }
     }
 
     fn with<T>(&self, f: impl FnOnce(&mut Session) -> T) -> T {
@@ -66,6 +84,27 @@ mod tests {
         let states = Arc::new(Mutex::new(Vec::new()));
         let sink = states.clone();
         (Control::new(move |event| sink.lock().unwrap().push(event.clone())), states)
+    }
+
+    #[test]
+    fn a_new_control_is_off_until_the_user_turns_it_on() {
+        let (control, states) = control();
+        assert!(!control.enabled());
+        control.set_enabled(true);
+        assert!(control.enabled());
+        assert!(states.lock().unwrap().is_empty(), "the switch alone starts no session");
+    }
+
+    #[test]
+    fn turning_it_off_ends_the_session_and_drops_what_was_queued() {
+        let (control, states) = control();
+        control.set_enabled(true);
+        control.grant(NOW);
+        let epoch = control.epoch();
+        control.set_enabled(false);
+        assert!(!control.enabled() && !control.is_active(NOW));
+        assert_eq!(control.epoch(), epoch + 1);
+        assert_eq!(states.lock().unwrap().last(), Some(&StateEvent { active: false, ends_at: None, reason: Some(Reason::Stopped) }));
     }
 
     #[test]
