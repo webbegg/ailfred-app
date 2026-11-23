@@ -332,7 +332,13 @@ fn permissions(allowed: bool, accessibility: Option<bool>, k: &Kit, title: El) -
         };
         section = section.child(text(line).key("accessibility").wrap().font(k.ty.ui).color(k.c.text_weak));
         if !on {
-            let open = Button::new("Open Accessibility Settings…").on_press(|_: &mut SettingsUi| crate::open(crate::app_env::ACCESSIBILITY_SETTINGS)).build(k);
+            // macOS's prompt lists Ailfred in the pane, so there's only its switch to flip.
+            let open = Button::new("Open Accessibility Settings…")
+                .on_press(|_: &mut SettingsUi| {
+                    crate::computer::request_accessibility();
+                    crate::open(crate::app_env::ACCESSIBILITY_SETTINGS);
+                })
+                .build(k);
             section = section.child(row().child(open));
         }
     }

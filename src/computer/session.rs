@@ -39,6 +39,7 @@ impl Session {
         self.epoch
     }
 
+    #[cfg(test)]
     pub fn status(&self, now_ms: u64) -> StateEvent {
         let active = self.is_active(now_ms);
         StateEvent { active, ends_at: self.ends_at.filter(|_| active), reason: None }

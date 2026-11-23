@@ -44,6 +44,7 @@ impl Control {
         }
     }
 
+    #[cfg(test)]
     pub fn status(&self, now_ms: u64) -> StateEvent {
         self.with(|s| s.status(now_ms))
     }

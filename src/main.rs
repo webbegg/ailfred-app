@@ -119,6 +119,9 @@ pub struct Host {
     /// chord, held while it's on.
     computer: Option<computer::Running>,
     panic_shortcut: HotKey,
+    /// pi started before computer control was last switched: its tools are out of date, so it
+    /// starts again for the next message.
+    pi_stale: bool,
 }
 
 /// Something for the chat, wherever it is.
@@ -657,7 +660,7 @@ impl Host {
         let Some(handle) = self.handle.clone() else { return };
         let sink: model::Sink = Arc::new(move |item| handle.update(move |host, _| host.model_said(token, item)));
         let (is_pi, steer) = (request.model == model::PI, request.steer);
-        self.model(is_pi).send(request, sink);
+        self.model(is_pi, steer).send(request, sink);
         if steer {
             self.status.steered(token);
             return;
@@ -666,13 +669,16 @@ impl Host {
         self.show_status();
     }
 
-    /// pi (started the first time it's asked for, and again after it failed to) or Claude.
-    fn model(&mut self, pi: bool) -> &mut dyn model::Model {
+    /// pi (started the first time it's asked for, and again after it failed to, or once computer
+    /// control was switched since it started: it reads its tools as it starts) or Claude. A
+    /// `steer` goes to the run going, so pi stays as it is for it.
+    fn model(&mut self, pi: bool, steer: bool) -> &mut dyn model::Model {
         if !pi {
             return &mut self.claude;
         }
-        if self.pi.as_ref().is_some_and(pi_setup::Pi::failed) {
+        if self.pi.as_ref().is_some_and(pi_setup::Pi::failed) || (self.pi_stale && !steer) {
             self.pi = None;
+            self.pi_stale = false;
         }
         self.pi.get_or_insert_with(|| {
             let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
@@ -916,6 +922,9 @@ impl Host {
             }
         }
         if let Some(running) = &self.computer {
+            if running.control.enabled() != on && self.pi.is_some() {
+                self.pi_stale = true;
+            }
             computer::set_enabled(running, on);
         }
         // The panic chord is held only while computer control is on.
@@ -1043,6 +1052,7 @@ fn host_init() -> Host {
         chat_window_open: false,
         computer: None,
         panic_shortcut: HotKey::computer_panic(),
+        pi_stale: false,
     }
 }
 
@@ -1265,6 +1275,7 @@ fn main() {
             chat_window_open: false,
             computer: None,
             panic_shortcut: HotKey::computer_panic(),
+            pi_stale: false,
         });
         // Runs on the main thread at the loop's first turn: the status item needs a running NSApp,
         // and runtime shortcut registration needs the host started.

@@ -103,6 +103,49 @@ pub fn command(pi: &Path, layout: &Layout, real_home: &Path, path: &OsString, in
     command
 }
 
+/// The MCP server computer control's tools are served as, for pi and Claude Code.
+pub const COMPUTER_SERVER: &str = "computer";
+/// The variable pi gets computer control's token in (its `mcp.json` names it, not the token).
+const COMPUTER_TOKEN: &str = "AILFRED_COMPUTER_TOKEN";
+
+/// Hands pi computer control's tools while `endpoint` serves them (Settings' switch is on), or
+/// takes them away: the `computer` server in its `mcp.json` (its other servers stay), and the
+/// token in `command`'s environment. Read when pi starts.
+pub fn computer_tools(command: &mut Command, layout: &Layout, endpoint: Option<&crate::computer::server::Endpoint>) -> io::Result<()> {
+    use serde_json::{Value, json};
+    let path = layout.agent.join("mcp.json");
+    let saved = std::fs::read_to_string(&path).ok();
+    if saved.is_none() && endpoint.is_none() {
+        // Off, with no file to take the server out of.
+        command.env_remove(COMPUTER_TOKEN);
+        return Ok(());
+    }
+    let mut config = saved.and_then(|text| serde_json::from_str::<Value>(&text).ok()).filter(Value::is_object).unwrap_or_else(|| json!({}));
+    if !config["mcpServers"].is_object() {
+        config["mcpServers"] = json!({});
+    }
+    let servers = config["mcpServers"].as_object_mut().expect("an object");
+    match endpoint {
+        Some(endpoint) => {
+            servers.insert(
+                COMPUTER_SERVER.into(),
+                json!({
+                    "url": endpoint.url,
+                    "headers": {"Authorization": format!("Bearer ${{{COMPUTER_TOKEN}}}")},
+                    "exposure": "direct",
+                    "description": "See this Mac's screen and click, type and open apps in it, behind the user's approval.",
+                }),
+            );
+            command.env(COMPUTER_TOKEN, &endpoint.token);
+        }
+        None => {
+            servers.remove(COMPUTER_SERVER);
+            command.env_remove(COMPUTER_TOKEN);
+        }
+    }
+    std::fs::write(&path, serde_json::to_string_pretty(&config).unwrap_or_default())
+}
+
 /// The text after `marker` in a shell's output, up to the next `marker` (an interactive shell
 /// may print around it).
 pub fn marked(output: &str, marker: &str) -> Option<String> {
@@ -128,7 +171,15 @@ pub fn start(pi: &Path, data: &Path, real_home: &Path) -> io::Result<crate::pi::
     prepare(&layout, &real_home.join(".pi/agent"))?;
     let path = login_path(&std::env::var_os("PATH").unwrap_or_default());
     let (pi, real_home) = (pi.to_owned(), real_home.to_owned());
-    crate::pi::PiEngine::supervised(move || command(&pi, &layout, &real_home, &path, std::env::vars_os()), crate::pi::SHUTDOWN_GRACE)
+    let make = move || {
+        let mut command = command(&pi, &layout, &real_home, &path, std::env::vars_os());
+        // As computer control is now: on, its tools; off, none.
+        if let Err(e) = computer_tools(&mut command, &layout, crate::computer::endpoint_now().as_ref()) {
+            eprintln!("Ailfred: pi's computer tools couldn't be set up: {e}");
+        }
+        command
+    };
+    crate::pi::PiEngine::supervised(make, crate::pi::SHUTDOWN_GRACE)
 }
 
 /// Ailfred's pi as a [`Model`](crate::model::Model): started off the main thread; a message
@@ -384,6 +435,83 @@ mod tests {
         let with = command(Path::new("pi"), &layout, &root, &OsString::from("/usr/bin"), []);
         let path = env_of(&with).into_iter().find(|(k, _)| k == "PATH").and_then(|(_, v)| v);
         assert_eq!(path, Some(format!("{}:/usr/bin", root.join(".local/share/pi-node/current/bin").display())));
+    }
+
+    #[test]
+    fn pi_gets_the_computer_tools_only_while_computer_control_is_on_and_its_other_servers_stay() {
+        let root = scratch("computer");
+        let layout = Layout::under(&root.join("data"));
+        std::fs::create_dir_all(&layout.agent).unwrap();
+        std::fs::write(layout.agent.join("mcp.json"), r#"{"mcpServers":{"mine":{"command":"x"}},"other":1}"#).unwrap();
+        let endpoint = crate::computer::server::Endpoint { url: "http://127.0.0.1:4321/mcp".into(), token: "tok".into() };
+        let mut on = command(Path::new("pi"), &layout, &root, &OsString::new(), []);
+        computer_tools(&mut on, &layout, Some(&endpoint)).unwrap();
+        let config = settings(&layout.agent.join("mcp.json"));
+        assert_eq!(config["mcpServers"]["mine"], serde_json::json!({"command": "x"}), "the user's server stays");
+        assert_eq!(config["other"], 1);
+        let computer = &config["mcpServers"]["computer"];
+        assert_eq!(computer["url"], "http://127.0.0.1:4321/mcp");
+        assert_eq!(computer["headers"]["Authorization"], "Bearer ${AILFRED_COMPUTER_TOKEN}", "the token itself isn't written down");
+        assert_eq!(computer["exposure"], "direct", "the model sees the tools without searching");
+        let token = env_of(&on).into_iter().find(|(k, _)| k == "AILFRED_COMPUTER_TOKEN").and_then(|(_, v)| v);
+        assert_eq!(token.as_deref(), Some("tok"));
+
+        let mut off = command(Path::new("pi"), &layout, &root, &OsString::new(), [(OsString::from("AILFRED_COMPUTER_TOKEN"), OsString::from("old"))]);
+        computer_tools(&mut off, &layout, None).unwrap();
+        let config = settings(&layout.agent.join("mcp.json"));
+        assert!(config["mcpServers"].get("computer").is_none(), "{config}");
+        assert_eq!(config["mcpServers"]["mine"], serde_json::json!({"command": "x"}));
+        assert!(env_of(&off).contains(&("AILFRED_COMPUTER_TOKEN".to_owned(), None)), "no token reaches pi");
+    }
+
+    /// pi itself connects to the tools as Ailfred hands them to it, and lists them (no model is
+    /// asked; the Mac is a fake): `cargo test pi_lists_the_computer_tools -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "runs the installed pi"]
+    fn pi_lists_the_computer_tools() {
+        use crate::computer::{control::Control, fake, mcp::Helper, server};
+        use std::sync::Arc;
+        let real_home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap());
+        let pi = pi_binary(&real_home).expect("pi installed");
+        let token = server::new_token().unwrap();
+        let control = Arc::new(Control::new(|_| {}));
+        control.set_enabled(true);
+        let desktop = Arc::new(fake::FakeDesktop::default());
+        let dialogs = Arc::new(fake::FakeDialogs::new(true, true));
+        let helper = Helper::new(desktop, dialogs, Arc::new(fake::FakeClock::new(0)), control, token.clone(), 1);
+        let endpoint = server::start(Arc::new(helper), token).unwrap();
+        let layout = Layout::under(&scratch("pi-mcp").join("data"));
+        prepare(&layout, &real_home.join(".pi/agent")).unwrap();
+        let mut list = command(&pi, &layout, &real_home, &login_path(&std::env::var_os("PATH").unwrap_or_default()), std::env::vars_os());
+        computer_tools(&mut list, &layout, Some(&endpoint)).unwrap();
+        // `pi mcp list` instead of RPC mode: the same folders, environment and mcp.json.
+        let mut cmd = Command::new(list.get_program());
+        cmd.args(["mcp", "list"]).current_dir(list.get_current_dir().unwrap());
+        for (k, v) in list.get_envs() {
+            match v {
+                Some(v) => cmd.env(k, v),
+                None => cmd.env_remove(k),
+            };
+        }
+        let out = cmd.output().unwrap();
+        let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        eprintln!("{said}");
+        for tool in ["screenshot", "click", "type", "batch"] {
+            assert!(said.contains(tool), "{tool} listed");
+        }
+    }
+
+    #[test]
+    fn without_an_mcp_file_off_writes_none_and_on_makes_one() {
+        let root = scratch("computer-fresh");
+        let layout = Layout::under(&root.join("data"));
+        std::fs::create_dir_all(&layout.agent).unwrap();
+        let mut off = command(Path::new("pi"), &layout, &root, &OsString::new(), []);
+        computer_tools(&mut off, &layout, None).unwrap();
+        assert!(!layout.agent.join("mcp.json").exists());
+        let endpoint = crate::computer::server::Endpoint { url: "http://127.0.0.1:1/mcp".into(), token: "t".into() };
+        computer_tools(&mut off, &layout, Some(&endpoint)).unwrap();
+        assert_eq!(settings(&layout.agent.join("mcp.json"))["mcpServers"]["computer"]["url"], "http://127.0.0.1:1/mcp");
     }
 
     #[test]

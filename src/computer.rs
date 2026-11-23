@@ -6,9 +6,10 @@
 //! combos, the apps never targeted, which actions ask first, and the session the user grants.
 //! `Desktop` is the seam to the real Mac (`macos`): screenshots, input events, and what the
 //! Accessibility API says is under a point. `mcp` serves the tools over JSON-RPC behind those
-//! guards, and `control` holds the session the app shares with it. The HTTP server that wires
-//! them up comes in a later slice; until then nothing calls them (remove this allow once it does).
-#![allow(dead_code, unused_imports)]
+//! guards, `server` on a loopback port, and `control` holds the session the app shares with it
+//! (Settings' switch, Stop, the panic chord, the timeout). `alert` asks the user natively. pi and
+//! Claude Code get the tools while the switch is on (`endpoint_now`).
+
 
 pub mod alert;
 pub mod blocklist;
@@ -16,7 +17,7 @@ pub mod control;
 pub mod coords;
 pub mod encode;
 #[cfg(test)]
-mod fake;
+pub mod fake;
 pub mod keys;
 mod macos;
 pub mod mcp;
@@ -31,7 +32,7 @@ use coords::{Point, ScreenshotGeometry};
 use keys::KeyCombo;
 use risk::{AxElement, Focus};
 
-pub use macos::{MacDesktop, open_privacy_pane, request_permission};
+pub use macos::{MacDesktop, request_accessibility};
 
 #[cfg(test)]
 mod tests {
@@ -135,13 +136,6 @@ pub struct Permissions {
     pub accessibility: bool,
     pub screen_recording: bool,
     pub screenshots_supported: bool,
-}
-
-/// Which macOS permission the user is asked for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PermissionKind {
-    Accessibility,
-    ScreenRecording,
 }
 
 /// The Mac, as the tools see it. Nothing behind it decides policy.

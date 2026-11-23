@@ -9,6 +9,7 @@
 use super::Dialogs;
 
 /// The `NSAlert` response of the refusing button, added first (`NSAlertFirstButtonReturn`).
+#[cfg(test)]
 pub const REFUSE_RESPONSE: isize = 1000;
 /// The `NSAlert` response of the allowing button, added second (`NSAlertSecondButtonReturn`).
 pub const ALLOW_RESPONSE: isize = 1001;
