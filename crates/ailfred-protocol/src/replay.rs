@@ -25,7 +25,7 @@ pub enum Kind {
 }
 
 /// Why an event can't be replayed: it breaks the run's lifecycle (`RUN_STARTED` first, nothing
-/// after `RUN_FINISHED` or `RUN_ERROR`).
+/// after `RUN_FINISHED` or `RUN_ERROR`), or another run's comes in.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReplayError {
     /// An event came before the run's `RUN_STARTED`.
@@ -35,6 +35,11 @@ pub enum ReplayError {
     /// A `RUN_ERROR`, with its message, came after the `RUN_FINISHED`: the run failed after
     /// all: the client marks it failed (a `Reply` ignores events once it's over).
     FailedAfterFinish(String),
+    /// A `RUN_STARTED`, this one's run id, came while a run was going: two runs interleave on
+    /// one stream.
+    Interleaved { run_id: String },
+    /// A `RUN_FINISHED` names another thread or run than the one going (its ids).
+    OtherRun { thread_id: String, run_id: String },
 }
 
 impl std::fmt::Display for ReplayError {
@@ -43,17 +48,27 @@ impl std::fmt::Display for ReplayError {
             ReplayError::NotStarted => write!(f, "an event came before RUN_STARTED"),
             ReplayError::AfterEnd => write!(f, "an event came after the run ended"),
             ReplayError::FailedAfterFinish(message) => write!(f, "the run failed after it finished: {message}"),
+            ReplayError::Interleaved { run_id } => write!(f, "run {run_id} started while another was going"),
+            ReplayError::OtherRun { thread_id, run_id } => write!(f, "RUN_FINISHED of another run ({thread_id}/{run_id})"),
         }
     }
 }
 
 impl std::error::Error for ReplayError {}
 
-/// Turns one run's events into updates; it keeps where the run is, the tool calls and the
-/// questions it has seen.
+/// Turns one run's events into updates; it keeps where the run is, its thread and run ids, the
+/// tool calls and the questions it has seen.
+///
+/// One replayer per run: a second `RUN_STARTED` while the run goes is an
+/// [`Interleaved`](ReplayError::Interleaved) run, a `RUN_FINISHED` naming another thread or run
+/// [`OtherRun`](ReplayError::OtherRun) (a `RUN_ERROR` has no ids in AG-UI 1.0: it ends the run
+/// going). So the server (T20) must not interleave runs on one thread's stream: it starts the
+/// next run after the previous one ended.
 #[derive(Default)]
 pub struct Replayer {
     run: Run,
+    /// The thread and run ids its `RUN_STARTED` gave.
+    ids: Option<(String, String)>,
     calls: Vec<Call>,
     /// The interrupt ids of the questions asked so far.
     asked: Vec<String>,
@@ -95,10 +110,12 @@ struct StepOutput {
 struct Ask {
     interrupt_id: String,
     message: String,
+    /// Missing or `null`: none.
     #[serde(default)]
-    options: Vec<String>,
+    options: Option<Vec<String>>,
+    /// Missing or `null`: false.
     #[serde(default)]
-    multi: bool,
+    multi: Option<bool>,
 }
 
 impl Replayer {
@@ -107,10 +124,17 @@ impl Replayer {
     }
 
     /// The updates `event` makes; none for what a reply doesn't show, or doesn't know. An error
-    /// if it comes before the run starts or after it ended.
+    /// if it comes before the run starts or after it ended, or belongs to another run.
     pub fn replay(&mut self, event: &agui::Event) -> Result<Vec<Update>, ReplayError> {
         self.run = match (self.run, event) {
-            (Run::NotStarted, agui::Event::RunStarted { .. }) => Run::Going,
+            (Run::NotStarted, agui::Event::RunStarted { thread_id, run_id, .. }) => {
+                self.ids = Some((thread_id.clone(), run_id.clone()));
+                Run::Going
+            }
+            (Run::Going, agui::Event::RunStarted { run_id, .. }) => return Err(ReplayError::Interleaved { run_id: run_id.clone() }),
+            (Run::Going, agui::Event::RunFinished { thread_id, run_id, .. }) if self.ids.as_ref().is_some_and(|(t, r)| t != thread_id || r != run_id) => {
+                return Err(ReplayError::OtherRun { thread_id: thread_id.clone(), run_id: run_id.clone() });
+            }
             (Run::NotStarted, _) => return Err(ReplayError::NotStarted),
             (Run::Finished, agui::Event::RunError { message, .. }) => return Err(ReplayError::FailedAfterFinish(message.clone())),
             (Run::Finished | Run::Failed, _) => return Err(ReplayError::AfterEnd),
@@ -176,7 +200,7 @@ impl Replayer {
             A::Custom { name, value, .. } if name == ASK => {
                 let Ok(Ask { interrupt_id, message, options, multi }) = Ask::deserialize(value) else { return Vec::new() };
                 self.asked.push(interrupt_id);
-                vec![ev(Event::Ask { prompt: message, options, multi })]
+                vec![ev(Event::Ask { prompt: message, options: options.unwrap_or_default(), multi: multi.unwrap_or(false) })]
             }
             A::RunFinished { outcome, .. } => match outcome {
                 Some(RunOutcome::Interrupt { interrupts }) => {
@@ -325,6 +349,32 @@ mod tests {
         assert_eq!(replay_lines(&[STARTED, FINISHED, STARTED]), Err(ReplayError::AfterEnd));
         assert_eq!(replay_lines(&[STARTED, ERROR, TEXT]), Err(ReplayError::AfterEnd));
         assert_eq!(replay_lines(&[STARTED, ERROR, ERROR]), Err(ReplayError::AfterEnd));
+    }
+
+    #[test]
+    fn a_second_run_starting_while_one_goes_is_an_interleaved_run() {
+        let other = r#"{"type":"RUN_STARTED","threadId":"t","runId":"r2"}"#;
+        assert_eq!(replay_lines(&[STARTED, TEXT, other]), Err(ReplayError::Interleaved { run_id: "r2".into() }));
+        assert_eq!(replay_lines(&[STARTED, STARTED]), Err(ReplayError::Interleaved { run_id: "r".into() }), "its own id again too");
+    }
+
+    #[test]
+    fn a_run_finished_naming_another_thread_or_run_is_another_runs_end() {
+        let run = r#"{"type":"RUN_FINISHED","threadId":"t","runId":"r2"}"#;
+        let thread = r#"{"type":"RUN_FINISHED","threadId":"t2","runId":"r"}"#;
+        assert_eq!(replay_lines(&[STARTED, run]), Err(ReplayError::OtherRun { thread_id: "t".into(), run_id: "r2".into() }));
+        assert_eq!(replay_lines(&[STARTED, thread]), Err(ReplayError::OtherRun { thread_id: "t2".into(), run_id: "r".into() }));
+        // A RUN_ERROR carries no ids in AG-UI 1.0: it ends the run going.
+        assert!(replay_lines(&[STARTED, ERROR]).is_ok());
+    }
+
+    #[test]
+    fn a_question_with_null_options_replays_where_it_was_asked() {
+        let ours = r#"{"type":"CUSTOM","name":"ailfred:ask","value":{"interruptId":"i","message":"Which?","multi":null,"options":null}}"#;
+        let interrupt = r#"{"id":"i","reason":"input_required","message":"Which?"}"#;
+        let finished = format!(r#"{{"type":"RUN_FINISHED","threadId":"t","runId":"r","outcome":{{"type":"interrupt","interrupts":[{interrupt}]}}}}"#);
+        let ask = Kind::Event(Event::Ask { prompt: "Which?".into(), options: Vec::new(), multi: false });
+        assert_eq!(replay_lines(&[STARTED, ours, TEXT, &finished]).unwrap(), [Kind::Event(Event::Taken), ask, Kind::Event(Event::Text(String::new())), Kind::Event(Event::Done)]);
     }
 
     #[test]

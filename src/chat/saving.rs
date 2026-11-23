@@ -18,13 +18,15 @@ impl Chat {
         self.hidden = 0;
         self.replies.clear();
         self.others.clear();
+        self.kept.clear();
         self.draft.clear();
         self.shots.clear();
         self.conv = history::Meta::fresh();
     }
 
     /// The conversation as it is, to write; None while it has no message. The captures not
-    /// yet kept get their file names here.
+    /// yet kept get their file names here; a loaded reply that keeps what was saved of it
+    /// writes those events and answers back.
     pub fn snapshot(&mut self) -> Option<history::Snapshot> {
         if self.messages.is_empty() {
             return None;
@@ -44,7 +46,13 @@ impl Chat {
             .map(|(i, m)| history::SavedMessage {
                 text: m.text.clone(),
                 pngs: m.files.clone(),
-                reply: self.replies.iter().find(|r| r.id == m.id).map(|r| history::saved_reply(r, &self.conv.id, &history::run_id(&self.conv.id, i))),
+                reply: self.replies.iter().find(|r| r.id == m.id).map(|r| {
+                    let mut saved = history::saved_reply(r, &self.conv.id, &history::run_id(&self.conv.id, i));
+                    if let Some(kept) = self.kept.get(&r.token) {
+                        (saved.events, saved.answers) = (kept.events.clone(), kept.answers.clone());
+                    }
+                    saved
+                }),
             })
             .collect();
         let session = self.session.as_ref().and_then(|(id, ends_at)| {
@@ -149,7 +157,11 @@ impl Chat {
             message.files = read.files;
             if let Some(saved) = &read.reply {
                 self.next_token += 1;
-                self.replies.push(history::reply_from(saved, id, &message.text, self.next_token));
+                let (reply, kept) = history::read_reply(saved, id, &message.text, self.next_token);
+                if let Some(kept) = kept {
+                    self.kept.insert(reply.token, kept);
+                }
+                self.replies.push(reply);
             }
             if !message.pngs.is_empty() {
                 to_decode.push((id, message.pngs.iter().map(|p| p.to_vec()).collect::<Vec<_>>()));

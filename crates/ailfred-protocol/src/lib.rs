@@ -25,17 +25,26 @@
 //! | the user's Stop | `RUN_FINISHED` outcome `cancelled` |
 //!
 //! Once the run has ended, the encoder sends nothing more, as a `Reply` ignores it; a replayer
-//! refuses an event before `RUN_STARTED` or after the end ([`ReplayError`](replay::ReplayError)).
+//! refuses an event before `RUN_STARTED` or after the end, a second `RUN_STARTED` while the run
+//! goes, and a `RUN_FINISHED` naming another thread or run ([`ReplayError`](replay::ReplayError)):
+//! one replayer per run.
 //! Answers go back in the next run's `resume` ([`answer_resume`](command::answer_resume):
-//! `{"answer": "…"}`); that run's `messages` are, as AG-UI requires, the whole conversation so
-//! far, the reply that asked included (as an assistant message with its text).
+//! `{"answer": "…"}`). A run's `messages` are, as AG-UI requires, the complete history, built
+//! as a snapshot builds it ([`snapshot::history`]), so the ids and shapes are the snapshot's:
+//! [`command::send`] adds the new user message `{run}-user`, [`command::answer`] the reply that
+//! asked is the last of. The core takes an answer as a new user message (the app's chat pushes
+//! its text as the next message), so a later snapshot shows it as the answering run's `user`
+//! message `{run}-user`: that's how the two line up. Which messages win when a client's history
+//! and the core's differ, a partial resume, and `status: cancelled` are left to the server (T20).
 //!
 //! ## Saved replies and snapshots
 //!
 //! [`saved`] turns a finished reply back into one run's events, and those events into the same
 //! reply: a saved conversation keeps its replies so (the app's `history`). [`snapshot`] makes a
 //! conversation one `MESSAGES_SNAPSHOT` for a client that joins it, and reads one back; its
-//! docs say what a snapshot doesn't carry.
+//! docs say what a snapshot doesn't carry. A question nothing waits an answer for (closed, or
+//! in a reply that failed or was stopped) says `"closed": true` there, and comes back closed: a
+//! joining client can't answer it.
 //!
 //! ## Ids
 //!
@@ -59,8 +68,8 @@
 //! ## Limits, for the server (T20)
 //!
 //! - Steered replies overlap on pi: the next reply's `Taken` comes before the previous one's
-//!   `Done`. On one thread's stream runs must not interleave, so the server starts the next run
-//!   after the previous one finished.
+//!   `Done`. On one thread's stream runs must not interleave (a client's replayer refuses it),
+//!   so the server starts the next run after the previous one finished.
 //! - Run ids must be unique within a thread, since every other id derives from them: the server
 //!   mints them, or refuses a `runId` already used.
 //! - Retry reuses a message's saved run id (the app's `history::run_id`), so the server must

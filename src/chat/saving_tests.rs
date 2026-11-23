@@ -515,6 +515,97 @@ fn a_title_for_a_conversation_the_chat_has_left_doesnt_touch_the_one_it_has() {
     assert_eq!(c.saved.len(), saved, "and isn't written for it");
 }
 
+// What a newer build saved, and this one can't read, stays as it was.
+
+/// A conversation file whose one reply has `events` and an answer, loaded into a chat.
+fn chat_with_events(name: &str, events: &serde_json::Value) -> Chat {
+    let dir = scratch(name);
+    let id = "20240101-000000-0050";
+    let reply = serde_json::json!({ "state": "done", "text": "from the fields", "events": events, "answers": ["a.rs"] });
+    let file = serde_json::json!({ "version": 1, "id": id, "messages": [{ "text": "fix it", "reply": reply }] });
+    std::fs::write(dir.join(format!("{id}.json")), file.to_string()).unwrap();
+    let mut c = Chat::new(None);
+    c.load(history::load(&dir, id).expect("it loads"));
+    c
+}
+
+/// A run that asks a question, with `middle` before its end (`finished`: it has one).
+fn asking_run(middle: &[serde_json::Value], finished: bool) -> serde_json::Value {
+    let mut events = vec![
+        serde_json::json!({ "type": "RUN_STARTED", "threadId": "t", "runId": "r" }),
+        serde_json::json!({ "type": "CUSTOM", "name": "ailfred:ask", "value": { "interruptId": "r-ask-1", "message": "Which?", "multi": false, "options": ["a.rs"] } }),
+    ];
+    events.extend(middle.iter().cloned());
+    if finished {
+        events.push(serde_json::json!({ "type": "RUN_FINISHED", "threadId": "t", "runId": "r" }));
+    }
+    serde_json::Value::Array(events)
+}
+
+/// Known types in shapes this build doesn't read.
+fn unreadable() -> [serde_json::Value; 2] {
+    [
+        serde_json::json!({ "type": "TOOL_CALL_RESULT", "messageId": "m", "toolCallId": "c", "content": [{ "type": "binary", "mimeType": "application/pdf", "data": "AAAA" }] }),
+        serde_json::json!({ "type": "TEXT_MESSAGE_START", "messageId": "m2", "role": "tool" }),
+    ]
+}
+
+/// The first message's reply, as `c` saves it now.
+fn saved_now(c: &mut Chat) -> SavedReply {
+    c.snapshot().unwrap().saved.messages[0].reply.clone().unwrap()
+}
+
+#[test]
+fn a_reply_with_an_event_this_build_cant_read_shows_its_text_and_is_saved_with_its_events_as_they_were() {
+    for (i, event) in unreadable().into_iter().enumerate() {
+        let events = asking_run(std::slice::from_ref(&event), true);
+        let mut c = chat_with_events(&format!("unreadable-{i}"), &events);
+        assert_eq!(c.replies[0].copy_text(), "from the fields", "{event}");
+        let saved = saved_now(&mut c);
+        assert_eq!(serde_json::to_value(&saved.events).unwrap(), events, "{event}");
+        assert_eq!(saved.answers, [Some("a.rs".to_owned())], "{event}");
+        assert_eq!(saved.text, "from the fields");
+    }
+}
+
+#[test]
+fn a_reply_whose_events_dont_replay_shows_its_text_and_is_saved_with_its_events_as_they_were() {
+    let finished = serde_json::json!({ "type": "RUN_FINISHED", "threadId": "t", "runId": "r" });
+    for (i, events) in [asking_run(&[], false), asking_run(&[finished], true)].into_iter().enumerate() {
+        let mut c = chat_with_events(&format!("no-replay-{i}"), &events);
+        assert_eq!(c.replies[0].copy_text(), "from the fields", "{events}");
+        let saved = saved_now(&mut c);
+        assert_eq!(serde_json::to_value(&saved.events).unwrap(), events);
+        assert_eq!(saved.answers, [Some("a.rs".to_owned())]);
+    }
+}
+
+#[test]
+fn a_reply_with_an_event_of_a_type_this_build_doesnt_know_keeps_it_when_saved_again() {
+    let events = asking_run(&[serde_json::json!({ "type": "AILFRED_NEW", "what": "a newer build's" })], true);
+    let mut c = chat_with_events("unknown-type", &events);
+    let Some(crate::reply::Part::Question(q)) = c.replies[0].parts.first() else { panic!("its question, from the events") };
+    assert_eq!(q.answered.as_deref(), Some("a.rs"));
+    let saved = saved_now(&mut c);
+    assert_eq!(serde_json::to_value(&saved.events).unwrap(), events);
+    assert_eq!(saved.answers, [Some("a.rs".to_owned())]);
+}
+
+#[test]
+fn a_retry_of_a_reply_kept_as_it_was_saves_fresh_events() {
+    let events = asking_run(&unreadable()[..1], true);
+    let mut c = chat_with_events("retried", &events);
+    let again = c.retry(c.replies[0].token).expect("retried");
+    c.reply_event(again, Event::Text("Fresh.".into()), now());
+    c.reply_event(again, Event::Done, now());
+    let saved = last_saved(&c).messages[0].reply.clone().unwrap();
+    let fresh = serde_json::to_value(&saved.events).unwrap();
+    assert_ne!(fresh, events);
+    assert_eq!(fresh[0]["runId"], history::run_id(&c.conv.id, 0).as_str(), "its own run");
+    assert!(saved.answers.is_empty(), "it asks nothing");
+    assert_eq!(saved.text, "Fresh.");
+}
+
 // Show earlier: a long conversation opens at its latest page.
 
 fn many(n: usize) -> Loaded {
