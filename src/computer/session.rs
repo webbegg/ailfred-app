@@ -51,10 +51,11 @@ impl Session {
         StateEvent { active: true, ends_at: self.ends_at, reason: Some(Reason::Granted) }
     }
 
-    /// Ends the session for `reason`. `None` when there was none to end.
+    /// Ends the session for `reason`. `None` when there was none to end; the epoch moves on
+    /// either way, so a call that waits for the grant meanwhile drops too.
     pub fn end(&mut self, reason: Reason) -> Option<StateEvent> {
-        self.ends_at.take()?;
         self.epoch += 1;
+        self.ends_at.take()?;
         Some(StateEvent { active: false, ends_at: None, reason: Some(reason) })
     }
 
@@ -99,10 +100,10 @@ mod tests {
     }
 
     #[test]
-    fn ending_an_idle_session_reports_nothing() {
+    fn ending_an_idle_session_reports_nothing_but_drops_what_waits() {
         let mut session = Session::default();
         assert_eq!(session.end(Reason::Stopped), None);
-        assert_eq!(session.epoch(), 0);
+        assert_eq!(session.epoch(), 1, "a call waiting for the grant is dropped");
     }
 
     #[test]

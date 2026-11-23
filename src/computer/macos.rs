@@ -354,11 +354,24 @@ impl Desktop for MacDesktop {
             .iter()
             .find(|d| unsafe { d.displayID() } == display_id)
             .ok_or("the display under the pointer cannot be captured")?;
-        let own: Vec<Retained<SCWindow>> = unsafe { content.windows() }
+        // Ailfred's own windows, and those of every app it never controls (a password manager's
+        // contents never reach the model).
+        let hidden: Vec<Retained<SCWindow>> = unsafe { content.windows() }
             .iter()
-            .filter(|w| unsafe { w.owningApplication() }.is_some_and(|app| unsafe { app.processID() } == self.own_pid))
+            .filter(|w| {
+                unsafe { w.owningApplication() }.is_some_and(|app| {
+                    let identity = unsafe {
+                        AppIdentity {
+                            pid: app.processID(),
+                            bundle_id: Some(app.bundleIdentifier().to_string()).filter(|b| !b.is_empty()),
+                            name: app.applicationName().to_string(),
+                        }
+                    };
+                    super::blocklist::blocked_reason(&identity, self.own_pid).is_some()
+                })
+            })
             .collect();
-        let excluded = NSArray::from_retained_slice(&own);
+        let excluded = NSArray::from_retained_slice(&hidden);
         let frame = unsafe { display.frame() };
         let (width, height) = fit_long_edge(frame.size.width as u32, frame.size.height as u32, MAX_LONG_EDGE);
         // SAFETY: a valid display and window array, then setters on a fresh configuration.

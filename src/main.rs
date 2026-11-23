@@ -927,6 +927,10 @@ impl Host {
             }
             computer::set_enabled(running, on);
         }
+        // Off: the token Claude Code was handed doesn't stay on disk until its next run.
+        if !on && let Err(e) = model::claude_code::write_computer_config(&model::claude_code::private_dir_now(), None) {
+            eprintln!("Ailfred: removing Claude Code's computer tools failed: {e}");
+        }
         // The panic chord is held only while computer control is on.
         if let Some(handle) = &self.handle {
             let chord = computer::PANIC_SHORTCUT.parse::<rune::Shortcut>().ok();

@@ -309,6 +309,15 @@ fn batch_steps(args: &Map<String, Value>) -> Result<Vec<(&'static str, Call)>, S
     steps.iter().enumerate().map(|(i, s)| step(i + 1, s)).collect()
 }
 
+/// `text` on one line (control characters and line separators become spaces), cut to `max` characters.
+fn one_line(text: &str, max: usize) -> String {
+    let flat: String = text.split(|c: char| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')).filter(|s| !s.trim().is_empty()).map(str::trim).collect::<Vec<_>>().join(" ");
+    match flat.char_indices().nth(max) {
+        Some((at, _)) => format!("{}…", &flat[..at]),
+        None => flat,
+    }
+}
+
 /// Splits text into chunks of at most `TEXT_CHUNK_UNITS` UTF-16 units, never inside a character.
 fn chunks(text: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -361,7 +370,7 @@ impl Helper {
         }
     }
 
-    fn authorized(&self, header: Option<&str>) -> bool {
+    pub fn authorized(&self, header: Option<&str>) -> bool {
         let Some((scheme, token)) = header.and_then(|h| h.trim().split_once(' ')) else {
             return false;
         };
@@ -453,6 +462,13 @@ impl Helper {
             if !self.with_dialog(|| self.dialogs.ask_grant()) {
                 return Err(NOT_ALLOWED.into());
             }
+            // Stop, the panic chord or the switch may have come while the user read the question.
+            if !self.control.enabled() {
+                return Err(OFF.into());
+            }
+            if self.control.epoch() != epoch {
+                return Err(STOPPED.into());
+            }
             self.control.grant(self.clock.now_ms());
         }
         self.act(epoch, &mut latest, call)
@@ -516,10 +532,20 @@ impl Helper {
         }
     }
 
-    /// The app owning the window under `at`, refused when blocked or unknown. Its name, for messages.
-    fn pointer_target(&self, at: Point) -> Result<String, String> {
+    /// The app owning the window under `at`, refused when blocked or unknown.
+    fn pointer_target(&self, at: Point) -> Result<AppIdentity, String> {
         let app = self.desktop.window_owner_at(at).ok_or(UNKNOWN_TARGET)?;
-        self.refuse_blocked(&app).map(|()| app.name)
+        self.refuse_blocked(&app).map(|()| app)
+    }
+
+    /// Right before a pointer post: the app under `at` is still `checked` (a window may have come
+    /// over it while the user read a confirmation, or since the check).
+    fn still_pointer_target(&self, at: Point, checked: &AppIdentity) -> Result<(), String> {
+        let now = self.pointer_target(at)?;
+        if now.pid != checked.pid {
+            return Err(format!("The app under that point changed from {} to {}, so nothing was done. Take a new screenshot.", checked.name, now.name));
+        }
+        Ok(())
     }
 
     /// The frontmost app and the app owning the focused element (they differ for a
@@ -548,6 +574,9 @@ impl Helper {
         let Some(reason) = risk else {
             return Ok(());
         };
+        // The reason quotes the model's intent and labels web pages set: one line each, cut short,
+        // so they can't pose as the dialog's own text.
+        let (target, reason) = (one_line(target, 80), one_line(&reason, 200));
         let message = format!("{action} in {target}.\n\nThis needs your OK because of {reason}.");
         let before = self.desktop.frontmost_app();
         if !self.with_dialog(|| self.dialogs.confirm(&message)) {
@@ -702,7 +731,8 @@ impl Helper {
             Tool::Screenshot | Tool::ListApps | Tool::Batch { .. } => Err("Not an action.".into()),
             Tool::Click { x, y, button, count } => {
                 let at = map(latest, (x, y))?;
-                let target = self.pointer_target(at)?;
+                let owner = self.pointer_target(at)?;
+                let target = owner.name.clone();
                 let chain = self.desktop.element_at(at);
                 let action = match (button, count) {
                     (MouseButton::Right, _) => format!("Right-click at ({x}, {y})"),
@@ -711,14 +741,16 @@ impl Helper {
                     _ => format!("Click at ({x}, {y})"),
                 };
                 self.confirm_if_risky(assess(Act::Click(&chain), intent), &action, &target)?;
+                self.still_pointer_target(at, &owner)?;
                 self.post(epoch, InputEvent::Click { at, button, count })?;
                 Ok((format!("{action} in {target}: done."), SETTLE_MS))
             }
             Tool::Move { x, y } => {
                 let at = map(latest, (x, y))?;
-                let target = self.pointer_target(at)?;
+                let owner = self.pointer_target(at)?;
                 let action = format!("Move the pointer to ({x}, {y})");
-                self.confirm_if_risky(assess(Act::Other, intent), &action, &target)?;
+                self.confirm_if_risky(assess(Act::Other, intent), &action, &owner.name)?;
+                self.still_pointer_target(at, &owner)?;
                 self.post(epoch, InputEvent::Move(at))?;
                 Ok((format!("{action}: done."), SETTLE_MS))
             }
@@ -727,17 +759,20 @@ impl Helper {
                 let source = self.pointer_target(start)?;
                 let destination = self.pointer_target(end)?;
                 let action = format!("Drag from ({}, {}) to ({}, {})", from.0, from.1, to.0, to.1);
-                let target = if source == destination { source } else { format!("{source} and {destination}") };
+                let target = if source.name == destination.name { source.name.clone() } else { format!("{} and {}", source.name, destination.name) };
                 let (from_chain, to_chain) = (self.desktop.element_at(start), self.desktop.element_at(end));
                 self.confirm_if_risky(assess(Act::Drag(&from_chain, &to_chain), intent), &action, &target)?;
+                self.still_pointer_target(start, &source)?;
+                self.still_pointer_target(end, &destination)?;
                 self.post(epoch, InputEvent::Drag { from: start, to: end })?;
                 Ok((format!("{action}: done."), SETTLE_MS))
             }
             Tool::Scroll { x, y, dx, dy } => {
                 let at = map(latest, (x, y))?;
-                let target = self.pointer_target(at)?;
+                let owner = self.pointer_target(at)?;
                 let action = format!("Scroll by ({dx}, {dy}) at ({x}, {y})");
-                self.confirm_if_risky(assess(Act::Other, intent), &action, &target)?;
+                self.confirm_if_risky(assess(Act::Other, intent), &action, &owner.name)?;
+                self.still_pointer_target(at, &owner)?;
                 self.post(epoch, InputEvent::Scroll { at, dx, dy })?;
                 Ok((format!("{action}: done."), SETTLE_MS))
             }

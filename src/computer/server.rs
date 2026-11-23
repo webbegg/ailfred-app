@@ -4,6 +4,7 @@
 use super::mcp::{Helper, HttpReply, HttpRequest};
 use std::io::Read;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 
 /// Where the tools are served, and the token that opens them.
@@ -26,15 +27,30 @@ pub fn new_token() -> std::io::Result<String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// Requests served at once; more are turned away (503) rather than each getting a thread.
+const MAX_IN_FLIGHT: usize = 8;
+
 /// Binds a random loopback port and serves each request on its own thread (actions are
-/// serialized inside `Helper`). Serves until the app quits.
+/// serialized inside `Helper`), up to `MAX_IN_FLIGHT` at once. Serves until the app quits.
 pub fn start(helper: Arc<Helper>, token: String) -> std::io::Result<Endpoint> {
     let server = tiny_http::Server::http("127.0.0.1:0").map_err(std::io::Error::other)?;
     let port = server.server_addr().to_ip().map(|a| a.port()).ok_or_else(|| std::io::Error::other("no port"))?;
+    let in_flight = Arc::new(AtomicUsize::new(0));
     thread::Builder::new().name("computer-mcp".into()).spawn(move || {
         for request in server.incoming_requests() {
-            let helper = helper.clone();
-            let _ = thread::Builder::new().name("computer-call".into()).spawn(move || serve(&helper, request));
+            if in_flight.fetch_add(1, Ordering::SeqCst) >= MAX_IN_FLIGHT {
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                let _ = request.respond(tiny_http::Response::empty(503));
+                continue;
+            }
+            let (helper, done) = (helper.clone(), in_flight.clone());
+            let spawned = thread::Builder::new().name("computer-call".into()).spawn(move || {
+                serve(&helper, request);
+                done.fetch_sub(1, Ordering::SeqCst);
+            });
+            if spawned.is_err() {
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+            }
         }
     })?;
     Ok(Endpoint { url: format!("http://127.0.0.1:{port}/mcp"), token })
@@ -45,6 +61,12 @@ const MAX_BODY: u64 = 1 << 20;
 
 fn serve(helper: &Helper, mut request: tiny_http::Request) {
     let authorization = request.headers().iter().find(|h| h.field.equiv("Authorization")).map(|h| h.value.as_str().to_string());
+    // Without the token, the body isn't even read.
+    if !helper.authorized(authorization.as_deref()) {
+        let unauthorized = tiny_http::Response::empty(401).with_header(tiny_http::Header::from_bytes("WWW-Authenticate", "Bearer").expect("valid header"));
+        let _ = request.respond(unauthorized);
+        return;
+    }
     let mut body = String::new();
     let read = request.as_reader().take(MAX_BODY).read_to_string(&mut body);
     let method = request.method().as_str().to_string();
