@@ -48,6 +48,7 @@ impl ShortcutFor {
 const QUICK_SHORTCUT: &str = "quick_shortcut";
 const FOLDER: &str = "folder";
 const IGNORE_REDUCE_MOTION: &str = "ignore_reduce_motion";
+const COMPUTER_CONTROL: &str = "computer_control";
 const MODEL: &str = "model";
 
 /// Whether the views animate even under the system's Reduce Motion, until set (also before the
@@ -170,6 +171,17 @@ impl Settings {
             eprintln!("Ailfred: saving the motion setting failed: {e}");
         }
         IGNORE_REDUCE_MOTION_NOW.store(ignore, Ordering::Relaxed);
+    }
+
+    /// Let the model see the screen and drive the Mac (with pi or Claude Code): off until turned on.
+    pub fn computer_control(&self) -> bool {
+        self.prefs.get::<bool>(COMPUTER_CONTROL).unwrap_or(false)
+    }
+
+    pub fn set_computer_control(&mut self, on: bool) {
+        if let Err(e) = self.prefs.set(COMPUTER_CONTROL, &on) {
+            eprintln!("Ailfred: saving the computer control setting failed: {e}");
+        }
     }
 }
 
@@ -426,6 +438,16 @@ mod tests {
         s.set_ignore_reduce_motion(false);
         assert!(!s.ignore_reduce_motion());
         assert!(!ignore_reduce_motion_now());
+    }
+
+    #[test]
+    fn computer_control_is_off_until_turned_on_and_stays_as_set() {
+        let mut s = Settings::with(Prefs::memory());
+        assert!(!s.computer_control(), "off by default: the model gets no tools to drive the Mac");
+        s.set_computer_control(true);
+        assert!(s.computer_control());
+        s.set_computer_control(false);
+        assert!(!s.computer_control());
     }
 
 

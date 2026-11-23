@@ -10,6 +10,7 @@
 //! them up comes in a later slice; until then nothing calls them (remove this allow once it does).
 #![allow(dead_code, unused_imports)]
 
+pub mod alert;
 pub mod blocklist;
 pub mod control;
 pub mod coords;
@@ -21,6 +22,7 @@ mod macos;
 pub mod mcp;
 pub mod rate;
 pub mod risk;
+pub mod server;
 pub mod session;
 pub mod windows;
 
@@ -30,6 +32,46 @@ use keys::KeyCombo;
 use risk::{AxElement, Focus};
 
 pub use macos::{MacDesktop, open_privacy_pane, request_permission};
+
+use std::sync::{Arc, RwLock};
+
+/// Computer control as the app runs it: the session it shares with the tools, and where they
+/// are served (for the model it starts).
+pub struct Running {
+    pub control: Arc<control::Control>,
+    pub endpoint: server::Endpoint,
+}
+
+/// Starts serving the tools on a loopback port with a fresh token, switched off until the app
+/// turns them on (`Control::set_enabled`). `notify` hears every session change. Once per launch.
+pub fn start(notify: impl Fn(&session::StateEvent) + Send + Sync + 'static) -> std::io::Result<Running> {
+    let token = server::new_token()?;
+    let control = Arc::new(control::Control::new(notify));
+    let helper = mcp::Helper::new(
+        Arc::new(MacDesktop::default()),
+        Arc::new(alert::MacDialogs),
+        Arc::new(SystemClock),
+        control.clone(),
+        token.clone(),
+        std::process::id() as i32,
+    );
+    let endpoint = server::start(Arc::new(helper), token)?;
+    Ok(Running { control, endpoint })
+}
+
+/// Where the tools are served while computer control is on (any thread): what a model started
+/// now is handed. None while it's off.
+static ENDPOINT_NOW: RwLock<Option<server::Endpoint>> = RwLock::new(None);
+
+pub fn endpoint_now() -> Option<server::Endpoint> {
+    ENDPOINT_NOW.read().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+/// Turns `running` on or off, and publishes where it's served while it's on.
+pub fn set_enabled(running: &Running, on: bool) {
+    running.control.set_enabled(on);
+    *ENDPOINT_NOW.write().unwrap_or_else(|e| e.into_inner()) = on.then(|| running.endpoint.clone());
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MouseButton {
