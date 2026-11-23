@@ -105,19 +105,44 @@ pub fn command(pi: &Path, layout: &Layout, real_home: &Path, path: &OsString, in
 
 /// The MCP server computer control's tools are served as, for pi and Claude Code.
 pub const COMPUTER_SERVER: &str = "computer";
-/// The variable pi gets computer control's token in (its `mcp.json` names it, not the token).
+/// The variable an older build gave pi computer control's token in. Always taken out of pi's
+/// environment, so one in the app's own doesn't reach pi or what it runs either.
 const COMPUTER_TOKEN: &str = "AILFRED_COMPUTER_TOKEN";
+/// The pi extension that keeps only the latest of computer control's screenshots in what pi
+/// sends its model.
+const LATEST_SCREENSHOT: &str = include_str!("pi_setup/latest_screenshot.js");
 
 /// Hands pi computer control's tools while `endpoint` serves them (Settings' switch is on), or
 /// takes them away: the `computer` server in its `mcp.json` (its other servers stay), and the
-/// token in `command`'s environment. Read when pi starts.
+/// extension that leaves all but the latest screenshot out of what pi sends its model. Read when
+/// pi starts.
+///
+/// The token is written in `mcp.json`, owner-only, and never put in pi's environment: a file
+/// takes a deliberate read, while an environment variable reaches every command pi's bash tool
+/// runs and every install script, which often print theirs. Any process of the user's can still
+/// read the file; the server's own checks (the switch, the risk rules, the blocklist, the rate
+/// limit, the user's approvals) hold whoever calls.
 pub fn computer_tools(command: &mut Command, layout: &Layout, endpoint: Option<&crate::computer::server::Endpoint>) -> io::Result<()> {
+    command.env_remove(COMPUTER_TOKEN);
+    let server = computer_server(layout, endpoint);
+    let extension = latest_screenshot(layout, endpoint.is_some());
+    server.and(extension)
+}
+
+/// Computer control was switched off: its server, and the token in it, leave the `mcp.json` of
+/// Ailfred's pi under `data` at once, not only when pi next starts (which may be never). The
+/// pi running keeps what it read; the server refuses it while off.
+pub fn forget_computer_token(data: &Path) -> io::Result<()> {
+    computer_server(&Layout::under(data), None)
+}
+
+/// The `computer` server in pi's `mcp.json` while `endpoint` serves the tools, else taken out.
+fn computer_server(layout: &Layout, endpoint: Option<&crate::computer::server::Endpoint>) -> io::Result<()> {
     use serde_json::{Value, json};
     let path = layout.agent.join("mcp.json");
     let saved = std::fs::read_to_string(&path).ok();
     if saved.is_none() && endpoint.is_none() {
         // Off, with no file to take the server out of.
-        command.env_remove(COMPUTER_TOKEN);
         return Ok(());
     }
     let mut config = saved.and_then(|text| serde_json::from_str::<Value>(&text).ok()).filter(Value::is_object).unwrap_or_else(|| json!({}));
@@ -131,19 +156,47 @@ pub fn computer_tools(command: &mut Command, layout: &Layout, endpoint: Option<&
                 COMPUTER_SERVER.into(),
                 json!({
                     "url": endpoint.url,
-                    "headers": {"Authorization": format!("Bearer ${{{COMPUTER_TOKEN}}}")},
+                    "headers": {"Authorization": format!("Bearer {}", endpoint.token)},
                     "exposure": "direct",
                     "description": "See this Mac's screen and click, type and open apps in it, behind the user's approval.",
                 }),
             );
-            command.env(COMPUTER_TOKEN, &endpoint.token);
         }
         None => {
             servers.remove(COMPUTER_SERVER);
-            command.env_remove(COMPUTER_TOKEN);
         }
     }
-    std::fs::write(&path, serde_json::to_string_pretty(&config).unwrap_or_default())
+    write_owner_only(&path, &serde_json::to_string_pretty(&config).unwrap_or_default())
+}
+
+/// Writes `text` to `path`, readable by the user only. Replaced, not rewritten in place: a file
+/// made by an older build would keep its own mode.
+fn write_owner_only(path: &Path, text: &str) -> io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut next = path.as_os_str().to_owned();
+    next.push(".new");
+    let next = PathBuf::from(next);
+    let _ = std::fs::remove_file(&next);
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&next)?;
+    file.write_all(text.as_bytes())?;
+    drop(file);
+    std::fs::rename(&next, path)
+}
+
+/// The [`LATEST_SCREENSHOT`] extension in pi's extensions folder while computer control is on
+/// (`on`), else taken out.
+fn latest_screenshot(layout: &Layout, on: bool) -> io::Result<()> {
+    let dir = layout.agent.join("extensions");
+    let path = dir.join("ailfred-latest-screenshot.js");
+    if on {
+        std::fs::create_dir_all(&dir)?;
+        return std::fs::write(&path, LATEST_SCREENSHOT);
+    }
+    match std::fs::remove_file(&path) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
 }
 
 /// The text after `marker` in a shell's output, up to the next `marker` (an interactive shell
@@ -446,22 +499,28 @@ mod tests {
         let layout = Layout::under(&root.join("data"));
         std::fs::create_dir_all(&layout.agent).unwrap();
         std::fs::write(layout.agent.join("mcp.json"), r#"{"mcpServers":{"mine":{"command":"x"}},"other":1}"#).unwrap();
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+        let mcp = layout.agent.join("mcp.json");
+        std::fs::set_permissions(&mcp, std::fs::Permissions::from_mode(0o644)).unwrap();
         let endpoint = crate::computer::server::Endpoint { url: "http://127.0.0.1:4321/mcp".into(), token: "tok".into() };
-        let mut on = command(Path::new("pi"), &layout, &root, &OsString::new(), []);
+        let inherited = [(OsString::from("AILFRED_COMPUTER_TOKEN"), OsString::from("old"))];
+        let mut on = command(Path::new("pi"), &layout, &root, &OsString::new(), inherited.clone());
         computer_tools(&mut on, &layout, Some(&endpoint)).unwrap();
-        let config = settings(&layout.agent.join("mcp.json"));
+        assert_eq!(mode(&mcp), 0o600, "owner-only: it holds the token");
+        let config = settings(&mcp);
         assert_eq!(config["mcpServers"]["mine"], serde_json::json!({"command": "x"}), "the user's server stays");
         assert_eq!(config["other"], 1);
         let computer = &config["mcpServers"]["computer"];
         assert_eq!(computer["url"], "http://127.0.0.1:4321/mcp");
-        assert_eq!(computer["headers"]["Authorization"], "Bearer ${AILFRED_COMPUTER_TOKEN}", "the token itself isn't written down");
+        assert_eq!(computer["headers"]["Authorization"], "Bearer tok", "the token is in the file, not in pi's environment");
         assert_eq!(computer["exposure"], "direct", "the model sees the tools without searching");
-        let token = env_of(&on).into_iter().find(|(k, _)| k == "AILFRED_COMPUTER_TOKEN").and_then(|(_, v)| v);
-        assert_eq!(token.as_deref(), Some("tok"));
+        assert!(env_of(&on).contains(&("AILFRED_COMPUTER_TOKEN".to_owned(), None)), "no token reaches pi's children: {:?}", env_of(&on));
 
-        let mut off = command(Path::new("pi"), &layout, &root, &OsString::new(), [(OsString::from("AILFRED_COMPUTER_TOKEN"), OsString::from("old"))]);
+        std::fs::set_permissions(&mcp, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let mut off = command(Path::new("pi"), &layout, &root, &OsString::new(), inherited);
         computer_tools(&mut off, &layout, None).unwrap();
-        let config = settings(&layout.agent.join("mcp.json"));
+        assert_eq!(mode(&mcp), 0o600);
+        let config = settings(&mcp);
         assert!(config["mcpServers"].get("computer").is_none(), "{config}");
         assert_eq!(config["mcpServers"]["mine"], serde_json::json!({"command": "x"}));
         assert!(env_of(&off).contains(&("AILFRED_COMPUTER_TOKEN".to_owned(), None)), "no token reaches pi");
@@ -515,6 +574,107 @@ mod tests {
         let endpoint = crate::computer::server::Endpoint { url: "http://127.0.0.1:1/mcp".into(), token: "t".into() };
         computer_tools(&mut off, &layout, Some(&endpoint)).unwrap();
         assert_eq!(settings(&layout.agent.join("mcp.json"))["mcpServers"]["computer"]["url"], "http://127.0.0.1:1/mcp");
+    }
+
+    #[test]
+    fn switching_computer_control_off_takes_the_token_out_of_pis_mcp_json_at_once() {
+        let root = scratch("computer-forget");
+        let data = root.join("data");
+        let layout = Layout::under(&data);
+        std::fs::create_dir_all(&layout.agent).unwrap();
+        std::fs::write(layout.agent.join("mcp.json"), r#"{"mcpServers":{"mine":{"command":"x"}}}"#).unwrap();
+        let endpoint = crate::computer::server::Endpoint { url: "http://127.0.0.1:1/mcp".into(), token: "secret-token".into() };
+        let mut pi = command(Path::new("pi"), &layout, &root, &OsString::new(), []);
+        computer_tools(&mut pi, &layout, Some(&endpoint)).unwrap();
+
+        forget_computer_token(&data).unwrap();
+        let text = std::fs::read_to_string(layout.agent.join("mcp.json")).unwrap();
+        assert!(!text.contains("secret-token"), "{text}");
+        assert_eq!(settings(&layout.agent.join("mcp.json"))["mcpServers"]["mine"], serde_json::json!({"command": "x"}));
+
+        // No pi folder yet: nothing to do.
+        forget_computer_token(&root.join("nowhere")).unwrap();
+        assert!(!root.join("nowhere").exists());
+    }
+
+    #[test]
+    fn the_latest_screenshot_extension_is_in_pis_agent_folder_exactly_while_computer_control_is_on() {
+        let root = scratch("computer-extension");
+        let layout = Layout::under(&root.join("data"));
+        std::fs::create_dir_all(&layout.agent).unwrap();
+        let extension = layout.agent.join("extensions/ailfred-latest-screenshot.js");
+        let endpoint = crate::computer::server::Endpoint { url: "http://127.0.0.1:1/mcp".into(), token: "t".into() };
+        let mut pi = command(Path::new("pi"), &layout, &root, &OsString::new(), []);
+        computer_tools(&mut pi, &layout, Some(&endpoint)).unwrap();
+        assert_eq!(std::fs::read_to_string(&extension).unwrap(), LATEST_SCREENSHOT);
+        computer_tools(&mut pi, &layout, None).unwrap();
+        assert!(!extension.exists(), "off: gone");
+        computer_tools(&mut pi, &layout, None).unwrap();
+
+        // Off with no mcp.json to change takes it away too.
+        computer_tools(&mut pi, &layout, Some(&endpoint)).unwrap();
+        std::fs::remove_file(layout.agent.join("mcp.json")).unwrap();
+        computer_tools(&mut pi, &layout, None).unwrap();
+        assert!(!extension.exists());
+    }
+
+    /// What the extension makes of `cases` (each a list of pi's messages), run in `node` as pi
+    /// runs it: per case, the messages it hands back, or null for none.
+    fn latest_screenshot_with_node(cases: &serde_json::Value) -> serde_json::Value {
+        let dir = scratch("latest-screenshot");
+        std::fs::write(dir.join("latest_screenshot.mjs"), LATEST_SCREENSHOT).unwrap();
+        std::fs::write(dir.join("cases.json"), cases.to_string()).unwrap();
+        let harness = r#"
+import { readFileSync } from "node:fs";
+import extension from "./latest_screenshot.mjs";
+const handlers = {};
+extension({ on(name, handler) { handlers[name] = handler; } });
+if (!handlers.context) throw new Error("no context handler");
+const cases = JSON.parse(readFileSync(new URL("./cases.json", import.meta.url), "utf8"));
+const out = [];
+for (const messages of cases) {
+  const result = await handlers.context({ type: "context", messages }, {});
+  out.push(result === undefined ? null : result);
+}
+process.stdout.write(JSON.stringify(out));
+"#;
+        std::fs::write(dir.join("harness.mjs"), harness).unwrap();
+        let out = Command::new("node")
+            .arg(dir.join("harness.mjs"))
+            .output()
+            .unwrap_or_else(|e| panic!("this test needs node on PATH (pi runs on it): {e}"));
+        assert!(out.status.success(), "node failed: {}", String::from_utf8_lossy(&out.stderr));
+        serde_json::from_slice(&out.stdout).unwrap()
+    }
+
+    #[test]
+    fn only_the_latest_computer_screenshot_reaches_pis_model() {
+        use serde_json::json;
+        let image = json!({"type": "image", "data": "iVBOR", "mimeType": "image/png"});
+        let text = |t: &str| json!({"type": "text", "text": t});
+        let left_out = text("[An earlier screenshot, left out: only the latest is kept.]");
+        let tool = |name: &str, content: serde_json::Value| json!({"role": "toolResult", "toolCallId": name, "toolName": name, "content": content, "isError": false});
+        let computer = |tool_name: &str| format!("mcp__{COMPUTER_SERVER}__{tool_name}");
+        let user = json!({"role": "user", "content": [text("look"), image.clone()]});
+        let bash = tool("bash", json!([text("made a png"), image.clone()]));
+        let messages = json!([
+            user,
+            tool(&computer("screenshot"), json!([image.clone()])),
+            bash,
+            tool(&computer("click"), json!([text("Clicked."), image.clone()])),
+            {"role": "assistant", "content": [text("Now scrolling.")]},
+            tool(&computer("scroll"), json!([image.clone(), text("Scrolled.")])),
+            tool(&computer("wait"), json!([text("Waited.")])),
+        ]);
+        let one = json!([user, bash, tool(&computer("screenshot"), json!([image.clone()]))]);
+        let got = latest_screenshot_with_node(&json!([messages, one, []]));
+
+        let mut kept = messages.clone();
+        kept[1]["content"] = json!([left_out]);
+        kept[3]["content"] = json!([text("Clicked."), left_out]);
+        assert_eq!(got[0], json!({"messages": kept}), "the latest keeps its image, earlier ones a note, the rest as they were");
+        assert_eq!(got[1], serde_json::Value::Null, "one screenshot: nothing changed, nothing handed back");
+        assert_eq!(got[2], serde_json::Value::Null);
     }
 
     #[test]
