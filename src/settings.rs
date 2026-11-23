@@ -264,6 +264,11 @@ impl HotKey {
         HotKey { current: Arc::default(), action: |host, _| host.toggle_quick_input() }
     }
 
+    /// Computer control's panic chord: ends the session (held only while computer control is on).
+    pub fn computer_panic() -> HotKey {
+        HotKey { current: Arc::default(), action: |host, _| host.stop_computer_control(crate::computer::session::Reason::Panic) }
+    }
+
     /// Registers `shortcut` (None: no shortcut) and only then releases the previous one, so a
     /// refused chord leaves the old one working. The chord already held stays as it is (the
     /// system would refuse holding it twice).

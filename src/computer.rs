@@ -33,7 +33,19 @@ use risk::{AxElement, Focus};
 
 pub use macos::{MacDesktop, open_privacy_pane, request_permission};
 
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_panic_chord_is_option_shift_escape() {
+        let chord: rune::Shortcut = super::PANIC_SHORTCUT.parse().expect("a chord Rune reads");
+        assert_eq!(chord.to_string(), "alt+shift+escape");
+    }
+}
+
 use std::sync::{Arc, RwLock};
+
+/// The panic chord: ends computer control's session from anywhere, while it is on.
+pub const PANIC_SHORTCUT: &str = "alt+shift+escape";
 
 /// Computer control as the app runs it: the session it shares with the tools, and where they
 /// are served (for the model it starts).
@@ -56,6 +68,15 @@ pub fn start(notify: impl Fn(&session::StateEvent) + Send + Sync + 'static) -> s
         std::process::id() as i32,
     );
     let endpoint = server::start(Arc::new(helper), token)?;
+    // A session that times out says so when it does, not at the next tool call.
+    let watched = Arc::downgrade(&control);
+    std::thread::Builder::new().name("computer-timeout".into()).spawn(move || {
+        while let Some(control) = watched.upgrade() {
+            control.expire(SystemClock.now_ms());
+            drop(control);
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    })?;
     Ok(Running { control, endpoint })
 }
 
