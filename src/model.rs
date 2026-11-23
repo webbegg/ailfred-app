@@ -12,7 +12,7 @@ use serde_json::json;
 use crate::reply::Event;
 
 mod api;
-mod claude_code;
+pub(crate) mod claude_code;
 mod errors;
 mod process;
 mod stream;

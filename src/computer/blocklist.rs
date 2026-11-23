@@ -1,5 +1,6 @@
 //! Apps no action may target: Ailfred itself, System Settings, the login and authorization
-//! prompts, Keychain Access, and the known password managers.
+//! prompts, Keychain Access, the known password managers, and what runs commands or scripts
+//! outside the guards (Terminal, iTerm, Script Editor, Automator, Installer).
 
 /// The app an action targets: the frontmost app for keyboard actions, the owner of the
 /// window under the point for pointer actions.
@@ -54,6 +55,13 @@ const BLOCKED: &[Entry] = &[
     Entry { label: "Dashlane", bundles: &["com.dashlane"], names: &["Dashlane"] },
     Entry { label: "LastPass", bundles: &["com.lastpass"], names: &["LastPass"] },
     Entry { label: "Passwords", bundles: &["com.apple.Passwords"], names: &["Passwords"] },
+    Entry { label: "coreautha", bundles: &["com.apple.coreautha"], names: &["coreautha"] },
+    // Typing a command line there would run it with no confirmation.
+    Entry { label: "Terminal", bundles: &["com.apple.Terminal"], names: &["Terminal"] },
+    Entry { label: "iTerm", bundles: &["com.googlecode.iterm2"], names: &["iTerm", "iTerm2"] },
+    Entry { label: "Script Editor", bundles: &["com.apple.ScriptEditor2"], names: &["Script Editor"] },
+    Entry { label: "Automator", bundles: &["com.apple.Automator"], names: &["Automator"] },
+    Entry { label: "Installer", bundles: &["com.apple.installer"], names: &["Installer"] },
 ];
 
 fn bundle_matches(bundle: &str, blocked: &str) -> bool {
@@ -113,6 +121,12 @@ mod tests {
             ("com.apple.UserNotificationCenter", "UserNotificationCenter"),
             ("com.apple.LocalAuthentication.UIAgent", "LocalAuthentication"),
             ("com.apple.CoreServicesUIAgent", "CoreServicesUIAgent"),
+            ("com.apple.Terminal", "Terminal"),
+            ("com.googlecode.iterm2", "iTerm"),
+            ("com.apple.ScriptEditor2", "Script Editor"),
+            ("com.apple.Automator", "Automator"),
+            ("com.apple.installer", "Installer"),
+            ("com.apple.coreautha", "coreautha"),
         ];
         for (bundle, label) in cases {
             assert_eq!(blocked_reason(&app(Some(bundle), "x"), OWN_PID), Some(label), "{bundle}");
@@ -163,6 +177,10 @@ mod tests {
         assert_eq!(blocked_name("com.bitwarden.desktop"), Some("Bitwarden"));
         assert_eq!(blocked_name(" 1password "), Some("1Password"));
         assert_eq!(blocked_name("ailfred"), Some("Ailfred"));
+        // What runs commands or scripts outside the guards.
+        assert_eq!(blocked_name("Terminal"), Some("Terminal"));
+        assert_eq!(blocked_name("/Applications/iTerm.app"), Some("iTerm"));
+        assert_eq!(blocked_name("Script Editor"), Some("Script Editor"));
         assert_eq!(blocked_name("Safari"), None);
         assert_eq!(blocked_name("com.apple.Safari"), None);
     }

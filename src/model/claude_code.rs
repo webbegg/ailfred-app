@@ -1,6 +1,7 @@
 //! The installed Claude Code as the model: `claude -p` with its stream-json in and out, run lean
 //! (no settings, hooks, plugins, MCP servers or tools: a "say hi" costs hundredths of a cent
 //! instead of a quarter) from a private folder so its sessions stay out of the user's projects.
+//! The one exception: computer control's tools, while Settings' switch is on.
 
 use std::ffi::OsStr;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
@@ -65,6 +66,41 @@ fn lean(system: &str, model: &str) -> Vec<String> {
     .to_vec()
 }
 
+/// Computer control's tools for one run, while Settings' switch is on: the `computer` MCP server
+/// (`--mcp-config`, still strict: no other server), its tools allowed without Claude Code's own
+/// prompt (there's none to show in `-p`; Ailfred asks the user itself). `config`: None, no tools.
+pub fn with_computer(mut args: Vec<String>, config: Option<&Path>) -> Vec<String> {
+    if let Some(config) = config {
+        let server = format!("mcp__{}", crate::pi_setup::COMPUTER_SERVER);
+        args.extend(["--mcp-config".into(), config.display().to_string(), "--allowedTools".into(), server]);
+    }
+    args
+}
+
+/// Writes the `computer` server's config into `dir` (owner-only: it holds the token) while
+/// `endpoint` serves the tools, and removes it otherwise. Where it is, while it's on.
+pub fn write_computer_config(dir: &Path, endpoint: Option<&crate::computer::server::Endpoint>) -> std::io::Result<Option<PathBuf>> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = dir.join("computer-mcp.json");
+    let Some(endpoint) = endpoint else {
+        return match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(None),
+        };
+    };
+    let config = json!({"mcpServers": {crate::pi_setup::COMPUTER_SERVER: {
+        "type": "http",
+        "url": endpoint.url,
+        "headers": {"Authorization": format!("Bearer {}", endpoint.token)},
+    }}});
+    // Replaced, not rewritten in place: a file made by an older run keeps its own mode.
+    let _ = std::fs::remove_file(&path);
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path)?;
+    file.write_all(config.to_string().as_bytes())?;
+    Ok(Some(path))
+}
+
 /// The title call's arguments: lean, the cheap model, no session kept and none resumed.
 pub fn title_args(model: &str) -> Vec<String> {
     let mut args = lean(title::SYSTEM_PROMPT, model);
@@ -119,7 +155,14 @@ pub fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
 
 /// Answers `request` with Claude Code at `claude`, run from `dir`, streaming into `sink`.
 pub fn run(run: &Run, claude: &Path, dir: &Path, request: &Request, sink: &mut dyn FnMut(Item)) {
-    run_with(run, claude, dir, args(&request.model, request.session.as_deref()), request, sink);
+    let mut args = args(&request.model, request.session.as_deref());
+    if ensure_private_dir(dir).is_ok() {
+        match write_computer_config(dir, crate::computer::endpoint_now().as_ref()) {
+            Ok(config) => args = with_computer(args, config.as_deref()),
+            Err(e) => eprintln!("Ailfred: Claude Code's computer tools couldn't be set up: {e}"),
+        }
+    }
+    run_with(run, claude, dir, args, request, sink);
 }
 
 /// Asks for a title (`title_args`), streaming into `sink`.

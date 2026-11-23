@@ -38,12 +38,16 @@ impl Control {
         f(&mut self.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
     }
 
-    fn report(&self, event: Option<StateEvent>) {
-        if let Some(event) = event {
+    /// Applies a transition and reports it while still holding the session, so two threads'
+    /// reports arrive in the order their changes happened. `notify` must not call back in.
+    fn change(&self, f: impl FnOnce(&mut Session) -> Option<StateEvent>) {
+        let mut session = self.session.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(event) = f(&mut session) {
             (self.notify)(&event);
         }
     }
 
+    #[cfg(test)]
     pub fn status(&self, now_ms: u64) -> StateEvent {
         self.with(|s| s.status(now_ms))
     }
@@ -57,18 +61,15 @@ impl Control {
     }
 
     pub fn grant(&self, now_ms: u64) {
-        let event = self.with(|s| s.grant(now_ms));
-        self.report(Some(event));
+        self.change(|s| Some(s.grant(now_ms)));
     }
 
     pub fn end(&self, reason: Reason) {
-        let event = self.with(|s| s.end(reason));
-        self.report(event);
+        self.change(|s| s.end(reason));
     }
 
     pub fn expire(&self, now_ms: u64) {
-        let event = self.with(|s| s.expire(now_ms));
-        self.report(event);
+        self.change(|s| s.expire(now_ms));
     }
 }
 
@@ -127,10 +128,10 @@ mod tests {
         assert_eq!(control.epoch(), epoch + 1);
         let ended = StateEvent { active: false, ends_at: None, reason: Some(Reason::Panic) };
         assert_eq!(states.lock().unwrap().last(), Some(&ended));
-        // Without a session there is nothing to end, and nothing is reported.
+        // Without a session there is nothing to end, and nothing is reported; what waits drops.
         control.end(Reason::Panic);
         assert_eq!(states.lock().unwrap().len(), 2);
-        assert_eq!(control.epoch(), epoch + 1);
+        assert_eq!(control.epoch(), epoch + 2);
     }
 
     #[test]

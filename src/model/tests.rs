@@ -231,6 +231,26 @@ fn claude_runs_lean_with_the_model_and_resumes_only_a_conversation_that_has_a_se
 }
 
 #[test]
+fn claude_gets_the_computer_tools_only_while_computer_control_is_on() {
+    use std::os::unix::fs::PermissionsExt;
+    let after = |args: &[String], flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned();
+    let dir = scratch("computer-config");
+    let endpoint = crate::computer::server::Endpoint { url: "http://127.0.0.1:4321/mcp".into(), token: "tok".into() };
+    let config = claude_code::write_computer_config(&dir, Some(&endpoint)).unwrap().expect("a config while it's on");
+    let written: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&config).unwrap()).unwrap();
+    assert_eq!(written, json!({"mcpServers": {"computer": {"type": "http", "url": "http://127.0.0.1:4321/mcp", "headers": {"Authorization": "Bearer tok"}}}}));
+    assert_eq!(std::fs::metadata(&config).unwrap().permissions().mode() & 0o777, 0o600, "the token is the user's alone");
+    let args = claude_code::with_computer(claude_code::args(DEFAULT_MODEL, None), Some(&config));
+    assert_eq!(after(&args, "--mcp-config"), Some(config.display().to_string()));
+    assert_eq!(after(&args, "--allowedTools"), some("mcp__computer"), "its tools run without a prompt Ailfred can't show; Ailfred asks itself");
+    assert!(args.iter().any(|a| a == "--strict-mcp-config"), "no other server");
+    // Off: no config left behind, and no tools.
+    assert_eq!(claude_code::write_computer_config(&dir, None).unwrap(), None);
+    assert!(!config.exists());
+    assert_eq!(claude_code::with_computer(claude_code::args(DEFAULT_MODEL, None), None), claude_code::args(DEFAULT_MODEL, None));
+}
+
+#[test]
 fn a_model_not_found_names_it_once() {
     let said = errors::cli_error(Some(404), "There's an issue with the selected model (claude-x). It may not exist or you may not have access to it.");
     assert_eq!(said, "The model claude-x isn't available. Pick another in Settings.");

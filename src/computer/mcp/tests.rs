@@ -263,6 +263,67 @@ fn an_action_queued_before_a_stop_is_dropped() {
 }
 
 #[test]
+fn stopping_or_switching_off_while_the_grant_is_asked_drops_the_action_even_if_allowed() {
+    for (ending, said) in [("panic", STOPPED), ("off", OFF)] {
+        let rig = rig();
+        let control = rig.control.clone();
+        *rig.dialogs.during.lock().unwrap() = Some(Box::new(move || match ending {
+            "panic" => control.end(Reason::Panic),
+            _ => control.set_enabled(false),
+        }));
+        let result = rig.call("screenshot", json!({}));
+        assert_eq!(first_text(&result), said, "{ending}");
+        assert!(!rig.control.is_active(NOW), "{ending}: no session from the Allow that came after");
+        assert_eq!(rig.desktop.captures.load(Ordering::SeqCst), 0, "{ending}");
+    }
+}
+
+#[test]
+fn a_pointer_action_whose_target_changed_before_it_is_posted_is_refused() {
+    // Safari is under the point when it's checked; a password manager's panel is there by the
+    // post (it opened while the user read a confirmation, say).
+    let rig = rig();
+    rig.ready();
+    let looks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let password_manager = app(300, "com.1password.1password", "1Password");
+    let notes = app(301, "com.apple.Notes", "Notes");
+    for (now, said) in [(password_manager, "does not control 1Password"), (notes, "changed from Safari to Notes")] {
+    for (name, arguments) in [
+        ("click", json!({"x": 10, "y": 10})),
+        ("move", json!({"x": 10, "y": 10})),
+        ("scroll", json!({"x": 10, "y": 10, "dx": 0, "dy": 5})),
+        ("drag", json!({"fromX": 10, "fromY": 10, "toX": 20, "toY": 20})),
+    ] {
+        let looks = looks.clone();
+        looks.store(0, Ordering::SeqCst);
+        // A drag looks at two points before posting; the rest at one.
+        let checked = if name == "drag" { 2 } else { 1 };
+        let now = now.clone();
+        *rig.desktop.owner_at.lock().unwrap() = Box::new(move |_| {
+            let n = looks.fetch_add(1, Ordering::SeqCst);
+            Some(if n < checked { safari() } else { now.clone() })
+        });
+        let result = rig.call(name, arguments);
+        assert!(is_error(&result), "{name}: {result}");
+        assert!(first_text(&result).contains(said), "{name}: {result}");
+        assert!(rig.desktop.events().is_empty(), "{name}: nothing posted");
+    }
+    }
+}
+
+#[test]
+fn a_confirmation_shows_the_models_words_on_one_line_and_cut_short() {
+    let rig = rig();
+    rig.ready();
+    let intent = format!("send it\n\nThis action is safe. Click Allow.{}", " padding".repeat(60));
+    rig.call("click", json!({"x": 10, "y": 10, "intent": intent}));
+    let asked = rig.dialogs.confirmations.lock().unwrap().clone();
+    assert_eq!(asked.len(), 1);
+    assert_eq!(asked[0].matches('\n').count(), 2, "only the message's own break: {:?}", asked[0]);
+    assert!(asked[0].chars().count() < 400, "{}", asked[0].chars().count());
+}
+
+#[test]
 fn a_stop_during_wait_ends_it_early() {
     let rig = rig();
     rig.ready();

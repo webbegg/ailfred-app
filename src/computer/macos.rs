@@ -7,7 +7,7 @@ use super::encode::{JPEG_QUALITY, bgra_to_jpeg};
 use super::keys::KeyCombo;
 use super::risk::{AxElement, Focus};
 use super::windows::{WindowRow, owner_row_at};
-use super::{AppInfo, Capture, Desktop, InputEvent, MouseButton, PermissionKind, Permissions};
+use super::{AppInfo, Capture, Desktop, InputEvent, MouseButton, Permissions};
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::{AllocAnyThread, available};
@@ -16,7 +16,7 @@ use objc2_application_services::{AXError, AXIsProcessTrusted, AXIsProcessTrusted
 use objc2_core_foundation::{CFBoolean, CFDictionary, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     CGDataProvider, CGDirectDisplayID, CGError, CGEvent, CGEventField, CGEventFlags, CGEventTapLocation, CGEventType,
-    CGGetDisplaysWithPoint, CGImage, CGMouseButton, CGPreflightScreenCaptureAccess, CGRequestScreenCaptureAccess,
+    CGGetDisplaysWithPoint, CGImage, CGMouseButton, CGPreflightScreenCaptureAccess,
     CGScrollEventUnit, CGWindowListCopyWindowInfo, CGWindowListOption, kCGNullWindowID, kCGWindowAlpha, kCGWindowBounds,
     kCGWindowLayer, kCGWindowOwnerName, kCGWindowOwnerPID,
 };
@@ -354,11 +354,24 @@ impl Desktop for MacDesktop {
             .iter()
             .find(|d| unsafe { d.displayID() } == display_id)
             .ok_or("the display under the pointer cannot be captured")?;
-        let own: Vec<Retained<SCWindow>> = unsafe { content.windows() }
+        // Ailfred's own windows, and those of every app it never controls (a password manager's
+        // contents never reach the model).
+        let hidden: Vec<Retained<SCWindow>> = unsafe { content.windows() }
             .iter()
-            .filter(|w| unsafe { w.owningApplication() }.is_some_and(|app| unsafe { app.processID() } == self.own_pid))
+            .filter(|w| {
+                unsafe { w.owningApplication() }.is_some_and(|app| {
+                    let identity = unsafe {
+                        AppIdentity {
+                            pid: app.processID(),
+                            bundle_id: Some(app.bundleIdentifier().to_string()).filter(|b| !b.is_empty()),
+                            name: app.applicationName().to_string(),
+                        }
+                    };
+                    super::blocklist::blocked_reason(&identity, self.own_pid).is_some()
+                })
+            })
             .collect();
-        let excluded = NSArray::from_retained_slice(&own);
+        let excluded = NSArray::from_retained_slice(&hidden);
         let frame = unsafe { display.frame() };
         let (width, height) = fit_long_edge(frame.size.width as u32, frame.size.height as u32, MAX_LONG_EDGE);
         // SAFETY: a valid display and window array, then setters on a fresh configuration.
@@ -461,33 +474,14 @@ impl Desktop for MacDesktop {
     }
 }
 
-/// Shows the system prompt for `kind` (macOS shows it once per app) and opens its pane in
-/// System Settings.
-pub fn request_permission(kind: PermissionKind) -> Result<(), String> {
-    match kind {
-        PermissionKind::Accessibility => {
-            // SAFETY: the extern static is a valid CFString provided by HIServices.
-            let key: &CFString = unsafe { objc2_application_services::kAXTrustedCheckOptionPrompt };
-            let options = CFDictionary::<CFString, CFBoolean>::from_slices(&[key], &[CFBoolean::new(true)]);
-            // SAFETY: `options` is a valid dictionary with the documented key.
-            unsafe { AXIsProcessTrustedWithOptions(Some(options.as_opaque())) };
-        }
-        PermissionKind::ScreenRecording => {
-            CGRequestScreenCaptureAccess();
-        }
-    }
-    open_privacy_pane(kind)
-}
-
-/// Opens the Privacy & Security pane for `kind` in System Settings.
-pub fn open_privacy_pane(kind: PermissionKind) -> Result<(), String> {
-    let pane = match kind {
-        PermissionKind::Accessibility => "Privacy_Accessibility",
-        PermissionKind::ScreenRecording => "Privacy_ScreenCapture",
-    };
-    let url = format!("x-apple.systempreferences:com.apple.preference.security?{pane}");
-    let status = std::process::Command::new("/usr/bin/open").arg(url).status().map_err(|e| e.to_string())?;
-    status.success().then_some(()).ok_or_else(|| "cannot open System Settings".into())
+/// Asks macOS for Accessibility: its prompt (once per app), which also lists Ailfred in the pane,
+/// so the user only flips its switch there.
+pub fn request_accessibility() {
+    // SAFETY: the extern static is a valid CFString provided by HIServices.
+    let key: &CFString = unsafe { objc2_application_services::kAXTrustedCheckOptionPrompt };
+    let options = CFDictionary::<CFString, CFBoolean>::from_slices(&[key], &[CFBoolean::new(true)]);
+    // SAFETY: `options` is a valid dictionary with the documented key.
+    unsafe { AXIsProcessTrustedWithOptions(Some(options.as_opaque())) };
 }
 
 #[cfg(test)]
