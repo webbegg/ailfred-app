@@ -1,0 +1,5 @@
+{"type":"RUN_STARTED","threadId":"thread-1","runId":"run-error","protocolVersion":"1.0","timestamp":1767225600000}
+{"type":"TEXT_MESSAGE_START","messageId":"run-error-text-1","role":"assistant","timestamp":1767225600000}
+{"type":"TEXT_MESSAGE_CONTENT","messageId":"run-error-text-1","delta":"Let me","timestamp":1767225600000}
+{"type":"TEXT_MESSAGE_END","messageId":"run-error-text-1","timestamp":1767225600100}
+{"type":"RUN_ERROR","message":"overloaded","timestamp":1767225600100}

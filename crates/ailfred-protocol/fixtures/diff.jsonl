@@ -1,0 +1,6 @@
+{"type":"RUN_STARTED","threadId":"thread-1","runId":"run-diff","protocolVersion":"1.0","timestamp":1767225600000}
+{"type":"TEXT_MESSAGE_START","messageId":"run-diff-text-1","role":"assistant","timestamp":1767225600000}
+{"type":"TEXT_MESSAGE_CONTENT","messageId":"run-diff-text-1","delta":"Here's the fix:","timestamp":1767225600000}
+{"type":"TEXT_MESSAGE_END","messageId":"run-diff-text-1","timestamp":1767225600100}
+{"type":"ACTIVITY_SNAPSHOT","messageId":"run-diff-diff-1","activityType":"ailfred:diff","content":{"patch":"--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-let x = 1;\n+let x = 2;\n","path":"src/lib.rs"},"timestamp":1767225600100}
+{"type":"RUN_FINISHED","threadId":"thread-1","runId":"run-diff","outcome":{"type":"success"},"timestamp":1767225600200}

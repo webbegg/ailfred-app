@@ -1,0 +1,5 @@
+{"type":"RUN_STARTED","threadId":"thread-1","runId":"run-lost","protocolVersion":"1.0","timestamp":1767225600000}
+{"type":"TEXT_MESSAGE_START","messageId":"run-lost-text-1","role":"assistant","timestamp":1767225600000}
+{"type":"TEXT_MESSAGE_CONTENT","messageId":"run-lost-text-1","delta":"Half an ans","timestamp":1767225600000}
+{"type":"TEXT_MESSAGE_END","messageId":"run-lost-text-1","timestamp":1767225600100}
+{"type":"RUN_ERROR","message":"pi exited (code 1)","code":"ailfred:lost","timestamp":1767225600100}

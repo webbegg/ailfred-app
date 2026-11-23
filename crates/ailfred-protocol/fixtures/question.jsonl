@@ -1,0 +1,6 @@
+{"type":"RUN_STARTED","threadId":"thread-1","runId":"run-question","protocolVersion":"1.0","timestamp":1767225600000}
+{"type":"TEXT_MESSAGE_START","messageId":"run-question-text-1","role":"assistant","timestamp":1767225600000}
+{"type":"TEXT_MESSAGE_CONTENT","messageId":"run-question-text-1","delta":"I can change a few files.","timestamp":1767225600000}
+{"type":"TEXT_MESSAGE_END","messageId":"run-question-text-1","timestamp":1767225600100}
+{"type":"CUSTOM","name":"ailfred:ask","value":{"interruptId":"run-question-ask-1","message":"Which ones?","multi":true,"options":["src/a.rs","src/b.rs","src/c.rs"]},"timestamp":1767225600100}
+{"type":"RUN_FINISHED","threadId":"thread-1","runId":"run-question","outcome":{"type":"interrupt","interrupts":[{"id":"run-question-ask-1","reason":"input_required","message":"Which ones?","responseSchema":{"properties":{"answer":{"type":"string"}},"required":["answer"],"type":"object"},"metadata":{"ailfred":{"multi":true,"options":["src/a.rs","src/b.rs","src/c.rs"]}}}]},"timestamp":1767225600100}

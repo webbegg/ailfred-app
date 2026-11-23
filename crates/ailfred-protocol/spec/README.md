@@ -1,0 +1,1 @@
+`ag-ui-1.0.schema.json` is an unchanged copy of the official AG-UI 1.0 JSON Schema from https://github.com/ag-ui-protocol/ag-ui at commit c31e1e819e3a3c3b4af14add04f5b9a9a0208cae; the file states no license of its own, the repository's packages are MIT-licensed. The conformance test checks the fixtures against it.

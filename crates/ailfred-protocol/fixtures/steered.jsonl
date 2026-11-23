@@ -1,0 +1,6 @@
+{"type":"RUN_STARTED","threadId":"thread-1","runId":"run-steered","protocolVersion":"1.0","timestamp":1767225600000}
+{"type":"TEXT_MESSAGE_START","messageId":"run-steered-text-1","role":"assistant","timestamp":1767225600050}
+{"type":"TEXT_MESSAGE_CONTENT","messageId":"run-steered-text-1","delta":"Got it, ","timestamp":1767225600050}
+{"type":"TEXT_MESSAGE_CONTENT","messageId":"run-steered-text-1","delta":"switching.","timestamp":1767225600080}
+{"type":"TEXT_MESSAGE_END","messageId":"run-steered-text-1","timestamp":1767225600200}
+{"type":"RUN_FINISHED","threadId":"thread-1","runId":"run-steered","outcome":{"type":"success"},"timestamp":1767225600200}

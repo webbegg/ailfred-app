@@ -1,0 +1,23 @@
+{"type":"RUN_STARTED","threadId":"thread-1","runId":"run-steps","protocolVersion":"1.0","timestamp":1767225600000}
+{"type":"TEXT_MESSAGE_START","messageId":"run-steps-text-1","role":"assistant","timestamp":1767225600000}
+{"type":"TEXT_MESSAGE_CONTENT","messageId":"run-steps-text-1","delta":"Let me look.\n","timestamp":1767225600000}
+{"type":"TEXT_MESSAGE_END","messageId":"run-steps-text-1","timestamp":1767225600100}
+{"type":"TOOL_CALL_START","toolCallId":"run-steps-step-1","toolCallName":"read","timestamp":1767225600100}
+{"type":"TOOL_CALL_ARGS","toolCallId":"run-steps-step-1","delta":"{\"target\":\"src/main.rs\"}","timestamp":1767225600100}
+{"type":"TOOL_CALL_END","toolCallId":"run-steps-step-1","timestamp":1767225600100}
+{"type":"CUSTOM","name":"ailfred:step_output","value":{"delta":"fn main() {\n","toolCallId":"run-steps-step-1"},"timestamp":1767225600150}
+{"type":"CUSTOM","name":"ailfred:step_output","value":{"delta":"}\n","toolCallId":"run-steps-step-1"},"timestamp":1767225600180}
+{"type":"TOOL_CALL_RESULT","messageId":"run-steps-step-1-result","toolCallId":"run-steps-step-1","content":"fn main() {\n}\n","role":"tool","timestamp":1767225600200,"metadata":{"ailfred":{"ok":true}}}
+{"type":"TOOL_CALL_START","toolCallId":"run-steps-step-2","toolCallName":"run","timestamp":1767225600300}
+{"type":"TOOL_CALL_ARGS","toolCallId":"run-steps-step-2","delta":"{\"target\":\"cargo test\"}","timestamp":1767225600300}
+{"type":"TOOL_CALL_END","toolCallId":"run-steps-step-2","timestamp":1767225600300}
+{"type":"CUSTOM","name":"ailfred:step_output","value":{"delta":"error[E0425]: cannot find value `x`\n","toolCallId":"run-steps-step-2"},"timestamp":1767225600350}
+{"type":"TOOL_CALL_RESULT","messageId":"run-steps-step-2-result","toolCallId":"run-steps-step-2","content":"error[E0425]: cannot find value `x`\n","role":"tool","timestamp":1767225600400,"metadata":{"ailfred":{"ok":false}}}
+{"type":"TEXT_MESSAGE_START","messageId":"run-steps-text-2","role":"assistant","timestamp":1767225600500}
+{"type":"TEXT_MESSAGE_CONTENT","messageId":"run-steps-text-2","delta":"The test fails; searching for it.","timestamp":1767225600500}
+{"type":"TEXT_MESSAGE_END","messageId":"run-steps-text-2","timestamp":1767225600600}
+{"type":"TOOL_CALL_START","toolCallId":"run-steps-step-3","toolCallName":"search","timestamp":1767225600600}
+{"type":"TOOL_CALL_ARGS","toolCallId":"run-steps-step-3","delta":"{\"target\":\"fn main\"}","timestamp":1767225600600}
+{"type":"TOOL_CALL_END","toolCallId":"run-steps-step-3","timestamp":1767225600600}
+{"type":"TOOL_CALL_RESULT","messageId":"run-steps-step-3-result","toolCallId":"run-steps-step-3","content":"","role":"tool","timestamp":1767225600700,"metadata":{"ailfred":{"ok":true}}}
+{"type":"RUN_FINISHED","threadId":"thread-1","runId":"run-steps","outcome":{"type":"success"},"timestamp":1767225600700}

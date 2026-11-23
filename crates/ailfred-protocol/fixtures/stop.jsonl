@@ -1,0 +1,10 @@
+{"type":"RUN_STARTED","threadId":"thread-1","runId":"run-stop","protocolVersion":"1.0","timestamp":1767225600000}
+{"type":"TEXT_MESSAGE_START","messageId":"run-stop-text-1","role":"assistant","timestamp":1767225600000}
+{"type":"TEXT_MESSAGE_CONTENT","messageId":"run-stop-text-1","delta":"Building it.","timestamp":1767225600000}
+{"type":"TEXT_MESSAGE_END","messageId":"run-stop-text-1","timestamp":1767225600100}
+{"type":"TOOL_CALL_START","toolCallId":"run-stop-step-1","toolCallName":"run","timestamp":1767225600100}
+{"type":"TOOL_CALL_ARGS","toolCallId":"run-stop-step-1","delta":"{\"target\":\"cargo build\"}","timestamp":1767225600100}
+{"type":"TOOL_CALL_END","toolCallId":"run-stop-step-1","timestamp":1767225600100}
+{"type":"CUSTOM","name":"ailfred:step_output","value":{"delta":"Compiling ailfred\n","toolCallId":"run-stop-step-1"},"timestamp":1767225600200}
+{"type":"TOOL_CALL_RESULT","messageId":"run-stop-step-1-result","toolCallId":"run-stop-step-1","content":"Compiling ailfred\n","role":"tool","timestamp":1767225600300,"metadata":{"ailfred":{"ok":false}}}
+{"type":"RUN_FINISHED","threadId":"thread-1","runId":"run-stop","outcome":{"type":"cancelled"},"timestamp":1767225600300}
