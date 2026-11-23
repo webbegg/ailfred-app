@@ -795,6 +795,26 @@ fn more_than_ten_calls_per_second_are_refused() {
     assert!(!is_error(&rig.call("list_apps", json!({}))));
 }
 
+#[test]
+fn calls_refused_before_they_act_do_not_use_up_the_rate_limit() {
+    // The user declines the session twelve times in the same second, then allows it: nothing
+    // ran yet, so the next call isn't "too many actions".
+    let rig = rig_with(false, true);
+    for _ in 0..12 {
+        let result = rig.call("list_apps", json!({}));
+        assert!(is_error(&result) && !first_text(&result).contains("Too many"), "{result}");
+    }
+    // Nor do calls refused for a missing permission.
+    rig.desktop.permissions.lock().unwrap().screen_recording = false;
+    for _ in 0..12 {
+        assert!(first_text(&rig.call("screenshot", json!({}))).contains("Screen Recording"));
+    }
+    rig.desktop.permissions.lock().unwrap().screen_recording = true;
+    *rig.dialogs.allow.lock().unwrap() = true;
+    let result = rig.call("list_apps", json!({}));
+    assert!(!is_error(&result), "{result}");
+}
+
 // --- Risky actions ---
 
 fn send_button() -> Vec<AxElement> {

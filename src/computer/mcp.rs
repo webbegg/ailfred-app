@@ -1,8 +1,10 @@
 //! The MCP endpoint: JSON-RPC 2.0 with `initialize`, `tools/list`, and `tools/call`, behind a
 //! per-launch bearer token. It knows nothing of the transport: the HTTP server hands it each
 //! request (`HttpRequest`) and sends back its reply (`HttpReply`). Each call passes the guards in
-//! order: rate limit, permissions, session grant, blocklist, risky-action confirmation; then it
-//! acts and returns a fresh screenshot.
+//! order: permissions, session grant, rate limit, blocklist, risky-action confirmation; then it
+//! acts and returns a fresh screenshot. The rate limit counts a call when its turn to act comes
+//! (calls run one at a time), so calls refused before it, or queued behind a slow one, don't
+//! use up the window while nothing runs.
 //!
 //! `batch` runs up to 20 actions in one call. Each step takes the single tool's path (`perform`)
 //! and counts as one action for the rate limit; a full window delays the step instead of refusing
@@ -440,11 +442,6 @@ impl Helper {
         if !self.control.enabled() {
             return Err(OFF.into());
         }
-        // A batch counts each of its steps instead (`pace`).
-        let counted = !matches!(call.tool, Tool::Batch { .. });
-        if counted && !lock(&self.limiter).try_acquire(self.clock.now_ms()) {
-            return Err(format!("Too many actions: at most {MAX_ACTIONS_PER_SECOND} per second. Wait a moment.").into());
-        }
         self.check_permissions(&call.tool)?;
         let mut latest = lock(&self.actions);
         // Turned off while this call waited for the one before it.
@@ -470,6 +467,11 @@ impl Helper {
                 return Err(STOPPED.into());
             }
             self.control.grant(self.clock.now_ms());
+        }
+        // A batch counts each of its steps instead (`pace`).
+        let counted = !matches!(call.tool, Tool::Batch { .. });
+        if counted && !lock(&self.limiter).try_acquire(self.clock.now_ms()) {
+            return Err(format!("Too many actions: at most {MAX_ACTIONS_PER_SECOND} per second. Wait a moment.").into());
         }
         self.act(epoch, &mut latest, call)
     }
