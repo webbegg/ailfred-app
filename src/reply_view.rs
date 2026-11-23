@@ -378,7 +378,7 @@ fn diff<S: 'static>(token: u64, j: usize, d: &Diff, t: &tok::Theme, lens: Lens<S
 fn question<S: 'static>(token: u64, j: usize, q: &Question, other: Option<&TextEdit>, t: &tok::Theme, lens: Lens<S>) -> El {
     let blank = TextEdit::new("");
     let other = other.unwrap_or(&blank);
-    let open = q.answered.is_none();
+    let open = q.open();
     let mut card = col()
         .w_full()
         .gap(8.0)
@@ -430,6 +430,10 @@ fn question<S: 'static>(token: u64, j: usize, q: &Question, other: Option<&TextE
     card = card.child(options);
     if let Some(answer) = &q.answered {
         return card.child(text(format!("Answered: {answer}")).key("answered").font(SMALL).color(t.text_secondary).wrap());
+    }
+    if !open {
+        // Closed: what asked it is gone.
+        return card.child(text("Not answered").key("unanswered").font(SMALL).color(t.text_secondary));
     }
     let ready = !q.picked.is_empty() || !other.text.trim().is_empty();
     let answer = move |s: &mut S, tx: &mut Tx| {
@@ -775,6 +779,27 @@ mod tests {
         assert_eq!(k.iter().filter(|k| *k == "interrupted").count(), 2, "both say they were interrupted: {k:?}");
         assert!(!k.iter().any(|k| k == "stopped"), "not 'Stopped': the user didn't stop them");
         assert!(rt.elements().iter().any(|e| e.label.as_deref() == Some(INTERRUPTED_ASK)), "the question");
+    }
+
+    #[test]
+    fn a_reopened_question_nobody_answered_says_not_answered_and_offers_no_answer() {
+        use crate::history::{self, Loaded, LoadedMessage};
+        let mut asked = Reply::new(1, "which?");
+        asked.apply(Event::Ask { prompt: "Which one?".into(), options: vec!["A".into(), "B".into()], multi: true }, Instant::now());
+        asked.apply(Event::Done, Instant::now());
+        let reply = Some(history::saved_reply(&asked, "20240101-000000-0003", "20240101-000000-0003-0"));
+        let mut chat = Chat::new(None);
+        chat.place(Insets::default(), [1440.0, 900.0]);
+        chat.open();
+        chat.load(Loaded { id: "20240101-000000-0003".into(), created: 1, title: None, title_by_user: false, session: None, messages: vec![LoadedMessage { text: "which?".into(), files: Vec::new(), pngs: Vec::new(), reply }], next_png: 0 });
+        let mut rt = Runtime::new(W { chat }, window, (1440.0, 900.0), Env::new(true, 2.0));
+        settle(&mut rt, 10);
+        let k = keys(&rt);
+        assert!(k.iter().any(|k| k == "prompt") && k.iter().any(|k| k == "o1"), "the question and its options show: {k:?}");
+        assert!(rt.elements().iter().any(|e| e.key.as_deref() == Some("unanswered")), "it says it wasn't answered: {k:?}");
+        for key in ["other", "answer", "hint", "answered"] {
+            assert!(!k.iter().any(|k| k == key), "no {key}: {k:?}");
+        }
     }
 
     #[test]

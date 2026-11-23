@@ -59,7 +59,8 @@ pub fn write_snapshot(dir: &Path, snapshot: &Snapshot) -> std::io::Result<()> {
         }
     }
     let saved = Saved { version: VERSION, ..snapshot.saved.clone() };
-    write_atomic(&json_path(dir, id), &serde_json::to_vec_pretty(&saved)?)
+    // Compact: a reply's events make it big. Reading takes any layout.
+    write_atomic(&json_path(dir, id), &serde_json::to_vec(&saved)?)
 }
 
 /// What a file says, if it parses and isn't from a newer version; otherwise logged.
@@ -187,6 +188,6 @@ pub fn patch_title(dir: &Path, id: &str, title: &str) -> std::io::Result<Option<
     }
     saved.title = Some(title.to_owned());
     saved.version = VERSION;
-    write_atomic(&path, &serde_json::to_vec_pretty(&saved)?)?;
+    write_atomic(&path, &serde_json::to_vec(&saved)?)?;
     Ok(entry_of(id, &saved))
 }

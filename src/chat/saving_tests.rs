@@ -383,6 +383,49 @@ fn a_conversation_goes_through_the_disk_and_comes_back_whole() {
     assert_eq!(again.saved.messages[2].pngs, [format!("{}/1.png", fresh.conv.id)]);
 }
 
+#[test]
+fn a_reopened_conversation_keeps_its_steps_diffs_and_questions_and_one_nobody_answered_is_closed() {
+    let dir = scratch("questions");
+    let mut c = Chat::new(None);
+    c.push(msg(1, "fix it"));
+    let first = c.ask(1).unwrap();
+    c.reply_event(first, Event::Step { id: 1, tool: reply::Tool::Read, target: "src/lib.rs".into() }, now());
+    c.reply_event(first, Event::StepEnd { id: 1, ok: true }, now());
+    c.reply_event(first, Event::Diff { path: "src/lib.rs".into(), patch: "-a\n+b\n".into() }, now());
+    c.reply_event(first, Event::Ask { prompt: "Apply it?".into(), options: vec!["Yes".into(), "No".into()], multi: false }, now());
+    c.reply_event(first, Event::Done, now());
+    c.pick(first, 2, 0);
+    let second = c.answer(first, 2).expect("answered");
+    c.reply_event(second, Event::Text("Applied.".into()), now());
+    c.reply_event(second, Event::Ask { prompt: "Anything else?".into(), options: vec!["Tests".into(), "No".into()], multi: false }, now());
+    c.reply_event(second, Event::Done, now());
+    let snapshot = c.snapshot().unwrap();
+    history::write_snapshot(&dir, &snapshot).unwrap();
+
+    let mut fresh = Chat::new(None);
+    fresh.load(history::load(&dir, &snapshot.saved.id).expect("loads"));
+    assert_eq!(fresh.messages.iter().map(|m| m.text.as_str()).collect::<Vec<_>>(), ["fix it", "Yes"]);
+    let asked = fresh.reply_to(fresh.messages[0].id).unwrap();
+    let token = asked.token;
+    match asked.parts.as_slice() {
+        [reply::Part::Agent(a), reply::Part::Diff(d), reply::Part::Question(q)] => {
+            assert_eq!((a.steps[0].target.as_str(), a.steps[0].status), ("src/lib.rs", reply::StepStatus::Done));
+            assert_eq!((d.path.as_str(), d.added, d.removed), ("src/lib.rs", 1, 1));
+            assert_eq!(q.answered.as_deref(), Some("Yes"));
+        }
+        _ => panic!("a step, a diff and a question"),
+    }
+    fresh.pick(token, 2, 1);
+    assert_eq!(fresh.answer(token, 2), None, "answered before it was saved: it stays read only");
+    // The model's process is a new one: nothing waits for the last question's answer.
+    let last = fresh.reply_to(fresh.messages[1].id).unwrap().token;
+    fresh.pick(last, 1, 0);
+    assert_eq!(fresh.answer(last, 1), None, "the last reply's question is closed");
+    assert!(matches!(&fresh.reply_to(fresh.messages[1].id).unwrap().parts[1], reply::Part::Question(q) if q.closed && q.picked.is_empty()));
+    assert_eq!(fresh.messages.len(), 2, "no answer sent");
+    assert!(!fresh.replies.iter().any(|r| r.streaming()));
+}
+
 // Titles.
 
 #[test]

@@ -628,7 +628,7 @@ impl Chat {
 
     /// The "something else" field of question `part` in reply `token`.
     pub fn question_other(&mut self, token: u64, part: usize) -> &mut TextEdit {
-        if self.question_mut(token, part).is_none() {
+        if !self.question_mut(token, part).is_some_and(|q| q.open()) {
             return &mut self.scratch;
         }
         self.others.entry((token, part)).or_insert_with(|| TextEdit::new(""))
@@ -640,7 +640,8 @@ impl Chat {
     }
 
     /// The user answers question `part` of reply `token`: the answer goes as their message and
-    /// gets its reply (its token). None if nothing is picked or written.
+    /// gets its reply (its token). None if nothing is picked or written, or it doesn't take an
+    /// answer (answered, or closed).
     pub fn answer(&mut self, token: u64, part: usize) -> Option<u64> {
         let other = self.others.get(&(token, part)).map_or("", |e| e.text.as_str());
         let text = self.replies.iter_mut().find(|r| r.token == token)?.answer(part, other)?;

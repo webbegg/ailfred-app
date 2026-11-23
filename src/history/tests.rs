@@ -1,11 +1,11 @@
 use std::os::unix::fs::PermissionsExt;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use super::store::write_atomic;
 use super::*;
-use crate::reply::{Event, Reply, State};
+use crate::reply::{Event, Part, Question, Reply, State, Tool};
 
 /// A fresh empty folder under the system's temp folder.
 fn scratch(name: &str) -> PathBuf {
@@ -349,6 +349,11 @@ fn a_title_for_a_conversation_the_chat_has_left_goes_to_its_file_and_the_list() 
 
 // A reply, saved and back.
 
+/// `reply` saved as the first message's of conversation `c`.
+fn save(reply: &Reply) -> SavedReply {
+    saved_reply(reply, "c", &run_id("c", 0))
+}
+
 fn streaming_reply() -> Reply {
     let mut reply = Reply::new(7, "why?");
     reply.token = 3;
@@ -361,7 +366,7 @@ fn streaming_reply() -> Reply {
 
 #[test]
 fn a_reply_still_streaming_is_saved_interrupted_and_loads_as_stopped_and_interrupted_with_its_text() {
-    let saved = saved_reply(&streaming_reply());
+    let saved = save(&streaming_reply());
     assert_eq!(saved.state, ReplyState::Interrupted);
     assert_eq!((saved.thinking.as_deref(), saved.text.as_str()), (Some("hmm"), "Because of tea."));
     let json = serde_json::to_string(&saved).unwrap();
@@ -373,8 +378,8 @@ fn a_reply_still_streaming_is_saved_interrupted_and_loads_as_stopped_and_interru
     assert!(!reply.parts.iter().any(|p| matches!(p, crate::reply::Part::Error(_))), "no error card: the notice says it");
     assert!(!reply.streaming(), "nothing streams after a launch");
     // Saved again as it is, it stays interrupted.
-    assert_eq!(saved_reply(&reply).state, ReplyState::Interrupted);
-    assert_eq!(saved_reply(&reply).error, None);
+    assert_eq!(save(&reply).state, ReplyState::Interrupted);
+    assert_eq!(save(&reply).error, None);
 }
 
 #[test]
@@ -391,12 +396,12 @@ fn a_reply_whose_model_went_away_is_saved_interrupted() {
     reply.apply(Event::Lost("The assistant stopped unexpectedly.".into()), Instant::now());
     assert_eq!((reply.state, reply.interrupted), (State::Stopped, true));
     assert_eq!(reply.history_text().as_deref(), Some("Because of tea."), "what came stays");
-    assert_eq!(saved_reply(&reply).state, ReplyState::Interrupted);
+    assert_eq!(save(&reply).state, ReplyState::Interrupted);
     // A reply the user stopped isn't.
     let mut stopped = streaming_reply();
     stopped.stop(Instant::now());
     assert!(!stopped.interrupted);
-    assert_eq!(saved_reply(&stopped).state, ReplyState::Stopped);
+    assert_eq!(save(&stopped).state, ReplyState::Stopped);
 }
 
 #[test]
@@ -409,15 +414,300 @@ fn done_stopped_and_failed_replies_come_back_as_they_were() {
     let mut failed = streaming_reply();
     failed.apply(Event::Fail("overloaded".into()), now);
     for (reply, state) in [(done, State::Done), (stopped, State::Stopped), (failed, State::Failed)] {
-        let back = reply_from(&saved_reply(&reply), 1, "why?", 2);
+        let back = reply_from(&save(&reply), 1, "why?", 2);
         assert_eq!(back.state, state);
         assert_eq!(back.copy_text(), reply.copy_text());
         assert_eq!(back.history_text(), reply.history_text());
     }
-    let failed = reply_from(&saved_reply(&{
+    let failed = reply_from(&save(&{
         let mut r = Reply::new(1, "x");
         r.apply(Event::Fail("overloaded".into()), now);
         r
     }), 1, "x", 1);
     assert!(matches!(failed.parts.last(), Some(crate::reply::Part::Error(e)) if e == "overloaded"));
+}
+
+// A whole reply, as its events.
+
+fn at(ms: u64) -> Instant {
+    // One base for the whole test binary: instants only compare within it.
+    static BASE: OnceLock<Instant> = OnceLock::new();
+    *BASE.get_or_init(Instant::now) + Duration::from_millis(ms)
+}
+
+/// What a reply shows, in words, to compare two (a `Reply` has no `PartialEq`).
+fn digest(r: &Reply) -> String {
+    let mut out = format!("{:?} interrupted={}\n", r.state, r.interrupted);
+    for part in &r.parts {
+        let line = match part {
+            Part::Thinking(t) => format!("thinking {:?} took {:?}", t.text, t.took),
+            Part::Text(t) => format!("text {t:?}"),
+            Part::Agent(a) => a.steps.iter().map(|s| format!("step {:?} {:?} {:?} {:?}", s.tool, s.target, s.output, s.status)).collect::<Vec<_>>().join("\n"),
+            Part::Diff(d) => format!("diff {:?} {:?} +{} -{}", d.path, d.patch, d.added, d.removed),
+            Part::Question(q) => format!("question {:?} {:?} multi={} answered={:?}", q.prompt, q.options, q.multi, q.answered),
+            Part::Error(e) => format!("error {e:?}"),
+        };
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Where `worked_reply`'s questions are.
+const ANSWERED: usize = 5;
+const OPEN: usize = 6;
+
+/// A reply that thought, ran steps (one failed), wrote a diff and asked two questions, the first
+/// answered.
+fn worked_reply() -> Reply {
+    let mut reply = Reply::new(7, "fix it");
+    let events = vec![
+        Event::Think("Let me look.".into()),
+        Event::Text("Looking.".into()),
+        Event::Step { id: 1, tool: Tool::Read, target: "src/main.rs".into() },
+        Event::StepOutput { id: 1, text: "fn main() {}\n".into() },
+        Event::StepEnd { id: 1, ok: true },
+        Event::Step { id: 2, tool: Tool::Run, target: "cargo test".into() },
+        Event::StepOutput { id: 2, text: "error[E0425]\n".into() },
+        Event::StepEnd { id: 2, ok: false },
+        Event::Text("Here's the fix:".into()),
+        Event::Diff { path: "src/lib.rs".into(), patch: "-let x = 1;\n+let x = 2;\n".into() },
+        Event::Ask { prompt: "Which ones?".into(), options: vec!["a.rs".into(), "b.rs".into()], multi: true },
+        Event::Ask { prompt: "Sure?".into(), options: vec!["Yes".into(), "No".into()], multi: false },
+        Event::Done,
+    ];
+    for (i, event) in events.into_iter().enumerate() {
+        reply.apply(event, at(i as u64 * 100));
+    }
+    question(&mut reply, ANSWERED).pick(1);
+    question(&mut reply, ANSWERED).pick(0);
+    assert_eq!(reply.answer(ANSWERED, "").as_deref(), Some("a.rs, b.rs"));
+    reply
+}
+
+fn question(reply: &mut Reply, part: usize) -> &mut Question {
+    match &mut reply.parts[part] {
+        Part::Question(q) => q,
+        _ => panic!("a question at {part}"),
+    }
+}
+
+#[test]
+fn a_reply_with_steps_a_diff_and_questions_survives_the_disk_whole() {
+    let dir = scratch("whole");
+    let id = "20240101-000000-0040";
+    let reply = worked_reply();
+    let conversation = Saved { messages: vec![message("fix it", Some(saved_reply(&reply, id, &run_id(id, 0))))], ..saved(id, 1, &[]) };
+    write_snapshot(&dir, &snapshot(conversation)).unwrap();
+
+    let loaded = load(&dir, id).expect("it loads");
+    let fields = loaded.messages[0].reply.clone().unwrap();
+    let mut back = reply_from(&fields, 3, "fix it", 4);
+    assert_eq!(digest(&back), digest(&reply));
+    assert_eq!((back.id, back.prompt.as_str(), back.token), (3, "fix it", 4));
+    assert_eq!(back.answer(ANSWERED, "again"), None, "answered once, reopened too");
+    assert!(!question(&mut back, ANSWERED).closed && question(&mut back, OPEN).closed);
+    assert!(!back.asks(), "nothing waits for the other's answer: the model's process is a new one");
+    question(&mut back, OPEN).pick(1);
+    assert_eq!(back.answer(OPEN, "No"), None, "closed");
+    // The text is written as before, for a build that doesn't read the events.
+    assert_eq!((fields.state, fields.thinking.as_deref(), fields.text.as_str()), (ReplyState::Done, Some("Let me look."), "Looking.\n\nHere's the fix:"));
+    assert_eq!(fields.answers, [Some("a.rs, b.rs".to_owned()), None]);
+    let file = std::fs::read_to_string(dir.join(format!("{id}.json"))).unwrap();
+    assert!(file.contains("\"events\"") && file.contains(&format!("\"runId\":\"{id}-0\"")), "{file}");
+}
+
+#[test]
+fn a_reopened_question_without_an_answer_is_closed_even_when_the_answers_are_damaged() {
+    let fields = save(&worked_reply());
+    for answers in [serde_json::json!([1, "x"]), serde_json::json!("bad"), serde_json::json!([])] {
+        let mut value = serde_json::to_value(&fields).unwrap();
+        value["answers"] = answers.clone();
+        let damaged: SavedReply = serde_json::from_value(value).unwrap();
+        assert!(damaged.answers.is_empty(), "{answers} reads as none");
+        let mut back = reply_from(&damaged, 1, "fix it", 1);
+        for part in [ANSWERED, OPEN] {
+            let q = question(&mut back, part);
+            assert!(q.closed && q.answered.is_none(), "{answers}: question {part}");
+            q.pick(0);
+            assert!(q.picked.is_empty(), "{answers}: no pick on question {part}");
+        }
+        assert_eq!(back.answer(OPEN, "anything"), None, "{answers}");
+        assert!(!back.asks(), "{answers}");
+    }
+}
+
+#[test]
+fn a_conversation_file_is_one_line_of_json_written_or_titled() {
+    let dir = scratch("compact");
+    let id = "20240101-000000-0045";
+    let conversation = Saved { messages: vec![message("fix it", Some(saved_reply(&worked_reply(), id, &run_id(id, 0))))], ..saved(id, 1, &[]) };
+    write_snapshot(&dir, &snapshot(conversation)).unwrap();
+    let file = || std::fs::read_to_string(dir.join(format!("{id}.json"))).unwrap();
+    assert!(!file().contains('\n'), "one line: {}", file());
+    patch_title(&dir, id, "Fixing it").unwrap().expect("titled");
+    assert!(!file().contains('\n') && file().contains("Fixing it"), "one line: {}", file());
+}
+
+#[test]
+fn a_file_saved_before_events_loads_exactly_as_before() {
+    let dir = scratch("before-events");
+    let id = "20240101-000000-0041";
+    // As Ailfred wrote it before replies kept their events.
+    put(
+        &dir,
+        &format!("{id}.json"),
+        r#"{
+  "version": 1,
+  "id": "20240101-000000-0041",
+  "created": 100,
+  "updated": 200,
+  "title": null,
+  "title_by_user": false,
+  "session": null,
+  "messages": [
+    { "text": "hi", "pngs": [], "reply": { "state": "done", "thinking": "hmm", "text": "Hello", "error": null } },
+    { "text": "and?", "pngs": [], "reply": { "state": "failed", "thinking": null, "text": "", "error": "overloaded" } },
+    { "text": "more", "pngs": [], "reply": { "state": "interrupted", "thinking": null, "text": "Half", "error": null } },
+    { "text": "last", "pngs": [], "reply": null }
+  ]
+}"#,
+    );
+    let loaded = load(&dir, id).expect("it loads");
+    let replies: Vec<Option<SavedReply>> = loaded.messages.iter().map(|m| m.reply.clone()).collect();
+    let reply = |state, thinking: Option<&str>, text: &str, error: Option<&str>| SavedReply { state, thinking: thinking.map(str::to_owned), text: text.into(), error: error.map(str::to_owned), ..SavedReply::default() };
+    assert_eq!(
+        replies,
+        [
+            Some(reply(ReplyState::Done, Some("hmm"), "Hello", None)),
+            Some(reply(ReplyState::Failed, None, "", Some("overloaded"))),
+            Some(reply(ReplyState::Interrupted, None, "Half", None)),
+            None,
+        ]
+    );
+    let shown: Vec<String> = replies.iter().flatten().map(|r| digest(&reply_from(r, 1, "q", 1))).collect();
+    assert_eq!(
+        shown,
+        [
+            "Done interrupted=false\nthinking \"hmm\" took Some(0ns)\ntext \"Hello\"\n",
+            "Failed interrupted=false\nerror \"overloaded\"\n",
+            "Stopped interrupted=true\ntext \"Half\"\n",
+        ]
+    );
+}
+
+#[test]
+fn damaged_events_fall_back_to_the_text_and_the_rest_of_the_file_loads() {
+    let dir = scratch("damaged-events");
+    let id = "20240101-000000-0042";
+    let started = r#"{"type":"RUN_STARTED","threadId":"t","runId":"r"}"#;
+    let text = r#"{"type":"TEXT_MESSAGE_START","messageId":"m"},{"type":"TEXT_MESSAGE_CONTENT","messageId":"m","delta":"from the events"}"#;
+    let finished = r#"{"type":"RUN_FINISHED","threadId":"t","runId":"r"}"#;
+    let step = r#"{"type":"TOOL_CALL_START","toolCallId":"c","toolCallName":"read"},{"type":"TOOL_CALL_ARGS","toolCallId":"c","delta":"{\"target\":\"a.rs\"}"},{"type":"TOOL_CALL_END","toolCallId":"c"}"#;
+    let reply = |events: &str| format!(r#"{{"text":"q","reply":{{"state":"done","text":"from the fields","events":{events},"answers":"bad"}}}}"#);
+    let messages = [
+        reply("\"garbage\""),
+        reply(&format!("[{started},42,{finished}]")),
+        reply(&format!("[{started},{text}]")),
+        reply(&format!("[{text},{finished}]")),
+        reply(&format!("[{started},{finished},{finished}]")),
+        reply(&format!("[{started},{{\"type\":\"TEXT_MESSAGE_START\"}},{finished}]")),
+        reply(&format!("[{started},{step},{finished}]")),
+    ];
+    put(&dir, &format!("{id}.json"), &format!(r#"{{"version":1,"messages":[{}]}}"#, messages.join(",")));
+    let loaded = load(&dir, id).expect("the file still reads");
+    assert_eq!(loaded.messages.len(), 7, "every message");
+    let shown: Vec<Reply> = loaded.messages.iter().map(|m| reply_from(m.reply.as_ref().unwrap(), 1, "q", 1)).collect();
+    for (i, reply) in shown[..6].iter().enumerate() {
+        assert_eq!(digest(reply), "Done interrupted=false\ntext \"from the fields\"\n", "message {i}");
+    }
+    assert_eq!(digest(&shown[6]), "Done interrupted=false\nstep Read \"a.rs\" \"\" Done\n", "whole events win over the fields");
+}
+
+#[test]
+fn an_event_from_a_newer_build_is_skipped_and_the_reply_keeps_its_steps() {
+    let dir = scratch("newer-event");
+    let id = "20240101-000000-0044";
+    let mut reply = Reply::new(1, "q");
+    for event in [Event::Step { id: 1, tool: Tool::Read, target: "a.rs".into() }, Event::StepEnd { id: 1, ok: true }, Event::Done] {
+        reply.apply(event, at(0));
+    }
+    let conversation = Saved { messages: vec![message("q", Some(saved_reply(&reply, id, &run_id(id, 0))))], ..saved(id, 1, &[]) };
+    let mut value = serde_json::to_value(&conversation).unwrap();
+    let events = value["messages"][0]["reply"]["events"].as_array_mut().unwrap();
+    events.insert(2, serde_json::json!({ "type": "AILFRED_NEW", "what": "a newer build's" }));
+    put(&dir, &format!("{id}.json"), &value.to_string());
+    let loaded = load(&dir, id).expect("it loads");
+    let back = reply_from(loaded.messages[0].reply.as_ref().unwrap(), 1, "q", 1);
+    assert_eq!(digest(&back), "Done interrupted=false\nstep Read \"a.rs\" \"\" Done\n");
+}
+
+/// A saved reply as a build from before events reads it.
+#[derive(Deserialize)]
+struct OldReply {
+    #[serde(default, deserialize_with = "lenient")]
+    state: ReplyState,
+    #[serde(default, deserialize_with = "lenient")]
+    thinking: Option<String>,
+    #[serde(default, deserialize_with = "lenient")]
+    text: String,
+    #[serde(default, deserialize_with = "lenient")]
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OldMessage {
+    #[serde(default, deserialize_with = "lenient")]
+    text: String,
+    #[serde(default, deserialize_with = "lenient")]
+    reply: Option<OldReply>,
+}
+
+#[derive(Deserialize)]
+struct OldSaved {
+    #[serde(default, deserialize_with = "lenient")]
+    version: u32,
+    #[serde(default, deserialize_with = "lenient_list")]
+    messages: Vec<OldMessage>,
+}
+
+#[test]
+fn a_file_with_events_still_reads_in_a_build_from_before_them() {
+    let dir = scratch("older-build");
+    let id = "20240101-000000-0043";
+    let mut failed = worked_reply();
+    failed.state = State::Failed;
+    failed.parts.push(Part::Error("overloaded".into()));
+    let messages = vec![message("fix it", Some(saved_reply(&worked_reply(), id, &run_id(id, 0)))), message("again", Some(saved_reply(&failed, id, &run_id(id, 1))))];
+    write_snapshot(&dir, &snapshot(Saved { messages, ..saved(id, 1, &[]) })).unwrap();
+    let bytes = std::fs::read(dir.join(format!("{id}.json"))).unwrap();
+    assert!(String::from_utf8_lossy(&bytes).contains("\"events\""), "the file has events");
+    let old: OldSaved = serde_json::from_slice(&bytes).expect("an older build reads it");
+    assert_eq!(old.version, VERSION, "the same version: an older build doesn't leave it alone");
+    let replies: Vec<String> = old
+        .messages
+        .iter()
+        .map(|m| {
+            let r = m.reply.as_ref().expect("its reply");
+            format!("{} {:?} {:?} {:?} {:?}", m.text, r.state, r.thinking, r.text, r.error)
+        })
+        .collect();
+    assert_eq!(
+        replies,
+        [
+            r#"fix it Done Some("Let me look.") "Looking.\n\nHere's the fix:" None"#,
+            r#"again Failed Some("Let me look.") "Looking.\n\nHere's the fix:" Some("overloaded")"#,
+        ]
+    );
+}
+
+#[test]
+fn an_error_the_events_cant_carry_keeps_the_reply_to_its_text() {
+    // A damaged state reads as stopped, with the error it had: no run ends so.
+    let fields = SavedReply { state: ReplyState::Stopped, text: "Half".into(), error: Some("overloaded".into()), ..SavedReply::default() };
+    let shown = reply_from(&fields, 1, "q", 1);
+    let again = save(&shown);
+    assert!(again.events.is_empty(), "saved as before");
+    assert_eq!(digest(&reply_from(&again, 1, "q", 1)), digest(&shown));
+    assert_eq!(digest(&shown), "Stopped interrupted=false\ntext \"Half\"\nerror \"overloaded\"\n");
 }

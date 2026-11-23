@@ -202,23 +202,29 @@ impl Replayer {
     fn step(&mut self, call_id: &str) -> Option<Kind> {
         let call = self.call(call_id).filter(|c| !c.stepped)?;
         call.stepped = true;
-        let args: Value = serde_json::from_str(&call.args).unwrap_or_default();
-        let target = args.get("target").and_then(Value::as_str).unwrap_or_default();
-        let (tool, target) = match call.name.as_str() {
-            "read" => (Tool::Read, target),
-            "search" => (Tool::Search, target),
-            "run" => (Tool::Run, target),
-            "edit" => (Tool::Edit, target),
-            "other" => (Tool::Other, target),
-            // Another producer's tool: its target is its name.
-            name => (Tool::Other, if target.is_empty() { name } else { target }),
-        };
-        Some(Kind::Event(Event::Step { id: call.id, tool, target: target.to_owned() }))
+        let (tool, target) = step_of(&call.name, &call.args);
+        Some(Kind::Event(Event::Step { id: call.id, tool, target }))
     }
 }
 
+/// The tool and target of a call to `name` with arguments `args` (`{"target":…}`).
+pub(crate) fn step_of(name: &str, args: &str) -> (Tool, String) {
+    let args: Value = serde_json::from_str(args).unwrap_or_default();
+    let target = args.get("target").and_then(Value::as_str).unwrap_or_default();
+    let (tool, target) = match name {
+        "read" => (Tool::Read, target),
+        "search" => (Tool::Search, target),
+        "run" => (Tool::Run, target),
+        "edit" => (Tool::Edit, target),
+        "other" => (Tool::Other, target),
+        // Another producer's tool: its target is its name.
+        name => (Tool::Other, if target.is_empty() { name } else { target }),
+    };
+    (tool, target.to_owned())
+}
+
 /// A tool result's text: its text parts', joined, when it comes in parts.
-fn text_of(content: &Content) -> String {
+pub(crate) fn text_of(content: &Content) -> String {
     match content {
         Content::Text(text) => text.clone(),
         Content::Parts(parts) => parts.iter().filter_map(|p| if let ContentPart::Text { text } = p { Some(text.as_str()) } else { None }).collect(),
@@ -240,7 +246,12 @@ fn ask(interrupt: &Interrupt) -> Event {
 /// know (a newer core's), so a client skips it instead of breaking.
 pub fn parse_line(line: &str) -> Result<Option<agui::Event>, serde_json::Error> {
     let value: Value = serde_json::from_str(line.trim())?;
-    match agui::Event::deserialize(&value) {
+    parse_value(&value)
+}
+
+/// The same, for an event already read as JSON.
+pub fn parse_value(value: &Value) -> Result<Option<agui::Event>, serde_json::Error> {
+    match agui::Event::deserialize(value) {
         Ok(event) => Ok(Some(event)),
         Err(_) if value.get("type").and_then(Value::as_str).is_some_and(|t| !agui::Event::TYPES.contains(&t)) => Ok(None),
         Err(e) => Err(e),

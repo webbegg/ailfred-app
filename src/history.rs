@@ -4,6 +4,16 @@
 //! relative path. A damaged field falls back to its default, not the whole file; a file that
 //! won't parse is skipped (and logged), never deleted.
 //!
+//! A message holds its text, its captures and its reply. A reply holds how it ended, its
+//! thinking, text and error (what every version reads) and, since they were added, its run's
+//! AG-UI events with the answers to its questions beside them (`convert`): loading prefers
+//! those, so steps, diffs and questions come back. The fields were added, not changed: the
+//! version stays 1, a build from before them reads a new file's text (serde passes over keys it
+//! doesn't know), and a file without them loads as it always did. But an older build that
+//! rewrites the file (any save, or a title patch) keeps the text and drops `events` and
+//! `answers`. A question loaded without an answer is closed: the model's process that asked it
+//! is gone. Files are written as compact JSON; any layout reads.
+//!
 //! Saving never happens on the main thread: [`Writer`] is a thread fed by a channel. Everything
 //! here takes its folder as an argument, so tests stay in a scratch one.
 
@@ -13,6 +23,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use ailfred_protocol::{agui, replay};
 use serde::{Deserialize, Deserializer, Serialize};
 
 mod convert;
@@ -21,7 +32,7 @@ mod store;
 mod tests;
 mod writer;
 
-pub use convert::{reply_from, saved_reply};
+pub use convert::{reply_from, run_id, saved_reply};
 pub use store::{Loaded, load, scan};
 // What the tests reach for; the app writes through the `Writer`.
 #[cfg(test)]
@@ -53,6 +64,8 @@ pub enum ReplyState {
     Interrupted,
 }
 
+/// A reply as saved: how it ended and its text, which any version reads, and the whole of it as
+/// its run's AG-UI events, which loading prefers.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SavedReply {
     #[serde(default, deserialize_with = "lenient")]
@@ -63,6 +76,14 @@ pub struct SavedReply {
     pub text: String,
     #[serde(default, deserialize_with = "lenient")]
     pub error: Option<String>,
+    /// Its run, from start to end (`ailfred_protocol::saved`): thinking, text, steps, diffs,
+    /// questions. None in a file from before them. One of a type this build doesn't know (a
+    /// newer one's) is skipped; one damaged drops them all.
+    #[serde(default, deserialize_with = "lenient_events", skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<agui::Event>,
+    /// What the user answered to its questions, in order (None: not answered).
+    #[serde(default, deserialize_with = "lenient", skip_serializing_if = "Vec::is_empty")]
+    pub answers: Vec<Option<String>>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -232,6 +253,14 @@ pub fn safe_relative(path: &str) -> Option<PathBuf> {
 fn lenient<'de, D: Deserializer<'de>, T: serde::de::DeserializeOwned + Default>(d: D) -> Result<T, D::Error> {
     let value = serde_json::Value::deserialize(d)?;
     Ok(serde_json::from_value(value).unwrap_or_default())
+}
+
+/// Saved events, read as a client reads a stream (`replay::parse_value`): one of a type this
+/// build doesn't know is skipped, a damaged one leaves none (the reply shows its text).
+fn lenient_events<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<agui::Event>, D::Error> {
+    let serde_json::Value::Array(items) = serde_json::Value::deserialize(d)? else { return Ok(Vec::new()) };
+    let events: Result<Vec<Option<agui::Event>>, _> = items.iter().map(replay::parse_value).collect();
+    Ok(events.map(|events| events.into_iter().flatten().collect()).unwrap_or_default())
 }
 
 /// A list that keeps the elements with the right shape.
