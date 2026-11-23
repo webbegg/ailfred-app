@@ -612,9 +612,13 @@ impl Shared {
         Ok(spawned.stdout)
     }
 
-    /// Waits for pi's process to end once its stdout closed; false if the engine went first
-    /// (its drop ends the process).
+    /// Waits for pi's process to end once its stdout closed (its stdin is closed by then); false
+    /// if the engine went first (its drop ends the process). A pi still running without its
+    /// stdout gets SIGTERM after the grace and SIGKILL a grace later, as on drop, so it starts
+    /// again instead of being waited for forever.
     fn reap(&self) -> bool {
+        let since = Instant::now();
+        let mut signalled = 0;
         loop {
             if self.closed.load(Ordering::Acquire) {
                 return false;
@@ -625,7 +629,19 @@ impl Shared {
                     child.take();
                     return true;
                 }
-                Some(Ok(None)) => {}
+                Some(Ok(None)) => {
+                    // Only a process not yet reaped is signalled, so its id can't have been reused.
+                    let process = child.as_mut().expect("just matched");
+                    let waited = since.elapsed();
+                    if signalled == 0 && waited >= self.grace {
+                        eprintln!("Ailfred: pi closed its output but kept running; ending it");
+                        let _ = process.terminate();
+                        signalled = 1;
+                    } else if signalled == 1 && waited >= self.grace * 2 {
+                        let _ = process.kill();
+                        signalled = 2;
+                    }
+                }
             }
             drop(child);
             std::thread::sleep(Duration::from_millis(50));
@@ -1429,6 +1445,28 @@ mod tests {
         let dropped = starts.lock().unwrap().len();
         std::thread::sleep(Duration::from_millis(2500));
         assert_eq!(starts.lock().unwrap().len(), dropped, "no start once dropped");
+    }
+
+    #[test]
+    fn a_pi_that_closes_its_stdout_but_keeps_running_is_ended_and_started_again() {
+        let starts = Arc::new(AtomicU32::new(0));
+        let counted = starts.clone();
+        let engine = PiEngine::supervised(
+            move || {
+                if counted.fetch_add(1, Ordering::SeqCst) == 0 { sh("exec >&-; trap '' TERM; while :; do sleep 0.05; done") } else { sh("read line") }
+            },
+            Duration::from_millis(200),
+        )
+        .expect("spawned");
+        std::thread::sleep(Duration::from_millis(100));
+        let first = engine.pid().expect("running") as libc::pid_t;
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while starts.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(starts.load(Ordering::SeqCst), 2, "started again");
+        // The first one is gone and reaped: no zombie answers a signal 0.
+        assert_eq!(unsafe { libc::kill(first, 0) }, -1);
     }
 
     #[test]
