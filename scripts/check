@@ -1,6 +1,6 @@
 #!/bin/bash
-# The gate before a commit or a PR, run locally on a Mac: CI checks only the UI-free crates, on
-# Linux (.github/workflows/check.yml), so this is the only check of the app itself.
+# The gate before a commit or a PR, run locally on a Mac (there is no CI); scripts/hooks/pre-push
+# runs it before each push once `git config core.hooksPath scripts/hooks` is set.
 # Each step in order, over the whole workspace (the app and crates/ailfred-core), stopping at the
 # first failure:
 #   1. build everything (the app, the core, their tests and examples)

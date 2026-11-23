@@ -9,8 +9,8 @@ its own window).
 
    ```
    <folder>/ailfred-app        this repository
-   <folder>/_references/rune   https://github.com/anomalyco/rune (the commit pinned as
-                                RUNE_REV in .github/workflows/check.yml)
+   <folder>/_references/rune   https://github.com/anomalyco/rune (last checked with
+                                21e5342b9a4cc33eeee88071b4b1f0eafb1247d4)
    ```
 
 2. Install the Rust toolchain in `rust-toolchain.toml` (rustup picks it up by itself).
