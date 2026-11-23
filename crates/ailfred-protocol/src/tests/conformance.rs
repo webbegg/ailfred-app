@@ -22,10 +22,14 @@ fn every_fixture_event_and_command_keeps_to_the_official_schema() {
     }
     for (i, line) in fixture("commands.jsonl").iter().enumerate() {
         let Value::Object(mut command) = serde_json::from_str(line).unwrap() else { panic!("an object") };
-        // Our envelope: a run is a RunAgentInput tagged `run`; a stop is ours alone.
-        match command.remove("type").as_ref().and_then(Value::as_str) {
+        // Our envelope: a run is a RunAgentInput tagged `run`; the others are ours alone.
+        let kind = command.remove("type");
+        let has = |keys: &[&str]| keys.iter().all(|k| command.get(*k).is_some_and(Value::is_string)) && command.len() == keys.len();
+        match kind.as_ref().and_then(Value::as_str) {
             Some("run") => errors.extend(spec.errors(&Value::Object(command), "RunAgentInput").into_iter().map(|e| format!("commands.jsonl:{}: {e}", i + 1))),
-            Some("stop") => assert!(command.contains_key("threadId") && command.contains_key("runId"), "a stop names its run"),
+            Some("stop") => assert!(has(&["threadId", "runId"]), "a stop names its run"),
+            Some("new_conversation") => assert!(has(&["threadId"]), "a new conversation names the thread it replaces"),
+            Some("retry") => assert!(has(&["threadId", "runId", "replyRunId"]), "a retry names its run and the reply's"),
             other => panic!("commands.jsonl:{}: type {other:?}", i + 1),
         }
     }

@@ -145,8 +145,11 @@ pub struct Chat {
     /// (`land`).
     landed: bool,
     /// Cmd+N: the conversation is over; it still shows while sliding out, and the next message
-    /// starts a new one.
-    over: bool,
+    /// starts a new one, with this id: clients see that one at once (`thread`), empty.
+    over: Option<String>,
+    /// A retried reply that isn't the conversation's last, by its stream: its run comes after
+    /// the others on a client, so once it ends a snapshot puts it back in its place.
+    resync_at: Option<u64>,
     /// Where Esc and the close button go (None in tests).
     host: Option<AppHandle<Host>>,
     /// The next pasted image's id.
@@ -204,7 +207,7 @@ pub struct Chat {
 
 impl Chat {
     pub fn new(host: Option<AppHandle<Host>>) -> Self {
-        Chat { messages: Vec::new(), hidden: 0, draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: false, host, next_shot: 0, replies: Vec::new(), next_token: 0, others: HashMap::new(), kept: HashMap::new(), scratch: TextEdit::new(""), away: false, windowed: false, session: None, conv: history::Meta::fresh(), running_model: String::new(), models_open: false, feed: None, client_run: None, asked: HashMap::new(), #[cfg(test)] cancelled: Vec::new(), #[cfg(test)] saved: Vec::new(), #[cfg(test)] title_asks: Vec::new(), #[cfg(test)] model: None, #[cfg(test)] requests: Vec::new() }
+        Chat { messages: Vec::new(), hidden: 0, draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: None, resync_at: None, host, next_shot: 0, replies: Vec::new(), next_token: 0, others: HashMap::new(), kept: HashMap::new(), scratch: TextEdit::new(""), away: false, windowed: false, session: None, conv: history::Meta::fresh(), running_model: String::new(), models_open: false, feed: None, client_run: None, asked: HashMap::new(), #[cfg(test)] cancelled: Vec::new(), #[cfg(test)] saved: Vec::new(), #[cfg(test)] title_asks: Vec::new(), #[cfg(test)] model: None, #[cfg(test)] requests: Vec::new() }
     }
 
     pub fn is_open(&self) -> bool {
@@ -249,7 +252,7 @@ impl Chat {
         self.end_replies(Instant::now());
         self.new_conversation();
         self.reset_conversation();
-        (self.preview, self.over, self.away) = (None, false, false);
+        (self.preview, self.over, self.away) = (None, None, false);
         self.draft.focused = true;
         self.announce();
     }
@@ -399,13 +402,15 @@ impl Chat {
         Some(id)
     }
 
-    /// Cmd+N: slides out, the conversation over (see `over`).
+    /// Cmd+N: slides out, the conversation over (see `over`); clients get the new one, empty,
+    /// at once. Nothing is saved of it until its first message.
     pub fn start_over(&mut self) {
         self.end_replies(Instant::now());
         self.new_conversation();
         self.open = false;
-        self.over = true;
+        self.over = Some(history::Meta::fresh().id);
         self.preview = None;
+        self.announce();
     }
 
     /// Message `id` gets a reply from the model, which the host streams in; the reply's
@@ -542,6 +547,10 @@ impl Chat {
             if !asks {
                 self.next_queued();
             }
+            if self.resync_at == Some(token) {
+                self.resync_at = None;
+                self.resync();
+            }
         }
     }
 
@@ -625,11 +634,21 @@ impl Chat {
         Some(self.start_reply(id, CONTINUE.into(), false))
     }
 
-    /// Retry: the reply `token` starts over; its new token.
+    /// Retry: the reply `token` starts over; its new token. Clients get the conversation
+    /// without it, then its new run.
     pub fn retry(&mut self, token: u64) -> Option<u64> {
         let r = self.replies.iter().find(|r| r.token == token)?;
         let (id, prompt, answer) = (r.id, r.prompt.clone(), r.answer);
-        Some(self.start_reply(id, prompt, answer))
+        let last = self.messages.last().is_some_and(|m| m.id == id);
+        let again = self.start_reply(id, prompt, answer);
+        self.note_retry(again, last);
+        Some(again)
+    }
+
+    /// Reply `r` shows Retry (`reply_view`): it ended, done, stopped or failed (the footer's, or
+    /// its error's); one streaming or queued doesn't.
+    pub fn offers_retry(r: &Reply) -> bool {
+        matches!(r.state, reply::State::Done | reply::State::Stopped | reply::State::Failed)
     }
 
     /// The reply to message `id`.
@@ -699,9 +718,10 @@ impl Chat {
 
     /// Adds a message at the end of the conversation, the field focused for the next.
     pub fn push(&mut self, message: Message) {
-        if std::mem::replace(&mut self.over, false) {
+        // Clients were given its id with its empty snapshot already (`start_over`).
+        if let Some(next) = self.over.take() {
             self.reset_conversation();
-            self.announce();
+            self.conv.id = next;
         }
         self.messages.push(message);
         self.draft.focused = true;

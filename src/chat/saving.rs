@@ -20,6 +20,7 @@ impl Chat {
         self.others.clear();
         self.kept.clear();
         self.asked.clear();
+        self.resync_at = None;
         self.draft.clear();
         self.shots.clear();
         self.conv = history::Meta::fresh();
@@ -134,15 +135,18 @@ impl Chat {
     /// thread. The one that's here already stays as it is.
     pub fn load(&mut self, loaded: history::Loaded) {
         if loaded.id == self.conv.id && !self.messages.is_empty() {
-            // Left with Cmd+N in the side panel, it's picked back: it goes on.
-            self.over = false;
+            // Left with Cmd+N in the side panel, it's picked back: it goes on, its thread
+            // clients' again.
+            if self.over.take().is_some() {
+                self.announce();
+            }
             return;
         }
         self.end_replies(Instant::now());
         // pi keeps a session of its own: it starts a new one, not the one it had.
         self.new_conversation();
         self.reset_conversation();
-        (self.preview, self.over, self.away) = (None, false, false);
+        (self.preview, self.over, self.away) = (None, None, false);
         self.conv = history::Meta {
             id: loaded.id,
             created: loaded.created,

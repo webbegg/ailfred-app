@@ -1,6 +1,7 @@
 //! What a client sends the core. AG-UI starts runs with a [`RunAgentInput`] and has no way to
-//! stop one, so commands are Ailfred's own envelope around it, tagged by `type`. Retrying a
-//! reply, a new conversation and picking a model aren't commands yet.
+//! stop one, retry one or start a new conversation, so commands are Ailfred's own envelope
+//! around it, tagged by `type`. Picking a model isn't a command yet. A newer client's command of
+//! a type this version doesn't know doesn't read (the server answers 400).
 //!
 //! A run's `messages` are the complete history, as AG-UI requires, built as a snapshot builds
 //! it ([`history`]): the same ids and shapes a `MESSAGES_SNAPSHOT` of those turns holds.
@@ -9,8 +10,8 @@
 //! answer's text as the next message), so a later snapshot shows it as the `user` message of
 //! the answering run, `{run}-user`: that's how an answer command and a snapshot line up. The
 //! server (the app's `server`, `docs/local-server.md`) keeps its own history: a run's earlier
-//! messages aren't replayed, a partial resume answers the questions it names, and
-//! `status: cancelled` is refused for now.
+//! messages aren't replayed, a partial resume answers the questions it names, and one with
+//! `status: cancelled` ([`decline`]) closes its questions: nothing is sent to the model.
 
 use ailfred_core::turn::base64;
 use schemars::JsonSchema;
@@ -30,6 +31,24 @@ pub enum Command {
     Run(Box<RunAgentInput>),
     /// The user stops the run going.
     Stop { thread_id: String, run_id: String },
+    /// The user starts a new conversation, as Cmd+N in the chat does; `thread_id` is the one
+    /// current now. Answered with the new one's `threadId`, whose empty `MESSAGES_SNAPSHOT`
+    /// every client gets.
+    NewConversation { thread_id: String },
+    /// The user retries a reply, as the chat's Retry does, as run `run_id` (new in the thread):
+    /// `reply_run_id` names the reply by its run, as the live run (`RUN_STARTED`) or a snapshot
+    /// (its user message `{run}-user`) gave it, matched whole.
+    Retry { thread_id: String, run_id: String, reply_run_id: String },
+}
+
+/// A new conversation in place of `thread_id`'s.
+pub fn new_conversation(thread_id: &str) -> Command {
+    Command::NewConversation { thread_id: thread_id.into() }
+}
+
+/// Run `run_id` of thread `thread_id` retries the reply of run `reply_run_id`.
+pub fn retry(thread_id: &str, run_id: &str, reply_run_id: &str) -> Command {
+    Command::Retry { thread_id: thread_id.into(), run_id: run_id.into(), reply_run_id: reply_run_id.into() }
 }
 
 /// Run `run_id` of thread `thread_id`: the user says `text` with captures `pngs` (PNG bytes)
@@ -45,6 +64,13 @@ pub fn send(thread_id: &str, run_id: &str, before: &[Turn], text: &str, pngs: &[
 /// `resume` ([`answer_resume`]).
 pub fn answer(thread_id: &str, run_id: &str, before: &[Turn], interrupt_id: &str, answer: &str) -> Command {
     run(thread_id, run_id, history(before), Some(vec![answer_resume(interrupt_id, answer)]))
+}
+
+/// Run `run_id` of thread `thread_id`: the user declines question `interrupt_id`, asked in the
+/// reply of `before`'s last turn ([`decline_resume`]). Nothing goes to the model: the question
+/// closes.
+pub fn decline(thread_id: &str, run_id: &str, before: &[Turn], interrupt_id: &str) -> Command {
+    run(thread_id, run_id, history(before), Some(vec![decline_resume(interrupt_id)]))
 }
 
 fn run(thread_id: &str, run_id: &str, messages: Vec<Message>, resume: Option<Vec<Resume>>) -> Command {
@@ -65,6 +91,11 @@ fn run(thread_id: &str, run_id: &str, messages: Vec<Message>, resume: Option<Vec
 /// The answer to question `interrupt_id`, for a run's `resume`.
 pub fn answer_resume(interrupt_id: &str, answer: &str) -> Resume {
     Resume { interrupt_id: interrupt_id.into(), status: ResumeStatus::Resolved, payload: Some(json!({ "answer": answer })), metadata: None }
+}
+
+/// Question `interrupt_id` declined, for a run's `resume`: `cancelled`, without a payload.
+pub fn decline_resume(interrupt_id: &str) -> Resume {
+    Resume { interrupt_id: interrupt_id.into(), status: ResumeStatus::Cancelled, payload: None, metadata: None }
 }
 
 /// A user message: its `text`, then `pngs` (screenshots) as inline images. Plain text when
@@ -139,6 +170,12 @@ mod tests {
     fn a_stop_names_its_thread_and_run_and_a_run_flattens_its_input() {
         let stop = Command::Stop { thread_id: "t".into(), run_id: "r".into() };
         assert_eq!(serde_json::to_string(&stop).unwrap(), r#"{"type":"stop","threadId":"t","runId":"r"}"#);
+        assert_eq!(serde_json::to_string(&new_conversation("t")).unwrap(), r#"{"type":"new_conversation","threadId":"t"}"#);
+        assert_eq!(serde_json::to_string(&retry("t", "r2", "r")).unwrap(), r#"{"type":"retry","threadId":"t","runId":"r2","replyRunId":"r"}"#);
+        let declined = serde_json::to_value(decline_resume("r-ask-1")).unwrap();
+        assert_eq!(declined, json!({ "interruptId": "r-ask-1", "status": "cancelled" }));
+        let newer = serde_json::from_str::<Command>(r#"{"type":"pick_model","threadId":"t"}"#).unwrap_err().to_string();
+        assert!(newer.contains("pick_model"), "a newer client's type is named: {newer}");
         let run = Command::Run(Box::new(RunAgentInput {
             thread_id: "t".into(),
             run_id: "r".into(),

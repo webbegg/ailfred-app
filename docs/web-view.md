@@ -1,6 +1,6 @@
 # The web view
 
-Ailfred's conversation can also be shown in a web view: a native window holding a WKWebView, opened from the menu bar's menu (**Open Web View**). The page is the React client in `web/` (Vite, TypeScript). It draws the same conversation as the side panel, live, with web components. A message sent from it, an answer to a question, or a Stop, does what the same action in the side panel does.
+Ailfred's conversation can also be shown in a web view: a native window holding a WKWebView, opened from the menu bar's menu (**Open Web View**). The page is the React client in `web/` (Vite, TypeScript). It draws the same conversation as the side panel, live, with web components. A message sent from it, an answer to a question, declining one, a Stop, a Retry, or New conversation (its header's button), does what the same action in the side panel does (Retry shows on the replies the chat offers it on: every one that ended).
 
 The web view does not use the local server (`docs/local-server.md`): it needs no token, no port, and works with the server switched off. It speaks the same protocol, the AG-UI events of `crates/ailfred-protocol`, over a bridge between the page and the app.
 
@@ -26,7 +26,7 @@ Both calls are one statement each, their arguments JSON in which `<`, U+2028 and
 From the page to the app, the page calls `window.webkit.messageHandlers.ailfred.postMessage(text)`, `text` a JSON string, one of:
 
 - `{"type": "join"}`: sent once the page is ready (and again after a reload). The app answers with a `receive` holding the snapshot, then live events. Joining again replaces the earlier join: frames still on their way to it are dropped, and a fresh snapshot comes.
-- `{"type": "command", "id": "<string>", "command": <command>}`: `<command>` is exactly a `POST /v1/commands` body (`run` with a user message or a `resume`, or `stop`); the same checks apply and the answer comes back through `answer`. A `command` without one, or one that isn't a command, is answered **400**; one without a string `id` is ignored.
+- `{"type": "command", "id": "<string>", "command": <command>}`: `<command>` is exactly a `POST /v1/commands` body (`run` with a user message or a `resume`, which may decline, `stop`, `retry` or `new_conversation`); the same commands, checks and answers as over HTTP (`docs/local-server.md`), the answer coming back through `answer`. A `command` without one, or one that isn't a command, is answered **400**; one without a string `id` is ignored.
 - `{"type": "open", "url": "<url>"}`: opens an `http:`/`https:` link in the default browser; anything else is ignored.
 
 Anything else the page posts (bad JSON too, or not a string) is ignored. A frame the page can't keep up with is never dropped: the bridge watches the hub through a sink of its own in the app's process (not the 256-frame channel of a server stream), each frame queued to the main thread in order. The local server stopping doesn't end it.

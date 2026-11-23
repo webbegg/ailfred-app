@@ -127,6 +127,12 @@ export function canAnswer(state: Conversation, reply: ReplyTurn, part: QuestionP
   return latest === reply && reply.state === "done" && part.answered === null && !part.closed;
 }
 
+/// Whether `reply` offers Retry, as the chat's window does (`Chat::offers_retry`): it ended,
+/// done, stopped or failed; one streaming doesn't.
+export function canRetry(reply: ReplyTurn): boolean {
+  return reply.state !== "streaming";
+}
+
 export function applyAll(state: Conversation, events: readonly unknown[]): Conversation {
   return events.reduce<Conversation>(apply, state);
 }

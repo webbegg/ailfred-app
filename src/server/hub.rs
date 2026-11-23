@@ -6,7 +6,8 @@
 //! sent once the earlier one's `RUN_FINISHED` or `RUN_ERROR` is out. Each run's `RUN_STARTED`
 //! carries the user message it answers (`input`). A client joining gets the conversation's
 //! `MESSAGES_SNAPSHOT` without the runs still going, then the one going from its
-//! `RUN_STARTED`, then what comes.
+//! `RUN_STARTED`, then what comes; every client gets the same when the conversation changes in
+//! place (a Retry, a declined question).
 //!
 //! It never waits for a client: each has a bounded channel, and one whose channel is full (it
 //! reads too slowly) is dropped; it can join again. The web view, in the app's own process,
@@ -106,6 +107,20 @@ impl Hub {
     /// Run id `run` was used in this thread already.
     pub fn seen(&self, run: &str) -> bool {
         self.seen.contains(run)
+    }
+
+    /// A command took run id `run` without starting a run (a resume that only declines): no
+    /// later one may use it.
+    pub fn claim(&mut self, run: &str) {
+        self.seen.insert(run.to_owned());
+    }
+
+    /// The same conversation, changed in place (a question declined, a reply retried): every
+    /// client gets `snapshot` (made without `live_messages`) and the runs going from their
+    /// start, as one joining would. Nothing is forgotten.
+    pub fn resync(&mut self, snapshot: &agui::Event) {
+        let first = self.first(snapshot);
+        self.broadcast(&first);
     }
 
     /// Reply stream `token` starts for message `message` (which said `text` with captures

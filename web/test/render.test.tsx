@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { Markdown } from "../src/components/Markdown";
 import { QuestionView } from "../src/components/Question";
 import { ConversationView } from "../src/components/Conversation";
+import { Header } from "../src/components/Header";
 import { applyAll, empty } from "../src/state";
 import { fixture } from "./fixtures";
 
@@ -29,7 +30,7 @@ describe("a question", () => {
   const question = { kind: "question" as const, interruptId: "i", prompt: "Which ones?", options: ["src/a.rs", "src/b.rs"], multi: true, answered: null, closed: false };
 
   it("shows its prompt, an option button each, and an Other field while open", () => {
-    const html = renderToStaticMarkup(<QuestionView part={question} open onAnswer={noop} />);
+    const html = renderToStaticMarkup(<QuestionView part={question} open onAnswer={noop} onDecline={noop} />);
     expect(html).toContain("Which ones?");
     expect(html.match(/<button[^>]*class="option[^"]*"/g)).toHaveLength(2);
     expect(html).toContain("src/a.rs");
@@ -37,15 +38,48 @@ describe("a question", () => {
   });
 
   it("shows its answer, and no buttons, once answered", () => {
-    const html = renderToStaticMarkup(<QuestionView part={{ ...question, answered: "src/b.rs" }} open={false} onAnswer={noop} />);
+    const html = renderToStaticMarkup(<QuestionView part={{ ...question, answered: "src/b.rs" }} open={false} onAnswer={noop} onDecline={noop} />);
     expect(html).toContain("src/b.rs");
     expect(html).not.toContain("<button");
     expect(html).not.toContain("<input");
   });
+
+  it("offers Decline while open, and shows Not answered once closed", () => {
+    expect(renderToStaticMarkup(<QuestionView part={question} open onAnswer={noop} onDecline={noop} />)).toMatch(/<button[^>]*class="decline"[^>]*>Decline<\/button>/);
+    const closed = renderToStaticMarkup(<QuestionView part={{ ...question, closed: true }} open={false} onAnswer={noop} onDecline={noop} />);
+    expect(closed).not.toContain("Decline");
+    expect(closed).toContain("Not answered.");
+  });
+});
+
+describe("the header", () => {
+  it("has New conversation, off until the page knows the thread", () => {
+    expect(renderToStaticMarkup(<Header connected onNew={noop} />)).toMatch(/<button type="button" class="new-conversation">New conversation<\/button>/);
+    expect(renderToStaticMarkup(<Header connected={false} onNew={noop} />)).toContain("disabled");
+  });
 });
 
 describe("the conversation", () => {
-  const props = { onOpen: noop, onAnswer: noop };
+  const props = { onOpen: noop, onAnswer: noop, onDecline: noop, onRetry: noop };
+  const retries = (html: string) => html.match(/<button[^>]*class="retry"/g)?.length ?? 0;
+
+  it("offers Retry on every reply that ended, done, failed or stopped, as the window does, and not on one streaming", () => {
+    for (const name of ["answer", "error", "stop", "lost", "question"]) {
+      expect(retries(renderToStaticMarkup(<ConversationView state={applyAll(empty(), fixture(name))} {...props} />)), name).toBe(1);
+    }
+    const two = applyAll(empty(), [...fixture("answer"), ...fixture("error")]);
+    expect(retries(renderToStaticMarkup(<ConversationView state={two} {...props} />))).toBe(2);
+    const streaming = applyAll(empty(), fixture("answer").slice(0, 3));
+    expect(streaming.run).not.toBeNull();
+    expect(retries(renderToStaticMarkup(<ConversationView state={streaming} {...props} />))).toBe(0);
+  });
+
+  it("offers Decline on the open question only", () => {
+    const open = renderToStaticMarkup(<ConversationView state={applyAll(empty(), fixture("question"))} {...props} />);
+    expect(open.match(/class="decline"/g)).toHaveLength(1);
+    const later = renderToStaticMarkup(<ConversationView state={applyAll(empty(), [...fixture("question"), ...fixture("answer")])} {...props} />);
+    expect(later).not.toContain('class="decline"');
+  });
 
   it("shows steps with their targets and outputs", () => {
     const html = renderToStaticMarkup(<ConversationView state={applyAll(empty(), fixture("steps"))} {...props} />);

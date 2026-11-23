@@ -68,6 +68,42 @@ pre {
   height: 100%;
 }
 
+/* The header: New conversation */
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.header .title {
+  font-weight: 600;
+}
+
+.header button:disabled {
+  opacity: 0.5;
+}
+
+.reply-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.reply-actions button,
+.question .decline {
+  border: none;
+  background: none;
+  padding: 2px 0;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.reply-actions button:hover,
+.question .decline:hover {
+  color: var(--fg);
+}
+
 .scroller {
   flex: 1;
   overflow-y: auto;
@@ -336,6 +372,7 @@ details[open] > summary::before {
 
 .option,
 .answer-send,
+.header button,
 .composer button {
   border: 1px solid var(--line);
   background: var(--bg);

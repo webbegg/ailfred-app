@@ -1,5 +1,5 @@
 import type { Conversation, Part, QuestionPart, ReplyTurn, Step, UserTurn } from "../state";
-import { canAnswer } from "../state";
+import { canAnswer, canRetry } from "../state";
 import { Markdown } from "./Markdown";
 import { QuestionView } from "./Question";
 
@@ -7,18 +7,20 @@ interface Props {
   state: Conversation;
   onOpen: (url: string) => void;
   onAnswer: (reply: ReplyTurn, question: QuestionPart, answer: string) => void;
+  onDecline: (question: QuestionPart) => void;
+  onRetry: (reply: ReplyTurn) => void;
 }
 
 /// The conversation: each user message and its reply, then the messages sent whose run hasn't
 /// started yet.
-export function ConversationView({ state, onOpen, onAnswer }: Props) {
+export function ConversationView({ state, onOpen, onAnswer, onDecline, onRetry }: Props) {
   return (
     <div className="conversation">
       {state.items.map((item, i) =>
         item.kind === "user" ? (
           <UserView key={`u${i}:${item.id}`} turn={item} />
         ) : (
-          <ReplyView key={`r${i}:${item.runId}`} reply={item} onOpen={onOpen} open={(q) => canAnswer(state, item, q)} onAnswer={(q, a) => onAnswer(item, q, a)} />
+          <ReplyView key={`r${i}:${item.runId}`} reply={item} onOpen={onOpen} open={(q) => canAnswer(state, item, q)} onAnswer={(q, a) => onAnswer(item, q, a)} onDecline={onDecline} onRetry={() => onRetry(item)} />
         ),
       )}
       {state.pending.map((turn) => (
@@ -46,19 +48,34 @@ function UserView({ turn, pending }: { turn: UserTurn; pending?: boolean }) {
   );
 }
 
-function ReplyView({ reply, onOpen, open, onAnswer }: { reply: ReplyTurn; onOpen: (url: string) => void; open: (q: QuestionPart) => boolean; onAnswer: (q: QuestionPart, answer: string) => void }) {
+interface PartProps {
+  onOpen: (url: string) => void;
+  open: (q: QuestionPart) => boolean;
+  onAnswer: (q: QuestionPart, answer: string) => void;
+  onDecline: (q: QuestionPart) => void;
+}
+
+/// A reply, and Retry under it once it ended (as the chat's window offers it).
+function ReplyView({ reply, onRetry, ...props }: PartProps & { reply: ReplyTurn; onRetry: () => void }) {
   return (
     <div className={`reply ${reply.state}`}>
       {reply.parts.map((part, i) => (
-        <PartView key={i} part={part} onOpen={onOpen} open={open} onAnswer={onAnswer} />
+        <PartView key={i} part={part} {...props} />
       ))}
       {reply.state === "streaming" && <div className="typing" aria-label="Streaming" />}
       {reply.state === "stopped" && <p className="ended">{reply.interrupted ? "Interrupted: the model's process ended." : "Stopped."}</p>}
+      {canRetry(reply) && (
+        <div className="reply-actions">
+          <button type="button" className="retry" onClick={onRetry}>
+            Retry
+          </button>
+        </div>
+      )}
     </div>
   );
 }
 
-function PartView({ part, onOpen, open, onAnswer }: { part: Part; onOpen: (url: string) => void; open: (q: QuestionPart) => boolean; onAnswer: (q: QuestionPart, answer: string) => void }) {
+function PartView({ part, onOpen, open, onAnswer, onDecline }: PartProps & { part: Part }) {
   switch (part.kind) {
     case "text":
       return <Markdown text={part.text} onOpen={onOpen} />;
@@ -74,7 +91,7 @@ function PartView({ part, onOpen, open, onAnswer }: { part: Part; onOpen: (url: 
     case "diff":
       return <DiffView path={part.path} patch={part.patch} />;
     case "question":
-      return <QuestionView part={part} open={open(part)} onAnswer={(a) => onAnswer(part, a)} />;
+      return <QuestionView part={part} open={open(part)} onAnswer={(a) => onAnswer(part, a)} onDecline={() => onDecline(part)} />;
     case "error":
       return (
         <p className="error" role="alert">

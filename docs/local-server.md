@@ -81,8 +81,18 @@ connection closes (no chunked encoding).
 
 - On connect: a `MESSAGES_SNAPSHOT` of the conversation, its id (the `threadId` to send) in
   `metadata.ailfred.threadId`, without the runs still going; then the run going, from its `RUN_STARTED`; then everything live.
-- A new conversation (Cmd+N in the chat window, a message after Cmd+N in the side panel, one
-  picked from Recent) sends a new `MESSAGES_SNAPSHOT`.
+- A new conversation (Cmd+N in the chat window or the side panel, a `new_conversation`
+  command, one picked from Recent) sends a new `MESSAGES_SNAPSHOT` at once, empty for a new
+  one, under the `threadId` its first message will use. After Cmd+N in the side panel the old
+  conversation still shows there as it slides out, but clients are on the new one already;
+  picking the old one back from Recent sends its snapshot again. A new conversation is saved
+  only once it has a message.
+- The same conversation changed in place sends a fresh `MESSAGES_SNAPSHOT` too, then the runs
+  going from their `RUN_STARTED`, as a client joining gets: a question declined (it's
+  `"closed": true` there), or a Retry (from the chat or a client), whose snapshot leaves out
+  the retried message; its new run brings it back. A retried message that isn't the
+  conversation's last thus comes after the others until its run ends, when another snapshot
+  puts it in its place. A client never shows the old reply beside the new one.
 - Runs never interleave: pi's steered replies overlap, so a later run's events are held until
   the earlier run's `RUN_FINISHED` or `RUN_ERROR` is out. Use one replayer per run.
 - Each `RUN_STARTED` carries the user message it answers in `input.messages` (`{run}-user`), so
@@ -118,13 +128,33 @@ answer **202** `{"threadId","runId"}`; the run's events come on the stream.
     never taken apart), with `status: "resolved"` and
     `payload: {"answer": "…"}`; several picks travel as one string joined with `", "`. A
     partial resume answers the ones it names. An answered or closed question, a reply that
-    failed or was stopped, or an unknown `interruptId` gets **409**; `status: "cancelled"`
-    (declining) gets **409** for now. The answers go as one user message, as in the chat, so a
-    later snapshot shows them as the answering run's `{run}-user` message.
+    failed or was stopped, or an unknown `interruptId` gets **409**; a question named twice
+    **400**. The answers go as one user message, as in the chat, so a later snapshot shows them
+    as the answering run's `{run}-user` message.
+  - `status: "cancelled"` (no payload) declines a question: it closes and shows as "Not
+    answered" in the chat, and nothing goes to the model (its run ended with the question;
+    nothing waits for the answer). **202** `{"threadId","runId"}`, though no run starts (the
+    `runId` is used up all the same); clients get a fresh `MESSAGES_SNAPSHOT` with the
+    question `"closed": true`. A resume with both answers and declines sends the answers as
+    above (that run starts) and closes the declined ones. The same **409**s apply.
 - `stop`: with the conversation's `threadId` and the `runId` of the run streaming right now,
   it does what the chat's Stop does, else **409**: a run queued behind it, or one that ended,
   can't be stopped.
-- Malformed JSON gets **400**.
+- `new_conversation` `{"threadId"}`: with the conversation's `threadId` (else **409**), it
+  does what Cmd+N does: a reply streaming stops and what's queued is dropped (the old
+  conversation is saved so); in the chat window, the window empties; in the side panel, the
+  panel slides out if it shows (no input rises). **202** `{"threadId"}`, the new one's; its
+  empty `MESSAGES_SNAPSHOT` comes on the stream.
+- `retry` `{"threadId","runId","replyRunId"}`: does what the chat's Retry does to the reply
+  `replyRunId` names, as run `runId`. The chat offers Retry on every reply that ended (done,
+  stopped or failed: the footer's, or the error's), not on one streaming or queued, so
+  `replyRunId` names the reply by its run: the live run's `runId` (its `RUN_STARTED`), or the
+  snapshot's `{run}` (its user message's id without `-user`), matched whole. Retrying stops a
+  reply that streams. **202** `{"threadId","runId"}`, then a snapshot without the retried
+  message, then the new run. A wrong thread, a used `runId`, or a `replyRunId` naming no reply
+  that ended (one streaming or queued, one already retried, after Cmd+N) gets **409**.
+- Malformed JSON, and a command of a type this version doesn't know (a newer client's), get
+  **400** `{"error": "not a command: unknown variant …"}`.
 
 ## Known issue: computer control's server
 
@@ -139,10 +169,8 @@ still uses tiny_http 0.12 and has the two problems this server was rebuilt to av
 
 ## Not supported yet
 
-- Tools a client offers (`tools`, e.g. its own capture): T21.
-- Retry, a new conversation and picking a model as commands.
-- A window Retry shows as a new run answering the same message until the next
-  snapshot puts it in place.
+- Tools a client offers (`tools`, e.g. its own capture).
+- Picking a model as a command.
 
 ## Example
 

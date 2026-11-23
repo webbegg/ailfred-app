@@ -1086,6 +1086,7 @@ impl Host {
     fn chat_command(&mut self, command: Result<ailfred_protocol::command::Command, server::Answer>, asker: Asker) {
         let handle = self.handle.clone();
         let sends = matches!(command, Ok(ailfred_protocol::command::Command::Run(_)));
+        let starts_over = matches!(command, Ok(ailfred_protocol::command::Command::NewConversation { .. }));
         self.with_chat(move |c, tx| {
             if let Asker::Server(ticket) = &asker
                 && !ticket.take()
@@ -1107,10 +1108,23 @@ impl Host {
                 tx.scroll_to_bottom("messages");
                 tx.animated();
             }
-            if let (true, true, Some(handle)) = (taken, sends, handle) {
+            if let (true, true, Some(handle)) = (taken, sends, &handle) {
                 handle.update(|host, _| host.client_sent());
             }
+            if let (true, true, Some(handle)) = (taken, starts_over, &handle) {
+                handle.update(|host, _| host.client_started_over());
+            }
         });
+    }
+
+    /// A client started a new conversation, as Cmd+N (`Chat::command`): the side panel slides
+    /// out if it showed, and the input's shortcut opens the input, not the old conversation.
+    /// No input rises: the user didn't press anything here.
+    fn client_started_over(&mut self) {
+        self.chat_started = false;
+        if !self.place.windowed() {
+            self.hide_chat();
+        }
     }
 
     /// A client sent a message: the input's shortcut brings the conversation back.
