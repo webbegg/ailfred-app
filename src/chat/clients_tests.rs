@@ -360,6 +360,29 @@ fn with_pi_a_clients_message_steers_the_run_going_and_comes_out_after_it() {
 }
 
 #[test]
+fn steers_caught_by_a_stop_end_their_runs_once_pi_says_what_it_read() {
+    let (mut c, rx) = watched();
+    c.model = Some(model::PI.into());
+    let a = asked(&mut c, "a", vec![Event::Text("A".into())]);
+    send(&mut c, "c2", "b", &[]);
+    let b = last_token(&c);
+    send(&mut c, "c3", "d", &[]);
+    let d = last_token(&c);
+    let now = Instant::now();
+    c.stop(now);
+    // pi read "b" before the Stop reached it, and dropped "d": "d" goes again.
+    c.reply_event(b, Event::Taken, now);
+    c.reply_event(d, Event::Dropped, now);
+    let again = last_token(&c);
+    assert_ne!(again, d);
+    c.reply_event(again, Event::Text("D".into()), now);
+    c.reply_event(again, Event::Done, now);
+    let runs: Vec<String> = got(&rx).iter().filter(|e| e["type"] == "RUN_STARTED" || e["type"] == "RUN_FINISHED").map(|e| format!("{} {}", e["type"].as_str().unwrap(), e["runId"].as_str().unwrap())).collect();
+    let ra = run_of(&c, a);
+    assert_eq!(runs, [format!("RUN_STARTED {ra}"), format!("RUN_FINISHED {ra}"), "RUN_STARTED c2".into(), "RUN_FINISHED c2".into(), "RUN_STARTED c3".into(), "RUN_FINISHED c3".into()]);
+}
+
+#[test]
 fn a_resume_answers_the_open_question_as_the_window_does() {
     let (mut c, _rx) = watched();
     let token = asked(&mut c, "pick", vec![ask("Which?"), Event::Done]);

@@ -347,7 +347,14 @@ impl crate::model::Model for Pi {
     fn stop(&mut self) {
         match &mut *self.state.lock().unwrap_or_else(|e| e.into_inner()) {
             PiState::Up(engine) => engine.stop(),
-            PiState::Starting(waiting) => waiting.clear(),
+            PiState::Starting(waiting) => {
+                // pi never had them; a steered one goes again on its own (the others stopped).
+                for (prompt, sink) in waiting.drain(..) {
+                    if prompt.steer {
+                        sink(crate::reply::Event::Dropped);
+                    }
+                }
+            }
             PiState::Failed(_) => {}
         }
     }
@@ -777,13 +784,17 @@ process.stdout.write(JSON.stringify(out));
         pi.became(crate::pi::PiEngine::spawn(fake).map_err(|e| e.to_string()));
         assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)), Ok(Item::Event(Event::Text("Up".into()))));
 
-        // Stopped while it starts: nothing goes; failing to start fails the one waiting.
+        // Stopped while it starts: nothing goes (a steer goes again as a message of its own);
+        // failing to start fails the one waiting.
         let mut pi = Pi::with(PiState::Starting(Vec::new()));
         let (s, rx) = sink();
         pi.send(pi_request("never"), s);
+        let (s, steered) = sink();
+        pi.send(crate::model::Request { steer: true, ..pi_request("and this") }, s);
         pi.stop();
         pi.became(Err("no node".into()));
         assert!(rx.try_recv().is_err());
+        assert_eq!(steered.try_iter().collect::<Vec<_>>(), [Item::Event(Event::Dropped)]);
         let mut pi = Pi::with(PiState::Starting(Vec::new()));
         let (s, rx) = sink();
         pi.send(pi_request("hi"), s);

@@ -475,7 +475,9 @@ impl Chat {
         self.next_token += 1;
         let token = self.next_token;
         let model = self.model();
-        let steer = model == model::PI && self.running_model == model::PI && !by_mock(false, &model, mock_model::requested());
+        // While pi still has to say what it read of a stopped run, there's no run to steer: it
+        // waits its turn behind those.
+        let steer = model == model::PI && self.running_model == model::PI && !by_mock(false, &model, mock_model::requested()) && self.cut.is_empty();
         let mut reply = Reply::new(id, prompt);
         (reply.token, reply.state, reply.steered) = (token, reply::State::Queued, steer);
         self.replace_reply(reply);
@@ -601,8 +603,9 @@ impl Chat {
     }
 
     /// Stop: the reply streaming keeps what came, its run (the process behind it) ends, and the
-    /// next message queued goes at once (pi drops the ones it hadn't read: they go again). The
-    /// conversation is saved with it.
+    /// next message queued goes at once. One steered into pi's run waits for pi to say whether
+    /// it read it (it stops with the run) or not (it goes again). The conversation is saved
+    /// with it.
     pub fn stop(&mut self, now: Instant) {
         if self.stop_replies(now) {
             self.save();
@@ -615,6 +618,7 @@ impl Chat {
     fn end_replies(&mut self, now: Instant) {
         let queued = self.replies.len();
         self.replies.retain(|r| r.state != reply::State::Queued);
+        self.cut.clear();
         if self.stop_replies(now) || self.replies.len() != queued {
             self.save();
         }

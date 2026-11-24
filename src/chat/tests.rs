@@ -321,6 +321,23 @@ fn a_steer_pi_read_just_before_stop_is_stopped_with_the_run_and_not_sent_again()
 }
 
 #[test]
+fn a_message_sent_while_pi_says_what_it_read_goes_after_the_ones_it_dropped() {
+    let mut c = Chat::new(None);
+    c.model = Some(crate::model::PI.into());
+    let a = sent(&mut c, "one");
+    c.ask(a);
+    let b = sent(&mut c, "two");
+    let tb = c.ask(b).unwrap();
+    c.stop(Instant::now());
+    let x = sent(&mut c, "three");
+    c.ask(x);
+    assert_eq!(c.requests.len(), 2, "no run to steer: it waits its turn");
+    c.reply_event(tb, Event::Dropped, Instant::now());
+    assert_eq!((state(&c, b), state(&c, x)), (Some(reply::State::Streaming), Some(reply::State::Queued)), "in the order they were sent");
+    assert_eq!(c.requests.last().unwrap().1.text, "two");
+}
+
+#[test]
 fn a_steer_pi_dropped_for_a_retry_goes_again_after_it() {
     let mut c = Chat::new(None);
     c.model = Some(crate::model::PI.into());

@@ -406,8 +406,9 @@ impl Core {
         if let Some((_, sink)) = self.queued.take() {
             sink(Event::Fail(STOPPED.into()));
         }
+        // One its run's Stop caught goes again: the pi that comes back has a session of its own.
         for steer in self.steers.drain(..) {
-            (steer.sink)(Event::Fail(STOPPED.into()));
+            (steer.sink)(if steer.stopped { Event::Dropped } else { Event::Fail(STOPPED.into()) });
         }
         for (_, sink) in self.later.drain(..) {
             sink(Event::Fail(STOPPED.into()));
@@ -441,7 +442,9 @@ impl Core {
             }
         }
         let mut out = Vec::new();
-        if std::mem::take(&mut self.renew) {
+        // A stopped steer pi started runs until its abort settles: the new session waits for it.
+        let aborts_next = started.as_ref().is_some_and(|s| s.stopped);
+        if !aborts_next && std::mem::take(&mut self.renew) {
             out.push(self.command(json!({"type": "new_session"})));
             self.seen = false;
         }
@@ -1013,7 +1016,7 @@ mod tests {
     }
 
     #[test]
-    fn messages_waiting_for_an_abort_are_dropped_when_stop_comes_again() {
+    fn messages_waiting_for_an_abort_are_dropped_when_a_retry_stops_the_run_again() {
         let mut core = Core::default();
         let (a, _a_rx) = channel();
         core.send(prompt("one"), a);
@@ -1023,8 +1026,69 @@ mod tests {
         core.send(steer("two"), b);
         let (c, c_rx) = channel();
         core.send(steer("three"), c);
-        core.stop();
+        let (r, r_rx) = channel();
+        core.send(prompt("one again"), r);
         assert_eq!((b_rx.try_iter().collect::<Vec<_>>(), c_rx.try_iter().collect::<Vec<_>>()), (vec![Event::Dropped], vec![Event::Dropped]));
+        assert_eq!(types(&feed(&mut core, &[r#"{"type":"agent_settled","aborted":true}"#])), ["prompt"], "the retry goes once pi stopped");
+        assert_eq!(r_rx.try_iter().count(), 0);
+    }
+
+    #[test]
+    fn a_stopped_steer_pi_starts_as_a_run_of_its_own_is_aborted_too() {
+        // Started after the run had settled.
+        let mut core = Core::default();
+        let (a, _a_rx) = channel();
+        core.send(prompt("one"), a);
+        feed(&mut core, &[STARTED]);
+        let (b, b_rx) = channel();
+        let id = core.send(steer("two"), b)[0]["id"].clone();
+        core.stop();
+        feed(&mut core, &[r#"{"type":"agent_settled","aborted":true}"#]);
+        let started = format!(r#"{{"type":"response","id":{id},"command":"prompt","success":true,"data":{{"disposition":"started"}}}}"#);
+        assert_eq!(types(&feed(&mut core, &[&started])), ["abort"]);
+        feed(&mut core, &[ASSISTANT, TEXT_START, &text("late"), END_OK, SETTLED]);
+        assert_eq!(b_rx.try_iter().collect::<Vec<_>>(), [Event::Taken], "pi has it: it stops with the run");
+
+        // Started as the run settled, with Cmd+N: the new session waits for that abort too.
+        let (a, _a_rx) = channel();
+        core.send(prompt("three"), a);
+        feed(&mut core, &[STARTED]);
+        let (c, c_rx) = channel();
+        let id = core.send(steer("four"), c)[0]["id"].clone();
+        let started = format!(r#"{{"type":"response","id":{id},"command":"prompt","success":true,"data":{{"disposition":"started"}}}}"#);
+        feed(&mut core, &[&started]);
+        core.new_conversation();
+        assert_eq!(types(&feed(&mut core, &[r#"{"type":"agent_settled","aborted":true}"#])), ["abort"]);
+        assert_eq!(c_rx.try_iter().collect::<Vec<_>>(), [Event::Taken]);
+        assert_eq!(types(&feed(&mut core, &[SETTLED])), ["new_session"]);
+    }
+
+    #[test]
+    fn a_stopped_steer_pi_answers_once_nothing_runs_goes_again() {
+        let mut core = Core::default();
+        let (a, _a_rx) = channel();
+        core.send(prompt("one"), a);
+        feed(&mut core, &[STARTED]);
+        let (b, b_rx) = channel();
+        let id = core.send(steer("two"), b)[0]["id"].clone();
+        core.stop();
+        feed(&mut core, &[r#"{"type":"agent_settled","aborted":true}"#]);
+        assert_eq!(b_rx.try_iter().count(), 0, "pi hasn't answered it yet");
+        feed(&mut core, &[&queued_response(&id)]);
+        assert_eq!(b_rx.try_iter().collect::<Vec<_>>(), [Event::Dropped]);
+    }
+
+    #[test]
+    fn steers_a_stop_caught_go_again_when_pi_ends() {
+        let mut core = Core::default();
+        let (a, _a_rx) = channel();
+        core.send(prompt("one"), a);
+        feed(&mut core, &[STARTED]);
+        let (b, b_rx) = channel();
+        core.send(steer("two"), b);
+        core.stop();
+        core.exited();
+        assert_eq!(b_rx.try_iter().collect::<Vec<_>>(), [Event::Dropped]);
     }
 
     #[test]
