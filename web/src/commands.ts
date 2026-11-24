@@ -37,9 +37,25 @@ export function answerCommand(threadId: string, runId: string, interruptId: stri
   return { type: "run", threadId, runId, protocolVersion: PROTOCOL_VERSION, messages: [], resume: [{ interruptId, status: "resolved", payload: { answer } }] };
 }
 
+/// Run `runId` of thread `threadId`: the user declines question `interruptId`. It closes, and
+/// nothing goes to the model.
+export function declineCommand(threadId: string, runId: string, interruptId: string): Command {
+  return { type: "run", threadId, runId, protocolVersion: PROTOCOL_VERSION, messages: [], resume: [{ interruptId, status: "cancelled" }] };
+}
+
 /// Stop run `runId` of thread `threadId`, the one streaming.
 export function stopCommand(threadId: string, runId: string): Command {
   return { type: "stop", threadId, runId };
+}
+
+/// A new conversation in place of thread `threadId`'s, as Cmd+N in the chat.
+export function newConversationCommand(threadId: string): Command {
+  return { type: "new_conversation", threadId };
+}
+
+/// Run `runId` of thread `threadId` retries the reply of run `replyRunId`, as the chat's Retry.
+export function retryCommand(threadId: string, runId: string, replyRunId: string): Command {
+  return { type: "retry", threadId, runId, replyRunId };
 }
 
 /// A question's answer (`Reply::answer`): what was written in its Other field, else the options

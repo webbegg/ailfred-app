@@ -127,6 +127,9 @@ fn commands() -> Vec<Command> {
         command::send(THREAD, "run-image", &[], "What's in this screenshot?", &[PNG]),
         command::answer(THREAD, "run-answered", &asked, "run-question-ask-1", "src/a.rs, src/c.rs"),
         Command::Stop { thread_id: THREAD.into(), run_id: "run-stop".into() },
+        command::decline(THREAD, "run-declined", &asked, "run-question-ask-1"),
+        command::new_conversation(THREAD),
+        command::retry(THREAD, "run-retry", QUESTION_RUN),
     ]
 }
 
@@ -283,13 +286,13 @@ fn thinking_ended_by_a_taken_replays_as_two_thinkings_with_their_times() {
     assert_round_trips(vec![(0, think("a")), (150, ask("Which?")), (200, think("b")), (450, Kind::Event(Event::Done))]);
 }
 
-/// The runs in `commands.jsonl`: the image run, then the answering run.
+/// The runs in `commands.jsonl`: the image run, the answering run, then the declining run.
 fn runs() -> Vec<RunAgentInput> {
     fixture("commands.jsonl")
         .iter()
         .filter_map(|line| match serde_json::from_str(line).unwrap() {
             Command::Run(input) => Some(*input),
-            Command::Stop { .. } => None,
+            _ => None,
         })
         .collect()
 }
@@ -298,7 +301,10 @@ fn runs() -> Vec<RunAgentInput> {
 fn the_answering_run_carries_the_history_a_snapshot_of_its_conversation_holds() {
     let reply = question_reply();
     let turns = [Turn { run: QUESTION_RUN, text: QUESTION_TEXT, pngs: &[], reply: Some(&reply) }];
-    let [image, answering] = runs().try_into().expect("two runs");
+    let [image, answering, declining] = runs().try_into().expect("three runs");
+    assert_eq!(declining.messages, answering.messages, "a decline carries the same history");
+    let declined = declining.resume.as_deref().expect("its decline");
+    assert_eq!((declined[0].interrupt_id.as_str(), declined[0].status, declined[0].payload.as_ref()), ("run-question-ask-1", agui::ResumeStatus::Cancelled, None));
     let agui::Event::MessagesSnapshot { messages: snapshot, .. } = messages_snapshot(&turns, T0) else { panic!("a snapshot") };
     assert_eq!(answering.messages, history(&turns), "its complete history, under the snapshot's ids");
     assert_eq!(history(&turns), snapshot);

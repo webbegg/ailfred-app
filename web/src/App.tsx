@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useReducer, useRef, useState } from "react";
-import { answerCommand, newRunId, sendCommand, stopCommand, type Image } from "./commands";
+import { answerCommand, declineCommand, newConversationCommand, newRunId, retryCommand, sendCommand, stopCommand, type Image } from "./commands";
 import { ConversationView } from "./components/Conversation";
 import { Composer } from "./components/Composer";
-import type { Answer } from "./protocol";
+import { Header } from "./components/Header";
+import type { Answer, Command } from "./protocol";
 import { applyAll, empty, local, type Conversation, type Local, type QuestionPart, type ReplyTurn } from "./state";
 import type { Transport } from "./transport";
 
@@ -83,12 +84,38 @@ export function App({ transport }: { transport: Transport }) {
     [state.threadId, transport],
   );
 
+  // The commands whose effect comes back on the stream (a snapshot, or a run): only a refusal
+  // shows here.
+  const command = useCallback(
+    async (build: (threadId: string) => Command) => {
+      if (state.threadId === null) return;
+      const answer = await transport.send(build(state.threadId));
+      setError(answer.status === 202 ? null : refusal(answer));
+    },
+    [state.threadId, transport],
+  );
+
+  const onDecline = useCallback((question: QuestionPart) => command((t) => declineCommand(t, newRunId(), question.interruptId)), [command]);
+  const onRetry = useCallback(
+    (reply: ReplyTurn) => {
+      stick.current = true;
+      return command((t) => retryCommand(t, newRunId(), reply.runId));
+    },
+    [command],
+  );
+  const onNew = useCallback(() => command(newConversationCommand), [command]);
+
   const onOpen = useCallback((url: string) => transport.open(url), [transport]);
 
   return (
     <div className="app">
+      <Header connected={state.threadId !== null} onNew={onNew} />
       <div className="scroller" ref={scroller} onScroll={onScroll}>
-        {state.items.length === 0 && state.pending.length === 0 ? <p className="placeholder">{state.threadId === null ? "Connecting…" : "Ask Ailfred anything."}</p> : <ConversationView state={state} onOpen={onOpen} onAnswer={onAnswer} />}
+        {state.items.length === 0 && state.pending.length === 0 ? (
+          <p className="placeholder">{state.threadId === null ? "Connecting…" : "Ask Ailfred anything."}</p>
+        ) : (
+          <ConversationView state={state} onOpen={onOpen} onAnswer={onAnswer} onDecline={onDecline} onRetry={onRetry} />
+        )}
       </div>
       <Composer streaming={state.run !== null} error={error} onSend={onSend} onStop={onStop} />
     </div>

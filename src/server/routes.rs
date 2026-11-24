@@ -64,6 +64,11 @@ impl Answer {
     pub fn accepted(thread: &str, run: &str) -> Answer {
         Answer { status: 202, body: json!({ "threadId": thread, "runId": run }) }
     }
+
+    /// Taken (202) with no run: a new conversation, `thread`, whose snapshot comes on the stream.
+    pub fn new_thread(thread: &str) -> Answer {
+        Answer { status: 202, body: json!({ "threadId": thread }) }
+    }
 }
 
 /// What the server asks of the app (its chat, on the main thread).

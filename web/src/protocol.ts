@@ -153,7 +153,13 @@ export function parseEvent(raw: unknown): Event | null {
 }
 
 /// A command: exactly a `POST /v1/commands` body (`schema/command.schema.json`).
-export type Command = ({ type: "run" } & RunAgentInput) | { type: "stop"; threadId: string; runId: string };
+export type Command =
+  | ({ type: "run" } & RunAgentInput)
+  | { type: "stop"; threadId: string; runId: string }
+  /// A new conversation in place of `threadId`'s; answered with the new `threadId`.
+  | { type: "new_conversation"; threadId: string }
+  /// Retries the reply of run `replyRunId` (its live run's id, or a snapshot's) as run `runId`.
+  | { type: "retry"; threadId: string; runId: string; replyRunId: string };
 
 /// The app's answer to a command: the HTTP status `POST /v1/commands` would give, and its body.
 export interface Answer {

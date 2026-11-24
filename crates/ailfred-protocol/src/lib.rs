@@ -36,7 +36,10 @@
 //! its text as the next message), so a later snapshot shows it as the answering run's `user`
 //! message `{run}-user`: that's how the two line up. The server keeps its own history (a run's
 //! earlier messages aren't replayed), a partial resume answers the questions it names, and
-//! `status: cancelled` is refused for now (`docs/local-server.md`).
+//! `status: cancelled` ([`decline_resume`](command::decline_resume)) closes a question, nothing
+//! sent to the model; clients learn it from a fresh `MESSAGES_SNAPSHOT` where it's
+//! `"closed": true`. A new conversation and a Retry are commands of Ailfred's own
+//! ([`command::new_conversation`], [`command::retry`]; `docs/local-server.md`).
 //!
 //! ## Saved replies and snapshots
 //!
@@ -77,7 +80,9 @@
 //!   mints them (`{thread}-{token}-{n}`) and refuses a client's `runId` already used (409).
 //! - Retry reuses a message's saved run id (the app's `history::run_id`): the server mints a
 //!   fresh run id per live run, so a snapshot's (saved) run ids differ from the live ones, and a
-//!   client replaces its state on each `MESSAGES_SNAPSHOT` rather than merging by id.
+//!   client replaces its state on each `MESSAGES_SNAPSHOT` rather than merging by id. A Retry
+//!   names its reply by either id; on any Retry the server sends a snapshot without the retried
+//!   message before its new run.
 //! - A step's live `TOOL_CALL_RESULT` is cut to its last [`saved::OUTPUT_MAX`] bytes, as saved.
 //! - A second `StepEnd` for a step that ended is ignored; the same core step id twice in one run
 //!   isn't supported.

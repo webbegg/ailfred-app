@@ -82,6 +82,22 @@ fn a_new_conversation_sends_its_snapshot_and_starts_its_run_ids_afresh() {
 }
 
 #[test]
+fn going_back_to_the_thread_just_left_keeps_its_run_ids_and_names_but_one_left_before_is_forgotten() {
+    let (mut hub, _rx) = watched();
+    hub.reply(1, 10, "a", &[], Some("ra".into()));
+    hub.event(1, &Event::Done, 1);
+    hub.conversation("t2", &empty());
+    assert!(!hub.seen("ra") && hub.run_of(1).is_none(), "another thread");
+    hub.conversation("t", &empty());
+    assert!(hub.seen("ra"), "its run ids stay used");
+    assert_eq!(hub.run_of(1), Some("ra"), "and its replies keep their run names");
+    hub.conversation("t2", &empty());
+    hub.conversation("t3", &empty());
+    hub.conversation("t", &empty());
+    assert!(!hub.seen("ra") && hub.run_of(1).is_none(), "only the thread and the one just left are kept");
+}
+
+#[test]
 fn a_client_joining_mid_run_gets_the_run_going_from_its_start_then_what_comes() {
     let (mut hub, early) = watched();
     hub.reply(1, 10, "a", &[], Some("ra".into()));

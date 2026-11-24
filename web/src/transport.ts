@@ -140,6 +140,12 @@ export class FixtureTransport implements Transport {
       this.emit({ type: "RUN_FINISHED", threadId: this.threadId, runId: command.runId, outcome: { type: "cancelled" } });
       return { status: 202, body: { threadId: this.threadId, runId: command.runId } };
     }
+    if (command.type === "new_conversation") {
+      this.queue = [];
+      this.emit({ type: "MESSAGES_SNAPSHOT", messages: [], metadata: { ailfred: { threadId: this.threadId } } });
+      return { status: 202, body: { threadId: this.threadId } };
+    }
+    if (command.type === "retry" || command.resume?.some((r) => r.status === "cancelled")) return { status: 409, body: { error: "the fixture transport has no conversation to change" } };
     const runId = command.runId;
     const said = command.resume?.length ? `You answered: ${JSON.stringify(command.resume[0].payload)}` : "You said that. This is the fixture transport: no model here.";
     const user = command.messages.at(-1) ?? { role: "user", id: `${runId}-user`, content: said };

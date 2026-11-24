@@ -536,6 +536,48 @@
         "runId"
       ],
       "type": "object"
+    },
+    {
+      "description": "The user starts a new conversation, as Cmd+N in the chat does; `thread_id` is the one\ncurrent now. Answered with the new one's `threadId`, whose empty `MESSAGES_SNAPSHOT`\nevery client gets.",
+      "properties": {
+        "threadId": {
+          "type": "string"
+        },
+        "type": {
+          "const": "new_conversation",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "threadId"
+      ],
+      "type": "object"
+    },
+    {
+      "description": "The user retries a reply, as the chat's Retry does, as run `run_id` (new in the thread):\n`reply_run_id` names the reply by its run, as the live run (`RUN_STARTED`) or a snapshot\n(its user message `{run}-user`) gave it, matched whole.",
+      "properties": {
+        "replyRunId": {
+          "type": "string"
+        },
+        "runId": {
+          "type": "string"
+        },
+        "threadId": {
+          "type": "string"
+        },
+        "type": {
+          "const": "retry",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "threadId",
+        "runId",
+        "replyRunId"
+      ],
+      "type": "object"
     }
   ],
   "title": "Command"

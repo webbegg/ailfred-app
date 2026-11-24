@@ -231,12 +231,42 @@ fn the_web_views_commands_get_what_post_v1_commands_answers_for_the_same_body() 
         (json(Command::Stop { thread_id: thread.clone(), run_id: "c1".into() }), 202),
         (json(Command::Stop { thread_id: thread.clone(), run_id: "c1".into() }), 409),
     ];
-    for (body, status) in cases {
-        let (bridged, served) = (by_bridge(&mut web, &body), by_http(&http, &body));
-        assert_eq!(bridged, served, "{body}");
-        assert_eq!(bridged.status, status, "{body}: {bridged:?}");
+    let same = |web: &mut Chat, cases: Vec<(String, u16)>| {
+        for (body, status) in cases {
+            let (bridged, served) = (by_bridge(web, &body), by_http(&http, &body));
+            assert_eq!(bridged, served, "{body}");
+            assert_eq!(bridged.status, status, "{body}: {bridged:?}");
+        }
+    };
+    same(&mut web, cases.to_vec());
+    {
+        let twin = http.0.lock().unwrap();
+        assert_eq!((web.messages.len(), twin.messages.len()), (1, 1), "the same message reached each chat");
+        assert_eq!(web.replies[0].state, twin.replies[0].state, "and the same Stop");
     }
+    // Retry the stopped reply, which then asks; decline its question.
+    let ask = Event::Ask { prompt: "Which?".into(), options: vec!["A".into()], multi: false };
+    let decline = |run: &str, interrupt: &str| json(command::decline(&thread, run, &[], interrupt));
+    same(&mut web, vec![
+        (json(command::retry(&thread, "c4", "nope")), 409),
+        (json(command::retry(&thread, "c4", "c1")), 202),
+        (json(command::retry(&thread, "c5", "c1")), 409),
+        (json(command::retry(&thread, "c4", "c4")), 409),
+        (r#"{"type":"retry","threadId":"t"}"#.to_owned(), 400),
+        (decline("c5", "c4-ask-1"), 409),
+    ]);
+    for chat in [&mut web, &mut *http.0.lock().unwrap()] {
+        let token = chat.replies[0].token;
+        chat.reply_event(token, ask.clone(), Instant::now());
+        chat.reply_event(token, Event::Done, Instant::now());
+    }
+    same(&mut web, vec![(decline("c5", "c4-ask-1"), 202), (decline("c6", "c4-ask-1"), 409), (json(command::new_conversation("other")), 409)]);
+    // A new conversation: the same answer but for the fresh thread's id, each chat's own.
+    let body = json(command::new_conversation(&thread));
+    let (bridged, served) = (by_bridge(&mut web, &body), by_http(&http, &body));
+    assert_eq!((bridged.status, served.status), (202, 202));
     let twin = http.0.into_inner().unwrap();
-    assert_eq!((web.messages.len(), twin.messages.len()), (1, 1), "the same message reached each chat");
-    assert_eq!(web.replies[0].state, twin.replies[0].state, "and the same Stop");
+    assert_eq!(bridged.body, serde_json::json!({ "threadId": web.thread() }));
+    assert_eq!(served.body, serde_json::json!({ "threadId": twin.thread() }));
+    assert!(web.thread() != thread && twin.thread() != thread);
 }

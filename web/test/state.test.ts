@@ -141,6 +141,20 @@ describe("the run going", () => {
     expect(refused.pending).toEqual([]);
   });
 
+  it("a message the page sent stays through a snapshot of its conversation that hasn't it yet", () => {
+    const snap = (threadId: string, messages: { role: "user"; id: string; content: string }[]) => ({ type: "MESSAGES_SNAPSHOT", metadata: { ailfred: { threadId } }, messages });
+    const hi = { kind: "user", id: "web-1-user", text: "Hi", images: [] };
+    let state = apply(empty(), snap("t", []));
+    state = local(state, { type: "sent", runId: "web-1", text: "Hi", images: [] });
+    state = apply(state, snap("t", [{ role: "user", id: "t-0-user", content: "Earlier" }]));
+    expect(state.pending).toEqual([hi]);
+    expect(state.items.map((i) => i.kind === "user" && i.text)).toEqual(["Earlier"]);
+    expect(apply(state, snap("t", [{ role: "user", id: "web-1-user", content: "Hi" }])).pending).toEqual([]);
+    expect(apply(state, { type: "RUN_STARTED", threadId: "t", runId: "web-1" }).pending).toEqual([]);
+    // Another conversation: it was sent to the old one.
+    expect(apply(state, snap("t2", [])).pending).toEqual([]);
+  });
+
   it("a question another producer only asks at the end shows once", () => {
     const events = [
       { type: "RUN_STARTED", threadId: "t", runId: "r" },
@@ -233,6 +247,41 @@ describe("a messages snapshot", () => {
     ]);
     expect(second.state).toBe("failed");
     expect(second.parts.map((p) => (p.kind === "question" ? [p.interruptId, p.closed] : p.kind))).toEqual([["c-1-ask-1", true], ["c-1-ask-2", true], "error"]);
+  });
+
+  it("after a decline, the snapshot replaces the state with the question closed", () => {
+    const asked = replay("question");
+    const reply = only(asked);
+    const [question] = partsOf(reply, "question");
+    expect(canAnswer(asked, reply, question)).toBe(true);
+    const declined = apply(asked, {
+      type: "MESSAGES_SNAPSHOT",
+      metadata: { ailfred: { threadId: "thread-1" } },
+      messages: [
+        { role: "user", id: "t-0-user", content: "Tidy up" },
+        { role: "activity", id: "t-0-ask-1", activityType: "ailfred:ask", content: { interruptId: "t-0-ask-1", message: question.prompt, multi: true, options: question.options, closed: true } },
+      ],
+    });
+    const after = only(declined);
+    const [closed] = partsOf(after, "question");
+    expect(after.runId).toBe("t-0");
+    expect(closed.closed).toBe(true);
+    expect(canAnswer(declined, after, closed)).toBe(false);
+  });
+
+  it("after a new conversation, the empty snapshot leaves nothing and the new thread", () => {
+    const before = local(replay("answer", "steps"), { type: "sent", runId: "web-1", text: "x", images: [] });
+    const fresh = apply(before, { type: "MESSAGES_SNAPSHOT", metadata: { ailfred: { threadId: "thread-new" } }, messages: [] });
+    expect(fresh).toEqual({ ...empty(), threadId: "thread-new" });
+  });
+
+  it("after a retry, the snapshot without the retried message, then its new run, show one reply to it", () => {
+    const done = apply(empty(), snapshot);
+    const retried = applyAll(done, [
+      { ...snapshot, messages: snapshot.messages.slice(0, 8) },
+      { type: "RUN_STARTED", threadId: "thread-2", runId: "web-r", input: { threadId: "thread-2", runId: "web-r", messages: [{ role: "user", id: "web-r-user", content: "And this?" }] } },
+    ]);
+    expect(retried.items.map((i) => (i.kind === "user" ? i.text : i.runId))).toEqual(["Fix it", "c-0", "And this?", "web-r"]);
   });
 
   it("the run going after a snapshot streams on top of it", () => {

@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
 import schemaText from "../../crates/ailfred-protocol/schema/command.schema.json?raw";
-import { answerCommand, answerText, newRunId, sendCommand, stopCommand } from "../src/commands";
+import { answerCommand, answerText, declineCommand, newConversationCommand, newRunId, retryCommand, sendCommand, stopCommand } from "../src/commands";
 import type { Command } from "../src/protocol";
 import { fixture } from "./fixtures";
 
-const [image, answered, stop] = fixture("commands") as Command[];
+const [image, answered, stop, declined, newConversation, retry] = fixture("commands") as Command[];
 
 describe("the commands the page builds", () => {
   it("a message with an image is the fixture's run", () => {
@@ -33,6 +33,15 @@ describe("the commands the page builds", () => {
     expect(stopCommand("thread-1", "run-stop")).toEqual(stop);
   });
 
+  it("a decline resumes the question cancelled, without a payload, as the fixture does", () => {
+    expect(declineCommand("thread-1", "run-declined", "run-question-ask-1")).toEqual({ ...declined, messages: [] });
+  });
+
+  it("a new conversation and a retry are the fixture's", () => {
+    expect(newConversationCommand("thread-1")).toEqual(newConversation);
+    expect(retryCommand("thread-1", "run-retry", "run-question")).toEqual(retry);
+  });
+
   it("a fresh run id is web- and at most 128 of the characters the server takes", () => {
     const ids = new Set(Array.from({ length: 50 }, newRunId));
     expect(ids.size).toBe(50);
@@ -50,8 +59,10 @@ describe("the command schema's required fields", () => {
 
   function check(command: Command) {
     const errors: string[] = [];
-    if (command.type === "stop") {
-      errors.push(...missing(variant(schema, "type", "stop").required, command));
+    if (command.type !== "run") {
+      const of = variant(schema, "type", command.type);
+      if (!of) return [`no ${command.type} in the schema`];
+      errors.push(...missing(of.required, command));
     } else {
       const run = schema.oneOf!.find((v) => v.allOf)!;
       errors.push(...missing(def(run.allOf![0].$ref!).required, command), ...missing(run.allOf![1].required, command));
@@ -73,6 +84,11 @@ describe("the command schema's required fields", () => {
     expect(check(sendCommand("t", "r", "hi", [{ mimeType: "image/png", data: "AAAA" }]))).toEqual([]);
     expect(check(answerCommand("t", "r", "i", "a"))).toEqual([]);
     expect(check(stopCommand("t", "r"))).toEqual([]);
+    expect(check(declineCommand("t", "r", "i"))).toEqual([]);
+    expect(check(newConversationCommand("t"))).toEqual([]);
+    expect(check(retryCommand("t", "r", "r0"))).toEqual([]);
     expect(check({ type: "stop", runId: "r" } as Command)).toEqual(["threadId"]);
+    expect(check({ type: "retry", threadId: "t", runId: "r" } as Command)).toEqual(["replyRunId"]);
+    expect(check({ type: "jump", threadId: "t" } as unknown as Command)).toEqual(["no jump in the schema"]);
   });
 });
