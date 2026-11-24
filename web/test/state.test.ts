@@ -141,6 +141,20 @@ describe("the run going", () => {
     expect(refused.pending).toEqual([]);
   });
 
+  it("a message the page sent stays through a snapshot of its conversation that hasn't it yet", () => {
+    const snap = (threadId: string, messages: { role: "user"; id: string; content: string }[]) => ({ type: "MESSAGES_SNAPSHOT", metadata: { ailfred: { threadId } }, messages });
+    const hi = { kind: "user", id: "web-1-user", text: "Hi", images: [] };
+    let state = apply(empty(), snap("t", []));
+    state = local(state, { type: "sent", runId: "web-1", text: "Hi", images: [] });
+    state = apply(state, snap("t", [{ role: "user", id: "t-0-user", content: "Earlier" }]));
+    expect(state.pending).toEqual([hi]);
+    expect(state.items.map((i) => i.kind === "user" && i.text)).toEqual(["Earlier"]);
+    expect(apply(state, snap("t", [{ role: "user", id: "web-1-user", content: "Hi" }])).pending).toEqual([]);
+    expect(apply(state, { type: "RUN_STARTED", threadId: "t", runId: "web-1" }).pending).toEqual([]);
+    // Another conversation: it was sent to the old one.
+    expect(apply(state, snap("t2", [])).pending).toEqual([]);
+  });
+
   it("a question another producer only asks at the end shows once", () => {
     const events = [
       { type: "RUN_STARTED", threadId: "t", runId: "r" },

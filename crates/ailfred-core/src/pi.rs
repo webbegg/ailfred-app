@@ -26,6 +26,8 @@ pub struct Prompt {
     pub pngs: Vec<Arc<Vec<u8>>>,
     /// The user's answer to pi's question (a dialog), not a new message.
     pub answer: bool,
+    /// With `answer`: the user declined the question, as when they dismiss the dialog.
+    pub decline: bool,
     /// Sent while pi works: it goes into the run going (`steer`), its reply starting where pi
     /// reads it; a stop drops it.
     pub steer: bool,
@@ -152,12 +154,21 @@ impl Core {
             sink(Event::Fail("The assistant is starting again. Try again in a moment.".into()));
             return Vec::new();
         }
+        if prompt.decline && self.dialog.is_none() {
+            // Nothing to dismiss (pi started again, or the dialog went): nothing to say.
+            sink(Event::Done);
+            return Vec::new();
+        }
         if prompt.answer
             && let Some(dialog) = self.dialog.take()
         {
+            // pi goes on from its dialog: what it says next is this reply.
             self.sink = Some(sink);
             let mut response = json!({"type": "extension_ui_response", "id": dialog.id});
-            if dialog.confirm {
+            if prompt.decline {
+                // As when the user dismisses the dialog.
+                response["cancelled"] = json!(true);
+            } else if dialog.confirm {
                 response["confirmed"] = json!(prompt.text.trim().eq_ignore_ascii_case("yes"));
             } else {
                 response["value"] = json!(prompt.text);
@@ -1160,6 +1171,30 @@ mod tests {
         let ok = text("Done it.");
         feed(&mut core, &[ASSISTANT, TEXT_START, &ok, END_OK, SETTLED]);
         assert_eq!(rx.try_iter().collect::<Vec<_>>(), [Event::Text("Done it.".into()), Event::Done]);
+    }
+
+    #[test]
+    fn a_declined_dialog_is_dismissed_and_what_pi_says_next_goes_to_the_declines_reply() {
+        let mut core = Core::default();
+        let (sink, asked) = channel();
+        core.send(prompt("hi"), sink);
+        feed(&mut core, &[STARTED, r#"{"type":"extension_ui_request","id":"u4","method":"select","title":"Allow it?","options":["Allow","Block"]}"#]);
+        assert_eq!(asked.try_iter().last(), Some(Event::Done));
+        let (sink, rx) = channel();
+        let wrote = core.send(Prompt { decline: true, ..answer("Declined.") }, sink);
+        assert_eq!(wrote, [json!({"type":"extension_ui_response","id":"u4","cancelled":true})], "as when the user dismisses it");
+        let ok = text("Skipped it.");
+        assert!(feed(&mut core, &[ASSISTANT, TEXT_START, &ok, END_OK, SETTLED]).is_empty());
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), [Event::Text("Skipped it.".into()), Event::Done]);
+        assert!(asked.try_iter().next().is_none(), "the question's reply ended with it");
+    }
+
+    #[test]
+    fn a_decline_with_no_dialog_waiting_writes_nothing_and_its_reply_is_done() {
+        let mut core = Core::default();
+        let (sink, rx) = channel();
+        assert!(core.send(Prompt { decline: true, ..answer("Declined.") }, sink).is_empty());
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), [Event::Done]);
     }
 
     #[test]

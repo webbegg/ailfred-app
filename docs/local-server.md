@@ -85,14 +85,20 @@ connection closes (no chunked encoding).
   command, one picked from Recent) sends a new `MESSAGES_SNAPSHOT` at once, empty for a new
   one, under the `threadId` its first message will use. After Cmd+N in the side panel the old
   conversation still shows there as it slides out, but clients are on the new one already;
-  picking the old one back from Recent sends its snapshot again. A new conversation is saved
-  only once it has a message.
+  its Retry, Continue and question answers start nothing there any more. Picking the old one
+  back from Recent sends its snapshot again, and its `runId`s stay used. A new conversation is
+  saved only once it has a message.
 - The same conversation changed in place sends a fresh `MESSAGES_SNAPSHOT` too, then the runs
   going from their `RUN_STARTED`, as a client joining gets: a question declined (it's
   `"closed": true` there), or a Retry (from the chat or a client), whose snapshot leaves out
   the retried message; its new run brings it back. A retried message that isn't the
   conversation's last thus comes after the others until its run ends, when another snapshot
-  puts it in its place. A client never shows the old reply beside the new one.
+  puts it in its place, however that run ends (done, failed, lost, stopped, or stopped by the
+  next reply, as answering the latest question does). A client never shows the old reply
+  beside the new one.
+- Every `MESSAGES_SNAPSHOT` reaches every client, whoever made the change (the window's Retry
+  too): replace your whole state with it each time, then apply the runs that follow. A client
+  that merges or ignores it shows the conversation out of date.
 - Runs never interleave: pi's steered replies overlap, so a later run's events are held until
   the earlier run's `RUN_FINISHED` or `RUN_ERROR` is out. Use one replayer per run.
 - Each `RUN_STARTED` carries the user message it answers in `input.messages` (`{run}-user`), so
@@ -115,7 +121,11 @@ answer **202** `{"threadId","runId"}`; the run's events come on the stream.
 
 - `run` (a `RunAgentInput` tagged `"type":"run"`):
   - `runId` is 1 to 128 characters of `[A-Za-z0-9._:-]`, else **400** (for `stop` too).
-  - `threadId` must be the conversation in the chat, and `runId` new in it, else **409**.
+    A `runId` shaped as a snapshot's saved run, `{threadId}-{digits}`, gets **400** (for
+    `retry` too), so a `replyRunId` always names one reply.
+  - `threadId` must be the conversation in the chat, and `runId` new in it, else **409**. A
+    thread's used `runId`s are kept while it's the conversation and the one just left (Cmd+N,
+    then picking it back from Recent): two threads at most; one left before them starts afresh.
   - Without `resume`: the last of `messages` must be the user's (text, and images as inline
     base64 PNG parts), else **400**. The images are checked before the **202**: at most 8 in
     a message; each header must say 1 to 8192 pixels a side, and all of them 40 megapixels at
@@ -132,11 +142,15 @@ answer **202** `{"threadId","runId"}`; the run's events come on the stream.
     **400**. The answers go as one user message, as in the chat, so a later snapshot shows them
     as the answering run's `{run}-user` message.
   - `status: "cancelled"` (no payload) declines a question: it closes and shows as "Not
-    answered" in the chat, and nothing goes to the model (its run ended with the question;
-    nothing waits for the answer). **202** `{"threadId","runId"}`, though no run starts (the
-    `runId` is used up all the same); clients get a fresh `MESSAGES_SNAPSHOT` with the
-    question `"closed": true`. A resume with both answers and declines sends the answers as
-    above (that run starts) and closes the declined ones. The same **409**s apply.
+    answered" in the chat; clients get a fresh `MESSAGES_SNAPSHOT` with the question
+    `"closed": true`. **202** `{"threadId","runId"}`. With pi, whose dialog waits for the
+    answer, the dialog is dismissed (as when the user closes it) and pi goes on: the decline
+    goes as the user's message `Declined.`, as an answer does, and what pi says next is its
+    reply, run `runId`. With other models nothing waits (the run ended with the question), so
+    nothing goes to the model and no run starts (the `runId` is used up all the same). A
+    resume with both answers and declines sends the answers as above (that run starts) and
+    closes the declined ones. The same **409**s apply. The chat itself has no Decline: in the
+    window a question is answered, or a new message is sent instead.
 - `stop`: with the conversation's `threadId` and the `runId` of the run streaming right now,
   it does what the chat's Stop does, else **409**: a run queued behind it, or one that ended,
   can't be stopped.
@@ -152,7 +166,8 @@ answer **202** `{"threadId","runId"}`; the run's events come on the stream.
   snapshot's `{run}` (its user message's id without `-user`), matched whole. Retrying stops a
   reply that streams. **202** `{"threadId","runId"}`, then a snapshot without the retried
   message, then the new run. A wrong thread, a used `runId`, or a `replyRunId` naming no reply
-  that ended (one streaming or queued, one already retried, after Cmd+N) gets **409**.
+  that ended (one streaming or queued, one already retried, after Cmd+N) gets **409**. Live
+  run ids and saved ones can't clash: a client's `runId` never has the saved shape.
 - Malformed JSON, and a command of a type this version doesn't know (a newer client's), get
   **400** `{"error": "not a command: unknown variant …"}`.
 

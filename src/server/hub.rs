@@ -62,6 +62,10 @@ pub struct Hub {
     seen: HashSet<String>,
     /// The run each reply stream (token) is, ended ones too.
     names: HashMap<u64, String>,
+    /// The thread just left, with its run ids and names: going back to it (Cmd+N in the side
+    /// panel, then picking it back from Recent) keeps them. Only that one: the hub remembers two
+    /// threads at most, the one it streams and the one before.
+    left: Option<(String, HashSet<String>, HashMap<u64, String>)>,
     /// The next number a minted run id takes.
     minted: u64,
     watchers: Vec<SyncSender<Frame>>,
@@ -95,13 +99,36 @@ impl Hub {
     }
 
     /// A new conversation, `thread`: what was going is forgotten, and every client gets its
-    /// `snapshot`.
+    /// `snapshot`. Its run ids start afresh, unless it's the thread just left (`left`), whose
+    /// come back; the one it leaves becomes that.
     pub fn conversation(&mut self, thread: &str, snapshot: &agui::Event) {
-        self.thread = thread.to_owned();
+        if thread != self.thread {
+            let (seen, names) = self.left.take().filter(|(t, _, _)| t == thread).map(|(_, seen, names)| (seen, names)).unwrap_or_default();
+            let seen = std::mem::replace(&mut self.seen, seen);
+            let names = std::mem::replace(&mut self.names, names);
+            self.left = Some((std::mem::replace(&mut self.thread, thread.to_owned()), seen, names));
+        }
         self.runs.clear();
-        self.seen.clear();
-        self.names.clear();
         self.broadcast(&agui::sse(snapshot));
+    }
+
+    /// Reply streams `tokens` are no longer this thread's (their conversation was left): their
+    /// runs go, one that clients saw start ending cancelled at `at` first (as a stop), one that
+    /// didn't unseen, so neither holds back the runs after it.
+    pub fn forget(&mut self, tokens: &[u64], at: u64) {
+        let theirs = |r: &Run| r.tokens.iter().any(|t| tokens.contains(t));
+        self.runs.retain(|r| r.started.is_some() || !theirs(r));
+        let started: Vec<String> = self.runs.iter().filter(|r| !r.over && theirs(r)).map(|r| r.id.clone()).collect();
+        for id in started {
+            if let Some(i) = self.runs.iter().position(|r| r.id == id) {
+                let out = self.runs[i].encoder.stop(at);
+                self.take(i, out);
+            }
+        }
+        for token in tokens {
+            self.names.remove(token);
+        }
+        self.pump();
     }
 
     /// Run id `run` was used in this thread already.

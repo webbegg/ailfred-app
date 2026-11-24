@@ -313,7 +313,7 @@ impl crate::model::Model for Pi {
         use crate::model::Item;
         use crate::reply::Event;
         let context = crate::pi::context(&request.history);
-        let prompt = crate::pi::Prompt { text: request.text, pngs: request.pngs, answer: request.answer, steer: request.steer, context };
+        let prompt = crate::pi::Prompt { text: request.text, pngs: request.pngs, answer: request.answer, decline: request.decline, steer: request.steer, context };
         let sink: crate::pi::Sink = Arc::new(move |event| sink(Item::Event(event)));
         match &mut *self.state.lock().unwrap_or_else(|e| e.into_inner()) {
             PiState::Up(engine) => engine.send(prompt, sink),
@@ -710,7 +710,7 @@ process.stdout.write(JSON.stringify(out));
     }
 
     fn pi_request(text: &str) -> crate::model::Request {
-        crate::model::Request { model: crate::model::PI.into(), history: Vec::new(), text: text.into(), pngs: Vec::new(), session: None, answer: false, steer: false }
+        crate::model::Request { model: crate::model::PI.into(), history: Vec::new(), text: text.into(), pngs: Vec::new(), session: None, answer: false, decline: false, steer: false }
     }
 
     #[test]

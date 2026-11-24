@@ -81,6 +81,207 @@ fn answer(c: &mut Chat, run: &str, interrupt: &str, text: &str) -> crate::server
     c.command(command::answer(&thread, run, &[], interrupt, text), Instant::now())
 }
 
+/// The runs' starts and ends among `events`: `RUN_STARTED {run}`, `RUN_FINISHED {run}`.
+fn runs(events: &[Value]) -> Vec<String> {
+    events.iter().filter(|e| e["type"] == "RUN_STARTED" || e["type"] == "RUN_FINISHED").map(|e| format!("{} {}", e["type"].as_str().unwrap(), e["runId"].as_str().unwrap())).collect()
+}
+
+/// The last snapshot among `events`.
+fn last_snapshot(events: &[Value]) -> (String, Vec<String>) {
+    snapshot_of(events.iter().rfind(|e| e["type"] == "MESSAGES_SNAPSHOT").expect("a snapshot"))
+}
+
+/// The ids a saved message and its text reply get in a snapshot: run `{thread}-{index}`.
+fn said(thread: &str, index: usize) -> [String; 2] {
+    let run = crate::history::run_id(thread, index);
+    [format!("{run}-user"), format!("{run}-text-1")]
+}
+
+#[test]
+fn after_cmd_n_the_old_conversations_retry_continue_and_answer_start_nothing_and_the_next_message_runs_to_its_end() {
+    let (mut c, rx) = watched();
+    let a = asked(&mut c, "a", vec![ask("Which?"), Event::Done]);
+    let b = asked(&mut c, "b", vec![Event::Text("B".into()), Event::Lost("gone".into())]);
+    assert_eq!(c.continuable(), Some(b));
+    c.start_over();
+    got(&rx);
+    let asks = c.requests.len();
+    // The old conversation still shows as it slides out: its buttons start nothing.
+    assert_eq!(c.retry(a), None, "Retry");
+    assert_eq!(c.go_on(b), None, "Continue");
+    c.pick(a, 0, 0);
+    assert_eq!(c.answer(a, 0), None, "an answer");
+    c.stop(Instant::now());
+    assert_eq!(c.requests.len(), asks, "nothing went to the model");
+    assert!(got(&rx).is_empty(), "nothing reached clients");
+    assert_eq!(send(&mut c, "c1", "hi", &[]).status, 202);
+    let t = last_token(&c);
+    c.reply_event(t, Event::Text("hello".into()), Instant::now());
+    c.reply_event(t, Event::Done, Instant::now());
+    let events = got(&rx);
+    assert_eq!(runs(&events), ["RUN_STARTED c1", "RUN_FINISHED c1"], "{events:?}");
+    let (tx, late) = watcher();
+    c.join(tx);
+    assert_eq!(snapshot_of(&got(&late)[0]), (thread(&c), said(&thread(&c), 0).to_vec()), "in the snapshot a client joining gets");
+}
+
+#[test]
+fn a_reply_left_going_on_the_old_conversation_ends_when_the_next_message_starts_the_new_one() {
+    let (mut c, rx) = watched();
+    asked(&mut c, "a", vec![Event::Done]);
+    c.start_over();
+    got(&rx);
+    // Past the guards, as a path nothing refused would: the old message's reply goes again.
+    let left = c.start_reply(c.messages[0].id, "a".into(), false);
+    c.reply_event(left, Event::Text("old".into()), Instant::now());
+    let left_run = run_of(&c, left);
+    got(&rx);
+    c.cancelled.clear();
+    assert_eq!(send(&mut c, "c1", "hi", &[]).status, 202);
+    assert_eq!(c.cancelled, [left], "its process ends");
+    let t = last_token(&c);
+    c.reply_event(left, Event::Text("late".into()), Instant::now());
+    c.reply_event(t, Event::Text("hello".into()), Instant::now());
+    c.reply_event(t, Event::Done, Instant::now());
+    let events = got(&rx);
+    assert_eq!(runs(&events), [format!("RUN_FINISHED {left_run}"), "RUN_STARTED c1".into(), "RUN_FINISHED c1".into()], "{events:?}");
+    let (tx, late) = watcher();
+    c.join(tx);
+    assert_eq!(snapshot_of(&got(&late)[0]).1, said(&thread(&c), 0), "the new message isn't taken for the old one's");
+}
+
+#[test]
+fn a_retried_earlier_reply_that_is_stopped_is_put_back_in_its_place() {
+    let (mut c, rx) = watched();
+    for text in ["a", "b", "c"] {
+        asked(&mut c, text, vec![Event::Text(text.to_uppercase()), Event::Done]);
+    }
+    let first = c.reply_to(c.messages[0].id).unwrap().token;
+    let again = c.retry(first).unwrap();
+    c.reply_event(again, Event::Text("A2".into()), Instant::now());
+    got(&rx);
+    c.stop(Instant::now());
+    let events = got(&rx);
+    let order: Vec<String> = (0..3).flat_map(|i| said(&thread(&c), i)).collect();
+    assert_eq!(last_snapshot(&events).1, order, "{events:?}");
+}
+
+#[test]
+fn a_retried_earlier_reply_stopped_by_answering_the_latest_question_is_put_back_in_its_place() {
+    let (mut c, rx) = watched();
+    asked(&mut c, "a", vec![Event::Text("A".into()), Event::Done]);
+    asked(&mut c, "b", vec![Event::Text("B".into()), Event::Done]);
+    let asking = asked(&mut c, "pick", vec![ask("Which?"), Event::Done]);
+    let interrupt = format!("{}-ask-1", run_of(&c, asking));
+    let first = c.reply_to(c.messages[0].id).unwrap().token;
+    let again = c.retry(first).unwrap();
+    c.reply_event(again, Event::Text("A2".into()), Instant::now());
+    got(&rx);
+    assert_eq!(answer(&mut c, "c1", &interrupt, "A").status, 202);
+    let events = got(&rx);
+    let (_, ids) = last_snapshot(&events);
+    let t = thread(&c);
+    let asked_run = crate::history::run_id(&t, 2);
+    let mut order: Vec<String> = (0..2).flat_map(|i| said(&t, i)).collect();
+    order.extend([format!("{asked_run}-user"), format!("{asked_run}-ask-1")]);
+    assert_eq!(ids, order, "in place, without the answer, which comes as its run: {events:?}");
+}
+
+#[test]
+fn a_run_id_used_before_cmd_n_stays_used_when_the_conversation_is_picked_back() {
+    let (mut c, _rx) = watched();
+    assert_eq!(send(&mut c, "c1", "a", &[]).status, 202);
+    c.reply_event(last_token(&c), Event::Done, Instant::now());
+    let old = thread(&c);
+    c.start_over();
+    c.load(crate::history::Loaded { id: old.clone(), created: 1, title: None, title_by_user: false, session: None, messages: Vec::new(), next_png: 0 });
+    assert_eq!(thread(&c), old);
+    assert_eq!(send(&mut c, "c1", "again", &[]).status, 409, "c1 was used in this thread");
+    assert_eq!(c.command(command::retry(&old, "c2", "c1"), Instant::now()).status, 202, "the reply is still known by its live run id");
+}
+
+#[test]
+fn a_client_run_id_shaped_as_a_saved_run_is_400_so_a_retry_names_one_reply() {
+    let (mut c, _rx) = watched();
+    let t = thread(&c);
+    assert_eq!(send(&mut c, &format!("{t}-0"), "a", &[]).status, 400, "the saved id of message 0");
+    assert_eq!(send(&mut c, &format!("{t}-12"), "a", &[]).status, 400);
+    assert!(c.messages.is_empty());
+    assert_eq!(send(&mut c, &format!("{t}-0a"), "a", &[]).status, 202, "not a number");
+    c.reply_event(last_token(&c), Event::Done, Instant::now());
+    assert_eq!(c.command(command::retry(&t, &format!("{t}-3"), &format!("{t}-0")), Instant::now()).status, 400);
+    assert_eq!(c.command(command::retry(&t, "c2", &format!("{t}-0")), Instant::now()).status, 202, "by its saved id");
+}
+
+#[test]
+fn picking_another_conversation_from_recent_after_cmd_n_makes_it_the_thread_clients_see() {
+    let (mut c, rx) = watched();
+    asked(&mut c, "a", vec![Event::Done]);
+    c.start_over();
+    let minted = thread(&c);
+    got(&rx);
+    let other = "20240101-000000-0009";
+    let message = crate::history::LoadedMessage { text: "x".into(), files: Vec::new(), pngs: Vec::new(), reply: None };
+    c.load(crate::history::Loaded { id: other.into(), created: 1, title: None, title_by_user: false, session: None, messages: vec![message], next_png: 0 });
+    assert_eq!(last_snapshot(&got(&rx)), (other.to_owned(), vec![format!("{other}-0-user")]));
+    assert_eq!(thread(&c), other);
+    assert_eq!(c.command(command::send(&minted, "c1", &[], "hi", &[]), Instant::now()).status, 409, "the new one Cmd+N made is gone");
+    assert_eq!(send(&mut c, "c1", "hi", &[]), crate::server::Answer::accepted(other, "c1"));
+}
+
+#[test]
+fn a_declined_question_comes_back_closed_after_save_and_load() {
+    let (mut c, _rx) = watched();
+    let token = asked(&mut c, "pick", vec![ask("Which?"), Event::Done]);
+    let interrupt = format!("{}-ask-1", run_of(&c, token));
+    assert_eq!(c.command(command::decline(&thread(&c), "c1", &[], &interrupt), Instant::now()).status, 202);
+    asked(&mut c, "next", vec![Event::Text("N".into()), Event::Done]);
+    let dir = std::env::temp_dir().join(format!("ailfred-declined-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let snapshot = c.snapshot().unwrap();
+    crate::history::write_snapshot(&dir, &snapshot).unwrap();
+    let mut fresh = Chat::new(None);
+    fresh.load(crate::history::load(&dir, &snapshot.saved.id).expect("loads"));
+    let _ = std::fs::remove_dir_all(&dir);
+    let back = fresh.reply_to(fresh.messages[0].id).unwrap().token;
+    let q = question(&fresh, back, 0);
+    assert!(q.closed && q.answered.is_none(), "not answered");
+    fresh.set_feed(Some(Feed::default()));
+    let (tx, rx) = watcher();
+    fresh.join(tx);
+    let events = got(&rx);
+    let asks = events[0]["messages"].as_array().unwrap().iter().find(|m| m["activityType"] == "ailfred:ask").unwrap();
+    assert_eq!(asks["content"]["closed"], Value::Bool(true), "{asks}");
+}
+
+#[test]
+fn declining_a_question_pi_waits_on_dismisses_its_dialog_and_what_pi_says_next_is_the_declines_reply() {
+    let (mut c, rx) = watched();
+    c.model = Some(model::PI.into());
+    let token = asked(&mut c, "pick", vec![ask("Which?"), Event::Done]);
+    let interrupt = format!("{}-ask-1", run_of(&c, token));
+    got(&rx);
+    let declined = c.command(command::decline(&thread(&c), "c1", &[], &interrupt), Instant::now());
+    assert_eq!(declined, crate::server::Answer::accepted(&thread(&c), "c1"));
+    let q = question(&c, token, 0);
+    assert!(q.closed && q.answered.is_none(), "it shows as not answered");
+    let (_, request) = c.requests.last().unwrap();
+    assert!(request.answer && request.decline, "pi's dialog is dismissed: {request:?}");
+    assert_eq!(c.messages.last().unwrap().text, DECLINED, "as the user's message, as an answer goes");
+    let events = got(&rx);
+    let asks = events[0]["messages"].as_array().unwrap().iter().find(|m| m["activityType"] == "ailfred:ask").unwrap();
+    assert_eq!(asks["content"]["closed"], Value::Bool(true));
+    assert_eq!(snapshot_of(&events[0]).1.len(), 2, "without the decline's message, which comes as its run");
+    let next = last_token(&c);
+    assert_ne!(next, token);
+    c.reply_event(next, Event::Text("Skipped.".into()), Instant::now());
+    c.reply_event(next, Event::Done, Instant::now());
+    let events = got(&rx);
+    assert_eq!(runs(&events), ["RUN_STARTED c1", "RUN_FINISHED c1"]);
+    assert_eq!(events[0]["input"]["messages"][0]["content"].as_str(), Some(DECLINED));
+}
+
 #[test]
 fn a_run_with_text_and_an_image_reaches_the_chat_as_one_message_and_its_events_take_the_clients_run_id() {
     let (mut c, rx) = watched();

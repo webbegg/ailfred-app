@@ -64,6 +64,10 @@ const LOCAL_IDS: u64 = 1 << 32;
 /// The message Continue sends, under an interrupted reply.
 pub const CONTINUE: &str = "Continue where you left off.";
 
+/// The user's message when a client declines pi's question: pi's dialog is dismissed, and what
+/// pi says next is its reply.
+pub const DECLINED: &str = "Declined.";
+
 /// What the quick input's shortcut does.
 #[derive(Debug, PartialEq)]
 pub enum Toggle {
@@ -343,7 +347,7 @@ impl Chat {
         let session = self.session.as_ref().filter(|(_, ends_at)| Some(*ends_at) == last).map(|(s, _)| s.clone());
         let history = turns.into_iter().map(|(_, turn)| turn).collect();
         let message = &self.messages[at];
-        Some(model::Request { model: model.into(), history, text: message.text.clone(), pngs: message.pngs.clone(), session, answer: false, steer: false })
+        Some(model::Request { model: model.into(), history, text: message.text.clone(), pngs: message.pngs.clone(), session, answer: false, decline: false, steer: false })
     }
 
     /// Reply `token` reports Claude Code's session: the next message resumes it. A stream that's
@@ -410,6 +414,8 @@ impl Chat {
         self.open = false;
         self.over = Some(history::Meta::fresh().id);
         self.preview = None;
+        // The new one's snapshot replaces the old one's on every client, in whatever order.
+        self.resync_at = None;
         self.announce();
     }
 
@@ -499,6 +505,11 @@ impl Chat {
 
     /// Asks message `id` again: from `prompt` (`answer`: the user's answer to a question).
     fn start_reply(&mut self, id: u64, prompt: String, answer: bool) -> u64 {
+        self.start_reply_as(id, prompt, answer, false)
+    }
+
+    /// The same, `decline`: the answer declines pi's question (`DECLINED`).
+    fn start_reply_as(&mut self, id: u64, prompt: String, answer: bool, decline: bool) -> u64 {
         self.stop_replies(Instant::now());
         self.next_token += 1;
         let token = self.next_token;
@@ -521,10 +532,12 @@ impl Chat {
             }
             None => {
                 if let Some(request) = self.request_for(id, &model) {
-                    self.send_request(token, model::Request { answer, ..request });
+                    self.send_request(token, model::Request { answer, decline, ..request });
                 }
             }
         }
+        // A retried reply this one stopped goes back in its place.
+        self.settle_resync();
         token
     }
 
@@ -547,10 +560,7 @@ impl Chat {
             if !asks {
                 self.next_queued();
             }
-            if self.resync_at == Some(token) {
-                self.resync_at = None;
-                self.resync();
-            }
+            self.settle_resync();
         }
     }
 
@@ -578,6 +588,7 @@ impl Chat {
             self.save();
         }
         self.next_queued();
+        self.settle_resync();
     }
 
     /// The conversation is left: what streams stops and what's queued goes, saved so.
@@ -611,6 +622,28 @@ impl Chat {
         true
     }
 
+    /// The conversation left with Cmd+N gets a message, so the new one starts (`push`). Nothing
+    /// of the old one should still go (its Retry, Continue and answers start nothing), but what
+    /// does ends here, stopped and saved into it, and its runs leave the hub (`forget_runs`).
+    fn end_leftovers(&mut self) {
+        let now = Instant::now();
+        let live: Vec<u64> = self.replies.iter().filter(|r| r.live()).map(|r| r.token).collect();
+        for reply in &mut self.replies {
+            reply.stop(now);
+        }
+        let tokens: Vec<u64> = self.replies.iter().map(|r| r.token).collect();
+        self.forget_runs(&tokens);
+        if live.is_empty() {
+            return;
+        }
+        #[cfg(test)]
+        self.cancelled.extend(&live);
+        if let Some(host) = &self.host {
+            host.update(move |host, _| host.cancel_runs(&live));
+        }
+        self.save();
+    }
+
     /// The reply offering "I was interrupted. Continue?": the conversation's last, interrupted
     /// (Ailfred quit, or the model's process ended, as it streamed).
     pub fn continuable(&self) -> Option<u64> {
@@ -622,7 +655,7 @@ impl Chat {
     /// to go on from what it said (in the history); one that had said nothing is asked again.
     /// The new reply's token; None unless `token` is the one offering it.
     pub fn go_on(&mut self, token: u64) -> Option<u64> {
-        if self.continuable() != Some(token) {
+        if self.over.is_some() || self.continuable() != Some(token) {
             return None;
         }
         let reply = self.reply_mut(token)?;
@@ -635,11 +668,17 @@ impl Chat {
     }
 
     /// Retry: the reply `token` starts over; its new token. Clients get the conversation
-    /// without it, then its new run.
+    /// without it, then its new run. None once the conversation is over (Cmd+N): it still
+    /// shows as it slides out, but starts nothing.
     pub fn retry(&mut self, token: u64) -> Option<u64> {
+        if self.over.is_some() {
+            return None;
+        }
         let r = self.replies.iter().find(|r| r.token == token)?;
         let (id, prompt, answer) = (r.id, r.prompt.clone(), r.answer);
         let last = self.messages.last().is_some_and(|m| m.id == id);
+        // The snapshot it sends puts a reply retried before back in place.
+        self.resync_at = None;
         let again = self.start_reply(id, prompt, answer);
         self.note_retry(again, last);
         Some(again)
@@ -698,8 +737,11 @@ impl Chat {
     /// The same for questions `answers` of reply `token` at once (each its part and what was
     /// written for it; nothing written: the options picked): those that take an answer get it,
     /// and the answers go as one message (blank lines between), which gets its reply. None if
-    /// none took one.
+    /// none took one, or the conversation is over (Cmd+N).
     pub fn answer_with(&mut self, token: u64, answers: &[(usize, String)]) -> Option<u64> {
+        if self.over.is_some() {
+            return None;
+        }
         let reply = self.replies.iter_mut().find(|r| r.token == token)?;
         let texts: Vec<String> = answers.iter().filter_map(|(part, other)| reply.answer(*part, other)).collect();
         if texts.is_empty() {
@@ -720,6 +762,7 @@ impl Chat {
     pub fn push(&mut self, message: Message) {
         // Clients were given its id with its empty snapshot already (`start_over`).
         if let Some(next) = self.over.take() {
+            self.end_leftovers();
             self.reset_conversation();
             self.conv.id = next;
         }

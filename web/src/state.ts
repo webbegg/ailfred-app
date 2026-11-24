@@ -2,7 +2,8 @@
 // events as the app's own replayer does (`crates/ailfred-protocol/src/replay.rs`): each event
 // becomes the reply events of the core (`Taken`, `Think`, `Text`, `Step`, …), applied to the
 // reply going as `Reply::apply` does (`crates/ailfred-core/src/reply.rs`). A `MESSAGES_SNAPSHOT`
-// replaces everything, read as `snapshot.rs` reads one back.
+// replaces everything, read as `snapshot.rs` reads one back, but the messages the page sent to
+// that conversation whose runs haven't started (`withPending`).
 
 import { ASK, DIFF, ERROR, LOST, STEP_OUTPUT, parseEvent, type Content, type Event, type Interrupt, type Json, type JsonObject, type Message } from "./protocol";
 
@@ -142,7 +143,7 @@ export function applyAll(state: Conversation, events: readonly unknown[]): Conve
 export function apply(state: Conversation, raw: unknown): Conversation {
   const event = parseEvent(raw);
   if (!event) return state;
-  if (event.type === "MESSAGES_SNAPSHOT") return fromSnapshot(event.messages, event.metadata);
+  if (event.type === "MESSAGES_SNAPSHOT") return withPending(state, fromSnapshot(event.messages, event.metadata));
   if (event.type === "RUN_STARTED") return started(state, event);
   const live = state.live;
   if (!live) {
@@ -166,6 +167,15 @@ export function apply(state: Conversation, raw: unknown): Conversation {
     next = { ...next, live: null, run: null, ended };
   }
   return next;
+}
+
+/// `next`, a snapshot read, keeps the messages the page sent to the same conversation that it
+/// doesn't hold yet: their runs haven't started (a snapshot leaves out the runs going and
+/// queued). One goes when its `RUN_STARTED` or a snapshot carries it; all go with another thread.
+function withPending(state: Conversation, next: Conversation): Conversation {
+  if (next.threadId === null || next.threadId !== state.threadId) return next;
+  const held = new Set(next.items.filter((i) => i.kind === "user").map((i) => i.id));
+  return { ...next, pending: state.pending.filter((p) => !held.has(p.id)) };
 }
 
 function userId(runId: string): string {

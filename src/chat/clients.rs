@@ -18,8 +18,10 @@ use ailfred_protocol::saved;
 use ailfred_protocol::snapshot::{self, Turn};
 use serde_json::{Value, json};
 
-use super::{Chat, Message};
+use super::{Chat, DECLINED, Message};
 use crate::history;
+use crate::mock_model;
+use crate::model;
 use crate::reply::{Part, State};
 use crate::server::{Answer, Feed, Frame, Sink, now_ms};
 
@@ -137,10 +139,36 @@ impl Chat {
         }
     }
 
+    /// The streams `tokens` stopped. Once the conversation is over (Cmd+N in the side panel),
+    /// clients are on the new thread: a stop of the old one's reply never reaches it.
     pub(super) fn note_stop(&self, tokens: &[u64]) {
+        if self.over.is_some() {
+            self.forget_runs(tokens);
+            return;
+        }
         if let Some(feed) = &self.feed {
             feed.with(|hub| hub.stop(tokens, now_ms()));
         }
+    }
+
+    /// The streams `tokens` are of the conversation left with Cmd+N, not the thread clients see:
+    /// their runs leave the hub, one clients saw start ending cancelled (`Hub::forget`).
+    pub(super) fn forget_runs(&self, tokens: &[u64]) {
+        if let Some(feed) = &self.feed {
+            feed.with(|hub| hub.forget(tokens, now_ms()));
+        }
+    }
+
+    /// The retried reply out of its place (`resync_at`) ended, however it did (done, failed, its
+    /// process lost, stopped, or stopped by the next reply): clients get the conversation with it
+    /// back in its place.
+    pub(super) fn settle_resync(&mut self) {
+        let Some(token) = self.resync_at else { return };
+        if self.replies.iter().any(|r| r.token == token && r.live()) {
+            return;
+        }
+        self.resync_at = None;
+        self.resync();
     }
 
     /// The conversation as a `MESSAGES_SNAPSHOT`, without the messages `skip` (their runs are
@@ -208,7 +236,13 @@ impl Chat {
             return Answer::error(409, "threadId isn't the conversation in the chat");
         }
         let run = run.cloned().unwrap_or_default();
-        let fresh = |run: &str| if feed.with(|hub| hub.seen(run)) { Err(Answer::error(409, "runId was used in this thread already")) } else { Ok(()) };
+        let saved = saved_shape(&run, self.thread());
+        let fresh = |run: &str| {
+            if saved {
+                return Err(Answer::error(400, "runId must not be {threadId}-{number}: that names a saved run in snapshots"));
+            }
+            if feed.with(|hub| hub.seen(run)) { Err(Answer::error(409, "runId was used in this thread already")) } else { Ok(()) }
+        };
         let done = match command {
             Command::Stop { .. } => {
                 let streams = feed.with(|hub| self.replies.iter().any(|r| r.streaming() && hub.run_of(r.token) == Some(run.as_str())));
@@ -287,11 +321,19 @@ impl Chat {
         })
     }
 
+    /// The latest reply's question is pi's, whose dialog waits for the answer: pi wrote the reply
+    /// last and is the model picked (as an answer goes to it), not the mock.
+    fn pi_waits(&self) -> bool {
+        self.running_model == model::PI && self.model() == model::PI && !mock_model::requested()
+    }
+
     /// `resume` answers or declines the open questions of the latest reply, as run `run`: each
     /// by an interrupt id it was sent (its live run's, or its snapshot's), `resolved` with
-    /// `payload.answer`, or `cancelled`. The answers go as one message, as in the window; a
-    /// declined question closes ("Not answered") and nothing goes to the model for it: its run
-    /// ended with the question, and nothing waits. Clients get the change in a snapshot.
+    /// `payload.answer`, or `cancelled`. The answers go as one message, as in the window. A
+    /// declined question closes ("Not answered"); declined alone, pi's question has its dialog
+    /// dismissed and pi goes on, its words the reply to a `DECLINED` message run `run` is; any
+    /// other model's run ended with the question and nothing waits, so nothing goes to it.
+    /// Clients get the change in a snapshot.
     fn client_answer(&mut self, feed: &Feed, run: &str, resume: &[Resume]) -> Result<(), Answer> {
         let conflict = |reason: &str| Err(Answer::error(409, reason));
         if self.over.is_some() {
@@ -330,7 +372,15 @@ impl Chat {
                 q.closed = true;
             }
         }
-        if answers.is_empty() {
+        if answers.is_empty() && self.pi_waits() {
+            // pi keeps its dialog open: it's dismissed, and what pi says next is the reply to
+            // the decline, sent as the user's message as an answer is.
+            let id = self.next_id();
+            self.client_run = Some(run.to_owned());
+            self.push(Message::text(id, DECLINED));
+            self.start_reply_as(id, DECLINED.into(), true, true);
+            self.client_run = None;
+        } else if answers.is_empty() {
             feed.with(|hub| hub.claim(run));
         } else {
             self.client_run = Some(run.to_owned());
@@ -343,6 +393,12 @@ impl Chat {
         }
         Ok(())
     }
+}
+
+/// Run id `run` is what snapshots of thread `thread` name a saved run: `{thread}-{index}`. A
+/// client's may not be, so a Retry's `replyRunId` names one reply only.
+fn saved_shape(run: &str, thread: &str) -> bool {
+    run.strip_prefix(thread).and_then(|r| r.strip_prefix('-')).is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// A client's run id: 1 to 128 characters of `[A-Za-z0-9._:-]`.
