@@ -14,6 +14,7 @@ use ailfred_protocol::command::{self, Command, user_message};
 use serde_json::Value;
 
 use super::super::Running;
+use super::super::conn::MAX_WAITING;
 use super::super::http::{FILE, Limits, MAX_CONNECTIONS, start_with};
 use super::super::hub::{Feed, Frame};
 use super::super::routes::{Answer, Core, MAX_STREAMS};
@@ -193,29 +194,40 @@ fn a_connection_that_sends_nothing_is_closed_after_the_first_bytes_time_and_its_
 
 #[test]
 fn a_stream_client_reading_a_large_frame_slowly_is_dropped_after_about_the_write_limit() {
+    /// How long the slow reader naps between reads.
+    const NAP: Duration = Duration::from_millis(50);
     let s = served(QUICK);
     let mut slow = s.send(&s.events());
     assert!(first_line(&mut slow, Duration::from_secs(2)).is_ok_and(|l| l.starts_with("HTTP/1.1 200")));
     assert!(eventually(Duration::from_secs(2), || s.watching() == 1), "joined");
     let done = Arc::new(AtomicBool::new(false));
+    // When the big frame began to come: more bytes than the head and the first (empty) snapshot.
+    let coming = Arc::new(Mutex::new(None::<Instant>));
     let reading = {
-        let done = done.clone();
+        let (done, coming) = (done.clone(), coming.clone());
         let mut slow = slow.try_clone().unwrap();
         std::thread::spawn(move || {
-            let mut chunk = vec![0u8; 64 << 10];
+            let mut chunk = vec![0u8; 32 << 10];
+            let mut got = 0;
             slow.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
             while !done.load(Ordering::SeqCst) {
                 match slow.read(&mut chunk) {
                     Ok(0) => return,
-                    Ok(_) => {}
+                    Ok(n) => {
+                        got += n;
+                        if got > 16 << 10 {
+                            coming.lock().unwrap().get_or_insert_with(Instant::now);
+                        }
+                    }
                     Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
                     Err(_) => return,
                 }
-                std::thread::sleep(Duration::from_millis(100));
+                std::thread::sleep(NAP);
             }
         })
     };
-    // Some of it well within each write's limit, but 8 MB at about 640 KB/s takes seconds.
+    // Some of it well within each write's limit, but 8 MB at about 640 KB/s (32 KiB a nap) takes
+    // seconds.
     let big = agui::Event::MessagesSnapshot { messages: vec![user_message("m", &"x".repeat(8 << 20), &[])], base: Base::at(0) };
     let started = Instant::now();
     s.feed.with(|hub| hub.conversation("t", &big));
@@ -223,10 +235,18 @@ fn a_stream_client_reading_a_large_frame_slowly_is_dropped_after_about_the_write
         s.feed.with(|hub| hub.conversation("t", &empty()));
         s.watching() == 0
     });
-    let after = started.elapsed();
+    let (at, after) = (Instant::now(), started.elapsed());
     done.store(true, Ordering::SeqCst);
     assert!(dropped, "still streaming after {after:?}");
-    assert!(after >= QUICK.write && after < QUICK.write * 10, "dropped after {after:?}");
+    assert!(after >= QUICK.write, "dropped after {after:?}");
+    // Timed from when the frame began to come, not from when it was sent: making an 8 MB frame
+    // (a debug build, a loaded machine) takes a while before any of it is written.
+    let writing = coming.lock().unwrap().map(|coming| at - coming);
+    assert!(writing.is_some_and(|w| w < QUICK.write * 10), "dropped {writing:?} after the frame began to come ({after:?} after it was sent)");
+    // Not before its time: the write began before its first bytes came, and they're seen within a
+    // nap (and a moment to be scheduled) of coming; so a client dropped early fails this.
+    let early = QUICK.write - NAP - Duration::from_millis(100);
+    assert!(writing.is_some_and(|w| w >= early), "dropped {writing:?} after the frame began to come, before {early:?}");
     reading.join().unwrap();
 }
 
@@ -262,17 +282,63 @@ fn a_body_that_finishes_after_the_server_went_off_and_on_again_is_503_and_never_
 }
 
 #[test]
-fn a_connection_past_the_cap_is_closed_at_once() {
-    let s = served(Limits::DEFAULT);
-    let held: Vec<TcpStream> = (0..MAX_CONNECTIONS).map(|_| connect(&s.address)).collect();
-    let mut extra = connect(&s.address);
+fn past_the_waiting_pool_the_oldest_connection_still_reading_its_head_is_closed_and_the_newest_served() {
+    let _turn = super::super::conn::flood_room();
+    let s = served(Limits { first: Duration::from_secs(5), ..Limits::DEFAULT });
+    let open = s.running.as_ref().map(Running::connections).expect("on");
+    let mut held: Vec<TcpStream> = (0..MAX_WAITING).map(|_| connect(&s.address)).collect();
+    assert!(eventually(Duration::from_secs(1), || open() == MAX_WAITING), "{} open", open());
     let started = Instant::now();
-    let got = until_closed(&mut extra, Duration::from_secs(2));
-    assert!(closed(&got) && got.as_ref().map_or(true, String::is_empty), "{got:?}");
-    assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
-    drop(held);
-    let free = eventually(Duration::from_secs(2), || first_line(&mut s.send(&s.valid()), Duration::from_millis(500)).is_ok_and(|l| l.starts_with("HTTP/1.1 404")));
-    assert!(free, "their places come free once they're gone");
+    let served = first_line(&mut s.send(&s.valid()), Duration::from_secs(1)).expect("served");
+    assert!(served.starts_with("HTTP/1.1 404"), "{served:?}");
+    let oldest = until_closed(&mut held[0], Duration::from_secs(2));
+    assert!(closed(&oldest) && started.elapsed() < Duration::from_millis(500), "{oldest:?} after {:?}", started.elapsed());
+    held[1].set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+    let next = held[1].read(&mut [0u8; 1]);
+    assert!(next.is_err_and(|e| matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut)), "only the oldest went");
+    assert!(open() <= MAX_WAITING + MAX_CONNECTIONS, "{} threads", open());
+}
+
+/// A client without the token holding `held` connections that each sent one byte of a head,
+/// each opened again after `refresh`, until `stop`.
+fn attack(address: String, held: usize, refresh: Duration, stop: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut open: std::collections::VecDeque<(Instant, TcpStream)> = Default::default();
+        while !stop.load(Ordering::SeqCst) {
+            while open.front().is_some_and(|(at, _)| at.elapsed() >= refresh) {
+                open.pop_front();
+            }
+            while open.len() < held {
+                let Ok(mut c) = TcpStream::connect(&address) else { break };
+                let _ = c.write_all(b"P");
+                open.push_back((Instant::now(), c));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    })
+}
+
+#[test]
+fn a_client_without_the_token_holding_more_connections_than_the_waiting_pool_locks_no_one_out() {
+    let _turn = super::super::conn::flood_room();
+    let s = served(Limits::DEFAULT);
+    let open = s.running.as_ref().map(Running::connections).expect("on");
+    let stop = Arc::new(AtomicBool::new(false));
+    let attacker = attack(s.address.clone(), MAX_WAITING + 36, Duration::from_millis(4800), stop.clone());
+    std::thread::sleep(Duration::from_millis(300));
+    let (started, mut answered, mut tries, mut most) = (Instant::now(), 0, 0, 0);
+    while started.elapsed() < Duration::from_secs(4) {
+        tries += 1;
+        if first_line(&mut s.send(&s.valid()), Duration::from_secs(1)).is_ok_and(|l| l.starts_with("HTTP/1.1 404")) {
+            answered += 1;
+        }
+        most = most.max(open());
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    stop.store(true, Ordering::SeqCst);
+    attacker.join().unwrap();
+    assert!(answered * 10 >= tries * 9, "answered {answered} of {tries}");
+    assert!(most <= MAX_WAITING + MAX_CONNECTIONS, "{most} threads at once");
 }
 
 #[test]
@@ -283,6 +349,38 @@ fn a_head_over_16_kib_gets_431() {
     let mut big = s.send(&format!("{start}{}", "a".repeat(HEAD_MAX - start.len())));
     let answer = until_closed(&mut big, Duration::from_secs(2)).expect("answered and closed");
     assert!(status(&answer).starts_with("HTTP/1.1 431"), "{answer}");
+}
+
+#[test]
+fn a_request_with_two_authorization_headers_gets_400_whichever_comes_first() {
+    let s = served(Limits::DEFAULT);
+    let (good, bad) = (format!("Authorization: Bearer {}\r\n", s.token), "Authorization: Bearer x\r\n".to_owned());
+    for (first, second) in [(&good, &bad), (&bad, &good)] {
+        let head = format!("GET /v1/nothing HTTP/1.1\r\nHost: {}\r\n{first}{second}\r\n", s.address);
+        let answer = until_closed(&mut s.send(&head), Duration::from_secs(2)).expect("answered and closed");
+        assert!(status(&answer).starts_with("HTTP/1.1 400"), "{first:?} then {second:?}: {answer}");
+    }
+}
+
+#[test]
+fn a_refusal_reaches_the_client_whole_even_with_bytes_it_never_read() {
+    let s = served(Limits::DEFAULT);
+    let body = vec![b'x'; 60_000];
+    let intact = |head: &str, body: &[u8], expected: &str| {
+        (0..20)
+            .filter(|_| {
+                let mut stream = s.send(head);
+                let _ = stream.write_all(body);
+                std::thread::sleep(Duration::from_millis(50));
+                until_closed(&mut stream, Duration::from_secs(2)).is_ok_and(|a| a.starts_with(expected))
+            })
+            .count()
+    };
+    assert_eq!(intact(&s.tokenless("200000"), &body, "HTTP/1.1 401"), 20, "401 with a body sent along");
+    let too_big = format!("POST /v1/commands HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\n\r\n", s.address, s.token, (16 << 20) + 1);
+    assert_eq!(intact(&too_big, &body, "HTTP/1.1 413"), 20, "413 with a body sent along");
+    let long = format!("GET /v1/events HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nX-Pad: {}\r\n\r\n", s.address, s.token, "a".repeat(17 << 10));
+    assert_eq!(intact(&long, b"", "HTTP/1.1 431"), 20, "431 for a 17 KiB head");
 }
 
 #[test]

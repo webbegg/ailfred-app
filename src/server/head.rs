@@ -1,6 +1,7 @@
 //! A request's head, read off the socket's bytes: its request line and its headers, nothing
 //! more. Strict: lines end in CRLF (a bare LF or CR is 400), no line folding, no
 //! `Transfer-Encoding` (501), one numeric `Content-Length` (400), which a POST must have (411),
+//! at most one `Host` and one `Authorization` (400: which one counts would be a guess),
 //! at most `MAX_HEAD` bytes and `MAX_HEADERS` headers (431).
 
 use super::routes::{Answer, Head};
@@ -70,7 +71,7 @@ pub fn parse(bytes: &[u8]) -> Result<Request, Answer> {
     let text = text.strip_suffix("\r\n\r\n").ok_or_else(|| bad("the head doesn't end in a blank line"))?;
     let mut lines = text.split("\r\n");
     let mut request = request_line(lines.next().unwrap_or_default())?;
-    let (mut hosts, mut lengths) = (0, 0);
+    let (mut hosts, mut lengths, mut authorizations) = (0, 0, 0);
     for (n, line) in lines.enumerate() {
         if n >= MAX_HEADERS {
             return Err(too_large());
@@ -97,7 +98,10 @@ pub fn parse(bytes: &[u8]) -> Result<Request, Answer> {
                 first(&mut request.host);
             }
             "origin" => first(&mut request.origin),
-            "authorization" => first(&mut request.authorization),
+            "authorization" => {
+                authorizations += 1;
+                first(&mut request.authorization);
+            }
             "transfer-encoding" => return Err(Answer::error(501, "Transfer-Encoding isn't supported: send a Content-Length")),
             "content-length" => {
                 lengths += 1;
@@ -109,6 +113,9 @@ pub fn parse(bytes: &[u8]) -> Result<Request, Answer> {
     }
     if hosts > 1 {
         return Err(bad("more than one Host header"));
+    }
+    if authorizations > 1 {
+        return Err(bad("more than one Authorization header"));
     }
     if lengths > 1 {
         return Err(bad("more than one Content-Length header"));

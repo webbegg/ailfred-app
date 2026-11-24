@@ -4,7 +4,7 @@
 
 use std::io::Read;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::time::Duration;
 
@@ -88,26 +88,7 @@ pub struct Gate {
     streams: Arc<AtomicUsize>,
 }
 
-/// A place among the requests in flight (or the streams), given back when dropped.
-#[derive(Debug)]
-pub struct Permit(Arc<AtomicUsize>);
-
-impl Permit {
-    /// One of the `max` places `count` keeps, if one is free.
-    pub fn take(count: &Arc<AtomicUsize>, max: usize) -> Option<Permit> {
-        if count.fetch_add(1, Ordering::SeqCst) >= max {
-            count.fetch_sub(1, Ordering::SeqCst);
-            return None;
-        }
-        Some(Permit(count.clone()))
-    }
-}
-
-impl Drop for Permit {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
-    }
-}
+pub use super::conn::Permit;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Route {
@@ -134,10 +115,17 @@ impl Gate {
         Gate { port, token, in_flight: Arc::default(), streams: Arc::default() }
     }
 
-    /// The guards, in order, on the head alone: the `Host` header names this server (403:
-    /// DNS rebinding), no `Origin` (403: no page in a browser), the token (401), the route
-    /// (404, 405), the body's size (413), room (503).
+    /// The guards, in order, on the head alone: `guards`, then `route` (the server calls each
+    /// itself, its connection served in between).
+    #[cfg(test)]
     pub fn admit(&self, head: &Head) -> Result<Admitted, Answer> {
+        self.guards(head)?;
+        self.route(head)
+    }
+
+    /// Who may come in: the `Host` header names this server (403: DNS rebinding), no `Origin`
+    /// (403: no page in a browser), the token (401). Past them, a connection is served.
+    pub fn guards(&self, head: &Head) -> Result<(), Answer> {
         if !head.host.is_some_and(|h| self.ours(h)) {
             return Err(Answer::error(403, "the Host header must be this server's loopback address"));
         }
@@ -147,6 +135,11 @@ impl Gate {
         if !self.authorized(head.authorization) {
             return Err(Answer::error(401, "a valid bearer token is required"));
         }
+        Ok(())
+    }
+
+    /// Past the guards: the route (404, 405), the body's size (413), room (503).
+    pub fn route(&self, head: &Head) -> Result<Admitted, Answer> {
         let route = match (head.path, head.method) {
             (EVENTS, "GET") => Route::Events,
             (COMMANDS, "POST") => Route::Commands,
@@ -167,9 +160,7 @@ impl Gate {
     /// `host` names this server: `127.0.0.1:<port>` or `localhost:<port>`, the port in plain
     /// digits (no sign, no leading zero).
     fn ours(&self, host: &str) -> bool {
-        let Some((name, port)) = host.trim().rsplit_once(':') else { return false };
-        let plain = !port.is_empty() && !port.starts_with('0') && port.bytes().all(|b| b.is_ascii_digit());
-        (name == "127.0.0.1" || name.eq_ignore_ascii_case("localhost")) && plain && port.parse::<u16>().ok() == Some(self.port)
+        super::conn::names_loopback(host, self.port)
     }
 
     fn authorized(&self, header: Option<&str>) -> bool {

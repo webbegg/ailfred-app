@@ -263,6 +263,21 @@ fn an_action_queued_before_a_stop_is_dropped() {
 }
 
 #[test]
+fn a_call_to_a_retired_helper_does_nothing_even_if_it_read_the_epoch_after_switching_off_and_on() {
+    let rig = rig();
+    // Its server stopped (switched off), then on again: a new server, a new helper.
+    rig.helper.retire();
+    rig.control.set_enabled(false);
+    rig.control.set_enabled(true);
+    // A request let in by the old server read the session's epoch only now.
+    let result = rig.helper.call_tool_from(rig.control.epoch(), "screenshot", &json!({})).unwrap();
+    assert!(is_error(&result), "{result}");
+    assert_eq!(rig.dialogs.grants.load(Ordering::SeqCst), 0, "no grant asked");
+    assert_eq!(rig.desktop.captures.load(Ordering::SeqCst), 0);
+    assert!(!rig.control.is_active(NOW), "no session started");
+}
+
+#[test]
 fn stopping_or_switching_off_while_the_grant_is_asked_drops_the_action_even_if_allowed() {
     for (ending, said) in [("panic", STOPPED), ("off", OFF)] {
         let rig = rig();
