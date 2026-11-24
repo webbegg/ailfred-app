@@ -284,14 +284,57 @@ fn with_pi_replying_a_message_sent_meanwhile_steers_its_run_and_its_reply_starts
     assert_eq!(state(&c, b), Some(reply::State::Streaming));
     assert_eq!(texts(c.reply_to(b).unwrap()), "Sure");
 
-    // Stopped before pi read it: it goes again as a message of its own.
+    // Stopped before pi read it: once pi says so, it goes again as a message of its own.
     let d = sent(&mut c, "three");
-    c.ask(d);
+    let steered = c.ask(d).unwrap();
     assert!(c.requests.last().unwrap().1.steer);
     c.stop(Instant::now());
+    assert_eq!((c.requests.len(), state(&c, d)), (3, Some(reply::State::Queued)), "pi may have read it: it waits for pi");
+    c.reply_event(steered, Event::Dropped, Instant::now());
     let (td, request) = c.requests.last().cloned().unwrap();
     assert_eq!((request.text.as_str(), request.steer, state(&c, d)), ("three", false, Some(reply::State::Streaming)));
     assert_eq!(c.reply_to(d).map(|r| r.token), Some(td));
+}
+
+#[test]
+fn a_steer_pi_read_just_before_stop_is_stopped_with_the_run_and_not_sent_again() {
+    let mut c = Chat::new(None);
+    c.model = Some(crate::model::PI.into());
+    let a = sent(&mut c, "one");
+    c.ask(a);
+    let b = sent(&mut c, "two");
+    let tb = c.ask(b).unwrap();
+    let d = sent(&mut c, "three");
+    let td = c.ask(d).unwrap();
+    c.stop(Instant::now());
+    assert_eq!(c.requests.len(), 3, "nothing goes again before pi says what it read");
+    // pi read "two" before the Stop reached it; "three" it dropped.
+    c.reply_event(tb, Event::Taken, Instant::now());
+    c.reply_event(tb, Event::Text("late".into()), Instant::now());
+    assert_eq!(state(&c, b), Some(reply::State::Stopped));
+    assert_eq!(texts(c.reply_to(b).unwrap()), "");
+    assert_eq!(state(&c, d), Some(reply::State::Queued), "not before pi says");
+    c.reply_event(td, Event::Dropped, Instant::now());
+    assert_eq!(state(&c, d), Some(reply::State::Streaming));
+    let texts_sent: Vec<&str> = c.requests.iter().map(|(_, r)| r.text.as_str()).collect();
+    assert_eq!(texts_sent, ["one", "two", "three", "three"], "pi has \"two\" once");
+}
+
+#[test]
+fn a_message_sent_while_pi_says_what_it_read_goes_after_the_ones_it_dropped() {
+    let mut c = Chat::new(None);
+    c.model = Some(crate::model::PI.into());
+    let a = sent(&mut c, "one");
+    c.ask(a);
+    let b = sent(&mut c, "two");
+    let tb = c.ask(b).unwrap();
+    c.stop(Instant::now());
+    let x = sent(&mut c, "three");
+    c.ask(x);
+    assert_eq!(c.requests.len(), 2, "no run to steer: it waits its turn");
+    c.reply_event(tb, Event::Dropped, Instant::now());
+    assert_eq!((state(&c, b), state(&c, x)), (Some(reply::State::Streaming), Some(reply::State::Queued)), "in the order they were sent");
+    assert_eq!(c.requests.last().unwrap().1.text, "two");
 }
 
 #[test]
@@ -304,9 +347,10 @@ fn a_steer_pi_dropped_for_a_retry_goes_again_after_it() {
     let b = sent(&mut c, "two");
     c.ask(b);
     let d = sent(&mut c, "three");
-    c.ask(d);
+    let steered = c.ask(d).unwrap();
     assert!(c.requests.last().unwrap().1.steer);
     let again = c.retry(ta).unwrap();
+    c.reply_event(steered, Event::Dropped, Instant::now());
     assert_eq!(state(&c, d), Some(reply::State::Queued), "pi dropped it with the run: it waits");
     c.reply_event(again, Event::Done, Instant::now());
     let (td, request) = c.requests.last().cloned().unwrap();

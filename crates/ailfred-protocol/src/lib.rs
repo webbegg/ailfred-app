@@ -12,6 +12,7 @@
 //! |---|---|
 //! | (the run's first event, whatever it is) | `RUN_STARTED` `protocolVersion: "1.0"` before it |
 //! | `Taken` | nothing more |
+//! | `Dropped` | nothing (the message goes again, a run of its own) |
 //! | `Think` | `REASONING_START` + `REASONING_MESSAGE_START` once, then `REASONING_MESSAGE_CONTENT` (non-empty pieces); any other event first closes it: `REASONING_MESSAGE_END` + `REASONING_END` (replayed as `Taken`, which ends the thinking at that time) |
 //! | `Text` | `TEXT_MESSAGE_START` (assistant) once, then `TEXT_MESSAGE_CONTENT` (non-empty pieces); any other event first closes it: `TEXT_MESSAGE_END` |
 //! | `Step` | `TOOL_CALL_START` (`read`, `search`, `run`, `edit`, `other`) + `TOOL_CALL_ARGS` `{"target":…}` + `TOOL_CALL_END` |

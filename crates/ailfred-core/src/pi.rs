@@ -138,6 +138,9 @@ struct Steer {
     /// What pi answered: nothing yet, "queued" (into the run) or "started" (a run of its own:
     /// the one before had ended).
     answer: SteerAnswer,
+    /// Its run was stopped. pi may still read it (its record on the way when the Stop went):
+    /// then its reply gets `Taken` and nothing more; else `Dropped` once pi settles.
+    stopped: bool,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -199,22 +202,35 @@ impl Core {
     /// Stop: pi aborts, and what it still sends goes nowhere.
     pub fn stop(&mut self) -> Vec<Value> {
         self.sink = None;
-        self.queued = None;
+        // Never sent to pi: the chat sends them again, as messages of their own.
+        if let Some((_, sink)) = self.queued.take() {
+            sink(Event::Dropped);
+        }
+        for (_, sink) in self.later.drain(..) {
+            sink(Event::Dropped);
+        }
         let mut out = Vec::new();
         if let Some(dialog) = self.dialog.take() {
             out.push(json!({"type": "extension_ui_response", "id": dialog.id, "cancelled": true}));
         }
         if self.busy && !self.aborting {
-            self.aborting = true;
-            out.push(self.command(json!({"type": "abort"})));
+            out.push(self.abort());
         }
-        // The chat sends what pi hadn't read yet again, as messages of their own.
-        self.later.clear();
-        if !self.steers.is_empty() {
-            self.steers.clear();
+        // pi may have read some already: which, only its records say, up to its settling.
+        if self.steers.iter().any(|s| !s.stopped) {
+            for steer in &mut self.steers {
+                steer.stopped = true;
+            }
             out.push(self.command(json!({"type": "clear_queue"})));
         }
         out
+    }
+
+    /// pi aborts the run going; what it still sends goes nowhere.
+    fn abort(&mut self) -> Value {
+        self.sink = None;
+        self.aborting = true;
+        self.command(json!({"type": "abort"}))
     }
 
     /// `prompt` goes into the run going; its reply starts where pi reads it.
@@ -223,17 +239,17 @@ impl Core {
         command["streamingBehavior"] = json!("steer");
         let command = self.command(command);
         let id = command["id"].as_str().unwrap_or_default().to_owned();
-        self.steers.push_back(Steer { id, sink, answer: SteerAnswer::Unanswered });
+        self.steers.push_back(Steer { id, sink, answer: SteerAnswer::Unanswered, stopped: false });
         command
     }
 
-    /// pi's response to steer `at`.
-    fn steer_answered(&mut self, at: usize, record: &Value) {
+    /// pi's response to steer `at`; the commands that calls for.
+    fn steer_answered(&mut self, at: usize, record: &Value) -> Vec<Value> {
         if record["success"] == false {
             if let Some(steer) = self.steers.remove(at) {
                 (steer.sink)(Event::Fail(record["error"].as_str().unwrap_or("The assistant couldn't take that message.").to_owned()));
             }
-            return;
+            return Vec::new();
         }
         match record["data"]["disposition"].as_str().unwrap_or_default() {
             // A command or an extension took it: no run.
@@ -244,12 +260,24 @@ impl Core {
             }
             "started" if !self.busy => {
                 if let Some(steer) = self.steers.remove(at) {
+                    let stopped = steer.stopped;
                     self.run_of_its_own(steer);
+                    // pi started it after the Stop: it stops too.
+                    if stopped {
+                        return vec![self.abort()];
+                    }
                 }
             }
             "started" => self.steers[at].answer = SteerAnswer::Started,
+            // Stopped, and no run left for it to go into: it goes again.
+            _ if self.steers[at].stopped && !self.busy => {
+                if let Some(steer) = self.steers.remove(at) {
+                    (steer.sink)(Event::Dropped);
+                }
+            }
             _ => self.steers[at].answer = SteerAnswer::Queued,
         }
+        Vec::new()
     }
 
     /// pi runs `steer` on its own, its run having ended as it came: it's the run going now.
@@ -269,7 +297,7 @@ impl Core {
         match kind {
             "response" if record["command"] == "prompt" && self.steers.iter().any(|s| record["id"] == s.id.as_str()) => {
                 if let Some(at) = self.steers.iter().position(|s| record["id"] == s.id.as_str()) {
-                    self.steer_answered(at, record);
+                    return self.steer_answered(at, record);
                 }
             }
             "message_start" if record["message"]["role"] == "user" => {
@@ -280,12 +308,15 @@ impl Core {
                 {
                     // Its reply starts before the one before ends: the chat never sees neither going.
                     (steer.sink)(Event::Taken);
-                    match self.error.take() {
-                        Some(error) => self.emit(Event::Fail(error)),
-                        None => self.emit(Event::Done),
+                    // Read before the Stop reached pi, it's in the run that stops: so is its reply.
+                    if !steer.stopped {
+                        match self.error.take() {
+                            Some(error) => self.emit(Event::Fail(error)),
+                            None => self.emit(Event::Done),
+                        }
+                        self.sink = Some(steer.sink);
+                        self.texted = false;
                     }
-                    self.sink = Some(steer.sink);
-                    self.texted = false;
                 }
             }
             "response" if record["command"] == "prompt" => {
@@ -375,8 +406,9 @@ impl Core {
         if let Some((_, sink)) = self.queued.take() {
             sink(Event::Fail(STOPPED.into()));
         }
+        // One its run's Stop caught goes again: the pi that comes back has a session of its own.
         for steer in self.steers.drain(..) {
-            (steer.sink)(Event::Fail(STOPPED.into()));
+            (steer.sink)(if steer.stopped { Event::Dropped } else { Event::Fail(STOPPED.into()) });
         }
         for (_, sink) in self.later.drain(..) {
             sink(Event::Fail(STOPPED.into()));
@@ -402,18 +434,27 @@ impl Core {
         let mut started = None;
         for steer in std::mem::take(&mut self.steers) {
             match steer.answer {
+                // The Stop cleared it from pi's queue, unread.
+                SteerAnswer::Queued if steer.stopped => (steer.sink)(Event::Dropped),
                 SteerAnswer::Queued => (steer.sink)(Event::Fail("pi ended its run before reading this message. Send it again.".into())),
                 SteerAnswer::Started if started.is_none() => started = Some(steer),
                 _ => self.steers.push_back(steer),
             }
         }
         let mut out = Vec::new();
-        if std::mem::take(&mut self.renew) {
+        // A stopped steer pi started runs until its abort settles: the new session waits for it.
+        let aborts_next = started.as_ref().is_some_and(|s| s.stopped);
+        if !aborts_next && std::mem::take(&mut self.renew) {
             out.push(self.command(json!({"type": "new_session"})));
             self.seen = false;
         }
         if let Some(steer) = started {
+            let stopped = steer.stopped;
             self.run_of_its_own(steer);
+            // pi started it after the Stop: it stops too.
+            if stopped {
+                out.push(self.abort());
+            }
             return out;
         }
         if let Some((prompt, sink)) = self.queued.take() {
@@ -942,11 +983,112 @@ mod tests {
         core.send(prompt("four"), a);
         feed(&mut core, &[STARTED]);
         let (d, d_rx) = channel();
-        core.send(steer("five"), d);
+        let id = core.send(steer("five"), d)[0]["id"].clone();
+        feed(&mut core, &[&queued_response(&id)]);
         assert_eq!(types(&core.stop()), ["abort", "clear_queue"], "Stop: pi drops it too");
-        let five = user("five");
-        feed(&mut core, &[&five, r#"{"type":"agent_settled","aborted":true}"#]);
-        assert_eq!(d_rx.try_iter().count(), 0, "the chat sends it again itself");
+        feed(&mut core, &[r#"{"type":"agent_settled","aborted":true}"#]);
+        assert_eq!(d_rx.try_iter().collect::<Vec<_>>(), [Event::Dropped], "unread: the chat sends it again");
+    }
+
+    #[test]
+    fn a_steer_pi_read_before_its_abort_settled_is_taken_and_goes_no_further() {
+        let mut core = Core::default();
+        let (a, a_rx) = channel();
+        core.send(prompt("one"), a);
+        let one = user("one");
+        feed(&mut core, &[STARTED, &one]);
+        let (b, b_rx) = channel();
+        let two_id = core.send(steer("two"), b)[0]["id"].clone();
+        let (c, c_rx) = channel();
+        let three_id = core.send(steer("three"), c)[0]["id"].clone();
+        feed(&mut core, &[&queued_response(&two_id), &queued_response(&three_id)]);
+        core.stop();
+        // pi had read "two" already: its record comes after the Stop.
+        let two = user("two");
+        feed(&mut core, &[&two, ASSISTANT, TEXT_START, &text("late"), END_OK, r#"{"type":"agent_settled","aborted":true}"#]);
+        assert_eq!(b_rx.try_iter().collect::<Vec<_>>(), [Event::Taken], "pi has it: it isn't sent again");
+        assert_eq!(c_rx.try_iter().collect::<Vec<_>>(), [Event::Dropped]);
+        assert_eq!(a_rx.try_iter().count(), 0, "stopped: nothing more");
+    }
+
+    fn queued_response(id: &Value) -> String {
+        format!(r#"{{"type":"response","id":{id},"command":"prompt","success":true,"data":{{"disposition":"queued"}}}}"#)
+    }
+
+    #[test]
+    fn messages_waiting_for_an_abort_are_dropped_when_a_retry_stops_the_run_again() {
+        let mut core = Core::default();
+        let (a, _a_rx) = channel();
+        core.send(prompt("one"), a);
+        feed(&mut core, &[STARTED]);
+        core.stop();
+        let (b, b_rx) = channel();
+        core.send(steer("two"), b);
+        let (c, c_rx) = channel();
+        core.send(steer("three"), c);
+        let (r, r_rx) = channel();
+        core.send(prompt("one again"), r);
+        assert_eq!((b_rx.try_iter().collect::<Vec<_>>(), c_rx.try_iter().collect::<Vec<_>>()), (vec![Event::Dropped], vec![Event::Dropped]));
+        assert_eq!(types(&feed(&mut core, &[r#"{"type":"agent_settled","aborted":true}"#])), ["prompt"], "the retry goes once pi stopped");
+        assert_eq!(r_rx.try_iter().count(), 0);
+    }
+
+    #[test]
+    fn a_stopped_steer_pi_starts_as_a_run_of_its_own_is_aborted_too() {
+        // Started after the run had settled.
+        let mut core = Core::default();
+        let (a, _a_rx) = channel();
+        core.send(prompt("one"), a);
+        feed(&mut core, &[STARTED]);
+        let (b, b_rx) = channel();
+        let id = core.send(steer("two"), b)[0]["id"].clone();
+        core.stop();
+        feed(&mut core, &[r#"{"type":"agent_settled","aborted":true}"#]);
+        let started = format!(r#"{{"type":"response","id":{id},"command":"prompt","success":true,"data":{{"disposition":"started"}}}}"#);
+        assert_eq!(types(&feed(&mut core, &[&started])), ["abort"]);
+        feed(&mut core, &[ASSISTANT, TEXT_START, &text("late"), END_OK, SETTLED]);
+        assert_eq!(b_rx.try_iter().collect::<Vec<_>>(), [Event::Taken], "pi has it: it stops with the run");
+
+        // Started as the run settled, with Cmd+N: the new session waits for that abort too.
+        let (a, _a_rx) = channel();
+        core.send(prompt("three"), a);
+        feed(&mut core, &[STARTED]);
+        let (c, c_rx) = channel();
+        let id = core.send(steer("four"), c)[0]["id"].clone();
+        let started = format!(r#"{{"type":"response","id":{id},"command":"prompt","success":true,"data":{{"disposition":"started"}}}}"#);
+        feed(&mut core, &[&started]);
+        core.new_conversation();
+        assert_eq!(types(&feed(&mut core, &[r#"{"type":"agent_settled","aborted":true}"#])), ["abort"]);
+        assert_eq!(c_rx.try_iter().collect::<Vec<_>>(), [Event::Taken]);
+        assert_eq!(types(&feed(&mut core, &[SETTLED])), ["new_session"]);
+    }
+
+    #[test]
+    fn a_stopped_steer_pi_answers_once_nothing_runs_goes_again() {
+        let mut core = Core::default();
+        let (a, _a_rx) = channel();
+        core.send(prompt("one"), a);
+        feed(&mut core, &[STARTED]);
+        let (b, b_rx) = channel();
+        let id = core.send(steer("two"), b)[0]["id"].clone();
+        core.stop();
+        feed(&mut core, &[r#"{"type":"agent_settled","aborted":true}"#]);
+        assert_eq!(b_rx.try_iter().count(), 0, "pi hasn't answered it yet");
+        feed(&mut core, &[&queued_response(&id)]);
+        assert_eq!(b_rx.try_iter().collect::<Vec<_>>(), [Event::Dropped]);
+    }
+
+    #[test]
+    fn steers_a_stop_caught_go_again_when_pi_ends() {
+        let mut core = Core::default();
+        let (a, _a_rx) = channel();
+        core.send(prompt("one"), a);
+        feed(&mut core, &[STARTED]);
+        let (b, b_rx) = channel();
+        core.send(steer("two"), b);
+        core.stop();
+        core.exited();
+        assert_eq!(b_rx.try_iter().collect::<Vec<_>>(), [Event::Dropped]);
     }
 
     #[test]
