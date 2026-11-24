@@ -5,11 +5,14 @@
 //! - [`hub`]: the conversation's stream, fed by the chat (main thread), one run at a time.
 //! - [`routes`]: the guards and the routes, without sockets.
 //! - [`head`]: a request's head, read off the socket's bytes.
-//! - [`http`]: the sockets (a small HTTP/1.1 server of our own) and the discovery file.
+//! - [`conn`]: the connection layer (accepting, the time and size limits, writing answers),
+//!   which computer control's server stands on too.
+//! - [`http`]: the sockets (this server on `conn`) and the discovery file.
 //!
 //! The chat stays the truth: commands reach it on the main thread through the app's handle
 //! ([`AppCore`]), and what it does reaches the hub through its feed.
 
+pub(crate) mod conn;
 mod head;
 mod http;
 mod hub;

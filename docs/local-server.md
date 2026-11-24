@@ -24,7 +24,10 @@ Ailfred before sending anything, and read the file again when a connection is re
 
 ## HTTP
 
-A small HTTP/1.1 server of Ailfred's own (`src/server/http.rs`, `src/server/head.rs`):
+A small HTTP/1.1 server of Ailfred's own (`src/server/http.rs` on the connection layer in
+`src/server/conn.rs`, heads read by `src/server/head.rs`). Computer control's server (its tools
+for the model, `src/computer/server.rs`) stands on the same layer with limits of its own, in
+its module doc. This one's:
 
 - At most 32 connections open at once; one more is closed as it comes. Each has a thread of
   its own; the accepting thread serves none.
@@ -170,17 +173,6 @@ answer **202** `{"threadId","runId"}`; the run's events come on the stream.
   run ids and saved ones can't clash: a client's `runId` never has the saved shape.
 - Malformed JSON, and a command of a type this version doesn't know (a newer client's), get
   **400** `{"error": "not a command: unknown variant …"}`.
-
-## Known issue: computer control's server
-
-`src/computer/server.rs` (computer control's tools for the model, on another loopback port)
-still uses tiny_http 0.12 and has the two problems this server was rebuilt to avoid:
-
-- **B1:** a request without the token and with `Content-Length: 4611686018427387904` makes
-  tiny_http allocate that much as it drains the unread body, and the app aborts (`u64::MAX`
-  overflows and panics the accepting thread instead).
-- **B2:** a request without the token whose body never comes stalls the accepting thread in
-  that drain, so no other request is served, and switching off doesn't free the port.
 
 ## Not supported yet
 

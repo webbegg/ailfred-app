@@ -923,7 +923,7 @@ impl Host {
     }
 
     /// Settings' computer-control switch (and its saved state at launch): on, the tools are
-    /// served (started the first time); off, they refuse everything and the session ends.
+    /// served on a fresh port with a fresh token; off, the session ends and the port closes.
     pub fn set_computer_control(&mut self, on: bool) {
         if on && self.computer.is_none() {
             let handle = self.handle.clone();
@@ -935,18 +935,22 @@ impl Host {
                 }
             };
             match computer::start(notify) {
-                Ok(running) => {
-                    eprintln!("Ailfred: computer control's tools are served at {}", running.endpoint.url);
-                    self.computer = Some(running);
-                }
+                Ok(running) => self.computer = Some(running),
                 Err(e) => eprintln!("Ailfred: computer control couldn't start: {e}"),
             }
         }
-        if let Some(running) = &self.computer {
+        if let Some(running) = &mut self.computer {
             if running.control.enabled() != on && self.pi.is_some() {
                 self.pi_stale = true;
             }
-            computer::set_enabled(running, on);
+            match computer::set_enabled(running, on) {
+                Ok(()) => {
+                    if let Some(endpoint) = running.endpoint() {
+                        eprintln!("Ailfred: computer control's tools are served at {}", endpoint.url);
+                    }
+                }
+                Err(e) => eprintln!("Ailfred: computer control's tools couldn't be served: {e}"),
+            }
         }
         // Off: the token Claude Code was handed doesn't stay on disk until its next run.
         if !on && let Err(e) = model::claude_code::write_computer_config(&model::claude_code::private_dir_now(), None) {

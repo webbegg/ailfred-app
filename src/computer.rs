@@ -6,9 +6,9 @@
 //! combos, the apps never targeted, which actions ask first, and the session the user grants.
 //! `Desktop` is the seam to the real Mac (`macos`): screenshots, input events, and what the
 //! Accessibility API says is under a point. `mcp` serves the tools over JSON-RPC behind those
-//! guards, `server` on a loopback port, and `control` holds the session the app shares with it
-//! (Settings' switch, Stop, the panic chord, the timeout). `alert` asks the user natively. pi and
-//! Claude Code get the tools while the switch is on (`endpoint_now`).
+//! guards, `server` on a loopback port while the switch is on, and `control` holds the session
+//! the app shares with it (Settings' switch, Stop, the panic chord, the timeout). `alert` asks
+//! the user natively. pi and Claude Code get the tools while the switch is on (`endpoint_now`).
 
 
 pub mod alert;
@@ -36,10 +36,40 @@ pub use macos::{MacDesktop, request_accessibility};
 
 #[cfg(test)]
 mod tests {
+    use super::fake::{FakeClock, FakeDesktop, FakeDialogs};
+    use super::*;
+    use std::net::TcpStream;
+
     #[test]
     fn the_panic_chord_is_option_shift_escape() {
         let chord: rune::Shortcut = super::PANIC_SHORTCUT.parse().expect("a chord Rune reads");
         assert_eq!(chord.to_string(), "alt+shift+escape");
+    }
+
+    #[test]
+    fn switched_off_the_tools_port_closes_and_switched_on_again_it_is_a_fresh_port_and_token() {
+        let control = Arc::new(control::Control::new(|_| {}));
+        let shared = control.clone();
+        let mut running = Running::with(control, move |token| {
+            mcp::Helper::new(Arc::new(FakeDesktop::default()), Arc::new(FakeDialogs::new(false, false)), Arc::new(FakeClock::new(0)), shared.clone(), token, 1)
+        });
+        assert!(running.endpoint().is_none() && !running.control.enabled(), "off, and not served, until switched on");
+        running.switch(true).unwrap();
+        let first = running.endpoint().cloned().expect("served while on");
+        assert!(running.control.enabled());
+        running.switch(true).unwrap();
+        assert_eq!(running.endpoint(), Some(&first), "on again: the same");
+        let address = first.url.trim_start_matches("http://").trim_end_matches("/mcp").to_owned();
+        let _idle = TcpStream::connect(&address).unwrap();
+
+        running.switch(false).unwrap();
+        assert!(running.endpoint().is_none() && !running.control.enabled());
+        let after = TcpStream::connect(&address);
+        assert!(after.as_ref().is_err_and(|e| e.kind() == std::io::ErrorKind::ConnectionRefused), "{after:?}");
+
+        running.switch(true).unwrap();
+        let second = running.endpoint().cloned().expect("served again");
+        assert_ne!(second.token, first.token, "a token handed out before is dead");
     }
 }
 
@@ -48,27 +78,52 @@ use std::sync::{Arc, RwLock};
 /// The panic chord: ends computer control's session from anywhere, while it is on.
 pub const PANIC_SHORTCUT: &str = "alt+shift+escape";
 
+/// The tools' helper, opened by a token.
+type MakeHelper = Box<dyn Fn(String) -> mcp::Helper + Send>;
+
 /// Computer control as the app runs it: the session it shares with the tools, and where they
-/// are served (for the model it starts).
+/// are served while it's on (for the model it starts).
 pub struct Running {
     pub control: Arc<control::Control>,
-    pub endpoint: server::Endpoint,
+    serving: Option<server::Serving>,
+    helper: MakeHelper,
 }
 
-/// Starts serving the tools on a loopback port with a fresh token, switched off until the app
-/// turns them on (`Control::set_enabled`). `notify` hears every session change. Once per launch.
+impl Running {
+    /// Off and not served, until switched on; `helper` makes the tools' helper for a token.
+    pub fn with(control: Arc<control::Control>, helper: impl Fn(String) -> mcp::Helper + Send + 'static) -> Running {
+        Running { control, serving: None, helper: Box::new(helper) }
+    }
+
+    /// Where the tools are served, while they are.
+    pub fn endpoint(&self) -> Option<&server::Endpoint> {
+        self.serving.as_ref().map(server::Serving::endpoint)
+    }
+
+    /// On: serves the tools, if they aren't yet, on a fresh loopback port with a fresh token, and
+    /// turns the session's switch on. Off: turns it off (the session ends) and stops serving: the
+    /// port closes, and the token handed out is dead.
+    pub fn switch(&mut self, on: bool) -> std::io::Result<()> {
+        if on && self.serving.is_none() {
+            let token = server::new_token()?;
+            self.serving = Some(server::start(Arc::new((self.helper)(token.clone())), token)?);
+        }
+        self.control.set_enabled(on);
+        if !on && let Some(serving) = self.serving.take() {
+            serving.stop();
+        }
+        Ok(())
+    }
+}
+
+/// Computer control, switched off and not served until the app turns it on (`set_enabled`).
+/// `notify` hears every session change. Once per launch.
 pub fn start(notify: impl Fn(&session::StateEvent) + Send + Sync + 'static) -> std::io::Result<Running> {
-    let token = server::new_token()?;
     let control = Arc::new(control::Control::new(notify));
-    let helper = mcp::Helper::new(
-        Arc::new(MacDesktop::default()),
-        Arc::new(alert::MacDialogs),
-        Arc::new(SystemClock),
-        control.clone(),
-        token.clone(),
-        std::process::id() as i32,
-    );
-    let endpoint = server::start(Arc::new(helper), token)?;
+    let shared = control.clone();
+    let helper = move |token| {
+        mcp::Helper::new(Arc::new(MacDesktop::default()), Arc::new(alert::MacDialogs), Arc::new(SystemClock), shared.clone(), token, std::process::id() as i32)
+    };
     // A session that times out says so when it does, not at the next tool call.
     let watched = Arc::downgrade(&control);
     std::thread::Builder::new().name("computer-timeout".into()).spawn(move || {
@@ -78,7 +133,7 @@ pub fn start(notify: impl Fn(&session::StateEvent) + Send + Sync + 'static) -> s
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
     })?;
-    Ok(Running { control, endpoint })
+    Ok(Running::with(control, helper))
 }
 
 /// Where the tools are served while computer control is on (any thread): what a model started
@@ -89,10 +144,11 @@ pub fn endpoint_now() -> Option<server::Endpoint> {
     ENDPOINT_NOW.read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
-/// Turns `running` on or off, and publishes where it's served while it's on.
-pub fn set_enabled(running: &Running, on: bool) {
-    running.control.set_enabled(on);
-    *ENDPOINT_NOW.write().unwrap_or_else(|e| e.into_inner()) = on.then(|| running.endpoint.clone());
+/// Turns `running` on or off (`Running::switch`), and publishes where it's served while it's on.
+pub fn set_enabled(running: &mut Running, on: bool) -> std::io::Result<()> {
+    let switched = running.switch(on);
+    *ENDPOINT_NOW.write().unwrap_or_else(|e| e.into_inner()) = running.endpoint().filter(|_| running.control.enabled()).cloned();
+    switched
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -570,11 +570,12 @@ mod tests {
         let desktop = Arc::new(fake::FakeDesktop::default());
         let dialogs = Arc::new(fake::FakeDialogs::new(true, true));
         let helper = Helper::new(desktop, dialogs, Arc::new(fake::FakeClock::new(0)), control, token.clone(), 1);
-        let endpoint = server::start(Arc::new(helper), token).unwrap();
+        let serving = server::start(Arc::new(helper), token).unwrap();
+        let endpoint = serving.endpoint();
         let layout = Layout::under(&scratch("pi-mcp").join("data"));
         prepare(&layout, &real_home.join(".pi/agent")).unwrap();
         let mut list = command(&pi, &layout, &real_home, &login_path(&std::env::var_os("PATH").unwrap_or_default()), std::env::vars_os());
-        computer_tools(&mut list, &layout, Some(&endpoint)).unwrap();
+        computer_tools(&mut list, &layout, Some(endpoint)).unwrap();
         // `pi mcp list` instead of RPC mode: the same folders, environment and mcp.json.
         let mut cmd = Command::new(list.get_program());
         cmd.args(["mcp", "list"]).current_dir(list.get_current_dir().unwrap());

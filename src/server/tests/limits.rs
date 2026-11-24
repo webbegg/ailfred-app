@@ -198,16 +198,24 @@ fn a_stream_client_reading_a_large_frame_slowly_is_dropped_after_about_the_write
     assert!(first_line(&mut slow, Duration::from_secs(2)).is_ok_and(|l| l.starts_with("HTTP/1.1 200")));
     assert!(eventually(Duration::from_secs(2), || s.watching() == 1), "joined");
     let done = Arc::new(AtomicBool::new(false));
+    // When the big frame began to come: more bytes than the head and the first (empty) snapshot.
+    let coming = Arc::new(Mutex::new(None::<Instant>));
     let reading = {
-        let done = done.clone();
+        let (done, coming) = (done.clone(), coming.clone());
         let mut slow = slow.try_clone().unwrap();
         std::thread::spawn(move || {
             let mut chunk = vec![0u8; 64 << 10];
+            let mut got = 0;
             slow.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
             while !done.load(Ordering::SeqCst) {
                 match slow.read(&mut chunk) {
                     Ok(0) => return,
-                    Ok(_) => {}
+                    Ok(n) => {
+                        got += n;
+                        if got > 16 << 10 {
+                            coming.lock().unwrap().get_or_insert_with(Instant::now);
+                        }
+                    }
                     Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
                     Err(_) => return,
                 }
@@ -223,10 +231,14 @@ fn a_stream_client_reading_a_large_frame_slowly_is_dropped_after_about_the_write
         s.feed.with(|hub| hub.conversation("t", &empty()));
         s.watching() == 0
     });
-    let after = started.elapsed();
+    let (at, after) = (Instant::now(), started.elapsed());
     done.store(true, Ordering::SeqCst);
     assert!(dropped, "still streaming after {after:?}");
-    assert!(after >= QUICK.write && after < QUICK.write * 10, "dropped after {after:?}");
+    assert!(after >= QUICK.write, "dropped after {after:?}");
+    // Timed from when the frame began to come, not from when it was sent: making an 8 MB frame
+    // (a debug build, a loaded machine) takes a while before any of it is written.
+    let writing = coming.lock().unwrap().map(|coming| at - coming);
+    assert!(writing.is_some_and(|w| w < QUICK.write * 10), "dropped {writing:?} after the frame began to come ({after:?} after it was sent)");
     reading.join().unwrap();
 }
 
