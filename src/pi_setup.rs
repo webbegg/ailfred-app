@@ -137,19 +137,31 @@ pub fn forget_computer_token(data: &Path) -> io::Result<()> {
 }
 
 /// The `computer` server in pi's `mcp.json` while `endpoint` serves the tools, else taken out.
+/// A file pi can't read either (see [`pi_reads`]) is left as it is, with an error: replacing it
+/// would drop the user's other servers.
 fn computer_server(layout: &Layout, endpoint: Option<&crate::computer::server::Endpoint>) -> io::Result<()> {
-    use serde_json::{Value, json};
+    use serde_json::json;
     let path = layout.agent.join("mcp.json");
-    let saved = std::fs::read_to_string(&path).ok();
-    if saved.is_none() && endpoint.is_none() {
+    let saved = match std::fs::read_to_string(&path) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    let mut config = match saved {
         // Off, with no file to take the server out of.
-        return Ok(());
-    }
-    let mut config = saved.and_then(|text| serde_json::from_str::<Value>(&text).ok()).filter(Value::is_object).unwrap_or_else(|| json!({}));
-    if !config["mcpServers"].is_object() {
-        config["mcpServers"] = json!({});
-    }
-    let servers = config["mcpServers"].as_object_mut().expect("an object");
+        None if endpoint.is_none() => return Ok(()),
+        None => serde_json::Map::new(),
+        Some(text) => pi_reads(&text).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} is not JSON pi can read (an object whose \"mcpServers\" is an object), so it was left as it is; once it is fixed, computer control's server is added or taken out when pi next starts",
+                    path.display()
+                ),
+            )
+        })?,
+    };
+    let servers = config.entry("mcpServers").or_insert_with(|| json!({})).as_object_mut().expect("checked by pi_reads");
     match endpoint {
         Some(endpoint) => {
             servers.insert(
@@ -167,6 +179,16 @@ fn computer_server(layout: &Layout, endpoint: Option<&crate::computer::server::E
         }
     }
     write_owner_only(&path, &serde_json::to_string_pretty(&config).unwrap_or_default())
+}
+
+/// `mcp.json` as pi reads it: strict JSON after an optional byte order mark, an object, and
+/// `mcpServers`, when there, an object. None for a file pi refuses whole.
+fn pi_reads(text: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
+    use serde_json::Value;
+    match serde_json::from_str(text.strip_prefix('\u{feff}').unwrap_or(text)).ok()? {
+        Value::Object(config) if config.get("mcpServers").is_none_or(Value::is_object) => Some(config),
+        _ => None,
+    }
 }
 
 /// Writes `text` to `path`, readable by the user only. Replaced, not rewritten in place: a file
@@ -574,6 +596,33 @@ mod tests {
         let endpoint = crate::computer::server::Endpoint { url: "http://127.0.0.1:1/mcp".into(), token: "t".into() };
         computer_tools(&mut off, &layout, Some(&endpoint)).unwrap();
         assert_eq!(settings(&layout.agent.join("mcp.json"))["mcpServers"]["computer"]["url"], "http://127.0.0.1:1/mcp");
+    }
+
+    #[test]
+    fn an_mcp_json_pi_cannot_read_is_left_as_it_is_and_the_error_says_so() {
+        let root = scratch("computer-broken");
+        let data = root.join("data");
+        let layout = Layout::under(&data);
+        std::fs::create_dir_all(&layout.agent).unwrap();
+        let mcp = layout.agent.join("mcp.json");
+        let endpoint = crate::computer::server::Endpoint { url: "http://127.0.0.1:1/mcp".into(), token: "t".into() };
+        // Half-edited, a list, servers not an object: pi refuses each whole, so do we.
+        for broken in [r#"{"mcpServers": {"mine": {"command": "x"},"#, r#"[1]"#, r#"{"mcpServers": [], "mine": 1}"#] {
+            std::fs::write(&mcp, broken).unwrap();
+            let mut pi = command(Path::new("pi"), &layout, &root, &OsString::new(), []);
+            let error = computer_tools(&mut pi, &layout, Some(&endpoint)).unwrap_err().to_string();
+            assert!(error.contains("mcp.json") && error.contains("left as it is"), "{error}");
+            assert_eq!(std::fs::read_to_string(&mcp).unwrap(), broken, "on: the user's servers stay");
+            assert!(forget_computer_token(&data).is_err());
+            assert_eq!(std::fs::read_to_string(&mcp).unwrap(), broken, "off: the same");
+        }
+        // pi reads a file that starts with a byte order mark, so it is no reason to replace one.
+        std::fs::write(&mcp, "\u{feff}{\"mcpServers\":{\"mine\":{\"command\":\"x\"}}}").unwrap();
+        let mut pi = command(Path::new("pi"), &layout, &root, &OsString::new(), []);
+        computer_tools(&mut pi, &layout, Some(&endpoint)).unwrap();
+        let config = settings(&mcp);
+        assert_eq!(config["mcpServers"]["mine"], serde_json::json!({"command": "x"}));
+        assert_eq!(config["mcpServers"]["computer"]["url"], "http://127.0.0.1:1/mcp");
     }
 
     #[test]
