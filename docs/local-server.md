@@ -29,39 +29,48 @@ A small HTTP/1.1 server of Ailfred's own (`src/server/http.rs` on the connection
 for the model, `src/computer/server.rs`) stands on the same layer with limits of its own, in
 its module doc. This one's:
 
-- At most 32 connections open at once; one more is closed as it comes. Each has a thread of
-  its own; the accepting thread serves none.
+- A connection still reading its head waits in a pool of its own, at most 64 (shared rule of
+  the connection layer): one more, and the oldest waiting is shut down, not the newcomer. Only
+  past the guards' `Host`, `Origin` and token checks does it take one of the 32 served places;
+  none free, **503**. Each connection has a thread of its own, so at most 64 + 32 threads; the
+  accepting thread serves none, and waits for an evicted connection's thread to end.
 - A connection's first byte must come within 1 s, else it's closed without an answer. The
   head (request line and headers) must come within 5 s in all, however slowly it's sent, else
   **408** and the connection closes. At most 16 KiB and 64 headers, else **431**.
 - Lines end in CRLF: a bare LF or CR is **400**, and so is a folded header line. Header names
-  are read whatever their case.
+  are read whatever their case. More than one `Host` or `Authorization` header is **400**.
 - No `Transfer-Encoding` (**501**): a body has one `Content-Length` of digits (a malformed or
   repeated one is **400**), and a POST must have one (**411**).
 - A body let in is read as it comes, within 30 s, up to its `Content-Length`. `Expect:
   100-continue` gets its `100 Continue` once the guards let the request in.
 - Every answer says `Connection: close`, and the connection closes after it: one request per
   connection, no keep-alive, no pipelining. An answer not taken within 10 s is cut off.
+- Once answered, the server says it sends no more, then reads and drops what the client still
+  sends (a body it never read, the rest of a head too large), at most 64 KiB within 300 ms,
+  before closing: so a refusal (**401**, **413**, **431**) reaches the client whole instead of
+  a connection reset. That counts against no other limit; past it, it closes all the same.
 - A command whose body is still coming when the server is switched off is never applied, even
   if the switch goes back on before the body ends: **503**.
 
-**Local lockout.** Any process on this Mac, even one without the token, can keep the server
-busy by holding connections: 32 that each send a byte now and then, opened again as they're
-closed, leave no room for other clients. The app itself is unaffected (the chat, the side panel
-and the window don't go through the server). This is inherent to a service on the loopback
-interface; the limits above only make it cost the other process more.
+**Local lockout.** A process on this Mac without the token can't fill the served places: its
+connections never pass the guards, and past 64 waiting its oldest is shut down. A real client
+sends its head in one write and passes the guards in microseconds, so keeping it out takes a
+flood of new connections in that instant. A flood of connections, or a client with the token,
+can still keep the server busy; the app itself is unaffected (the chat, the side panel and the
+window don't go through the server).
 
 ## Guards
 
 In this order, on the head alone. A refused request's body is never read: the answer is
-written and the connection closed (a client still sending its body may then see the
-connection reset instead of the answer).
+written, what the client still sends is dropped (64 KiB within 300 ms at most), and the
+connection closed.
 
 1. `Host` must be `127.0.0.1:<port>` or `localhost:<port>`, the port in plain digits (no
    sign, no leading zero), else **403** (DNS rebinding).
 2. A request with an `Origin` header gets **403**, whatever the origin: no web page may call it
    for now. Whether a loopback origin (a web view) may is T21's to decide.
-3. `Authorization: Bearer <token>`, compared in constant time, else **401**.
+3. `Authorization: Bearer <token>`, compared in constant time, else **401**. Past here, the
+   connection leaves the waiting pool for a served place (none of the 32 free: **503**).
 4. Unknown path **404**, wrong method **405**.
 5. A command body over 16 MiB (enough for base64 screenshots) gets **413**.
 6. More than 8 commands in flight, or more than 4 event streams, get **503**.

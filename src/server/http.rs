@@ -1,11 +1,13 @@
 //! The sockets: a small HTTP/1.1 server of our own on `127.0.0.1:0` (on the connection layer,
 //! `conn`), and the discovery file.
 //!
-//! - One thread accepts, and never serves: each connection gets a thread of its own, at most
-//!   `MAX_CONNECTIONS` at once (one more is closed at once).
+//! - One thread accepts, and never serves: each connection gets a thread of its own. Reading its
+//!   head, it waits in the layer's pool (`conn::MAX_WAITING`, the oldest shut down past it);
+//!   past the guards (`Gate::guards`) it takes one of `MAX_CONNECTIONS` served places (503).
 //! - Its first byte comes within `Limits::first`, else it's closed; the head within
 //!   `Limits::head` in all, at most 16 KiB (`head`). The guards run on it alone; a refusal is
-//!   written and the connection closed, its body never read.
+//!   written, what the client still sends dropped (`conn::linger`), and the connection closed,
+//!   its body never read.
 //! - A body let in is read as it comes, up to its `Content-Length`, within `Limits::body`. A
 //!   command whose body comes after the server stopped is never handed to the chat (503).
 //! - Every answer says `Connection: close`, and the connection closes after it: no keep-alive,
@@ -25,7 +27,7 @@ use std::time::{Duration, Instant};
 use serde_json::json;
 
 pub use super::conn::Limits;
-use super::conn::{self, Body, Plan, write_within};
+use super::conn::{self, Body, Place, Plan, Socket, write_within};
 use super::hub::{Feed, Frame, PING};
 use super::routes::{Answer, Core, Gate, Outcome, Permit, Route, serve};
 use crate::history;
@@ -49,6 +51,9 @@ pub struct Running {
     /// The folder of its discovery file.
     dir: PathBuf,
     feed: Feed,
+    /// The connections open (each has a thread).
+    #[cfg(test)]
+    open: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl std::fmt::Debug for Running {
@@ -65,6 +70,13 @@ impl Running {
 
     /// Stops it (dropping it does the same).
     pub fn stop(self) {}
+
+    /// How many connections are open (each has a thread), now and later.
+    #[cfg(test)]
+    pub fn connections(&self) -> impl Fn() -> usize + use<> {
+        let open = self.open.clone();
+        move || open.load(Ordering::SeqCst)
+    }
 }
 
 impl Drop for Running {
@@ -111,8 +123,17 @@ pub fn start_with(core: Arc<dyn Core>, feed: Feed, dir: &Path, limits: Limits) -
     let stopped = Arc::new(AtomicBool::new(false));
     let server = Arc::new(Server { gate: Gate::new(port, token), core, stopped: stopped.clone(), limits });
     let plan = Plan { accepting: "local-server", connection: "local-connection", connections: MAX_CONNECTIONS, limits };
-    match conn::spawn(listener, plan, Arc::default(), stopped.clone(), move |socket| connection(socket, &server)) {
-        Ok(accepting) => Ok(Running { url, stopped, accepting: Some(accepting), dir: dir.to_owned(), feed }),
+    let open = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    match conn::spawn(listener, plan, open.clone(), stopped.clone(), move |socket, place| connection(socket, place, &server)) {
+        Ok(accepting) => Ok(Running {
+            url,
+            stopped,
+            accepting: Some(accepting),
+            dir: dir.to_owned(),
+            feed,
+            #[cfg(test)]
+            open,
+        }),
         Err(e) => {
             let _ = std::fs::remove_file(&file);
             Err(e)
@@ -128,30 +149,36 @@ struct Server {
     limits: Limits,
 }
 
-/// One connection: its head, the guards, then its answer or its stream; then it closes.
-fn connection(mut socket: TcpStream, server: &Server) {
+/// One connection: its head, the guards (then it's served: `place`), then its answer or its
+/// stream; then it closes.
+fn connection(socket: Socket, mut place: Place, server: &Server) {
     let limits = server.limits;
-    let (request, rest) = match conn::read_head(&mut socket, limits) {
+    let (request, rest) = match conn::read_head(&socket, limits) {
         Ok(read) => read,
-        Err(Some(answer)) => return respond(socket, &answer, limits.write),
+        Err(Some(answer)) => return respond(&socket, &answer, limits.write),
         Err(None) => return,
     };
     if server.stopped.load(Ordering::SeqCst) {
         return;
     }
-    let admitted = match server.gate.admit(&request.head()) {
+    if let Err(answer) = server.gate.guards(&request.head()) {
+        return respond(&socket, &answer, limits.write);
+    }
+    if !place.serve() {
+        return respond(&socket, &Answer::error(503, "too many connections at once; try again"), limits.write);
+    }
+    let admitted = match server.gate.route(&request.head()) {
         Ok(admitted) => admitted,
-        Err(answer) => return respond(socket, &answer, limits.write),
+        Err(answer) => return respond(&socket, &answer, limits.write),
     };
-    if admitted.route == Route::Commands && request.continues && socket.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").is_err() {
+    if admitted.route == Route::Commands && request.continues && (&*socket).write_all(b"HTTP/1.1 100 Continue\r\n\r\n").is_err() {
         return;
     }
-    let Ok(reader) = socket.try_clone() else { return };
-    let mut body = Body::new(reader, rest, request.length.unwrap_or(0), limits.body);
+    let mut body = Body::new(socket.clone(), rest, request.length.unwrap_or(0), limits.body);
     let live = Live { core: server.core.as_ref(), stopped: &server.stopped };
     match serve(admitted, &mut body, &live) {
-        Outcome::Answer(answer) => respond(socket, &answer, limits.write),
-        Outcome::Stream { first, frames, permit } => stream(socket, first, frames, permit, &server.stopped, limits.write),
+        Outcome::Answer(answer) => respond(&socket, &answer, limits.write),
+        Outcome::Stream { first, frames, permit } => stream(&socket, first, frames, permit, &server.stopped, limits.write),
     }
 }
 
@@ -183,7 +210,7 @@ fn discovery(url: &str, token: &str) -> Vec<u8> {
 }
 
 /// Writes `answer` with its status and JSON body, within `limit`, then closes the connection.
-fn respond(socket: TcpStream, answer: &Answer, limit: Duration) {
+fn respond(socket: &TcpStream, answer: &Answer, limit: Duration) {
     let mut headers = vec![("Content-Type", "application/json"), ("Cache-Control", "no-store")];
     if answer.status == 401 {
         headers.push(("WWW-Authenticate", "Bearer"));
@@ -194,10 +221,10 @@ fn respond(socket: TcpStream, answer: &Answer, limit: Duration) {
 /// Writes the stream: its head and `first` (the snapshot), then each frame, a ping after
 /// `PING_EVERY` without one, until the hub lets go, the server stops, or the client is gone or
 /// too slow (a frame not taken within `limit`; its run goes on); then it closes.
-fn stream(mut socket: TcpStream, first: Frame, frames: Receiver<Frame>, permit: Permit, stopped: &AtomicBool, limit: Duration) {
+fn stream(socket: &TcpStream, first: Frame, frames: Receiver<Frame>, permit: Permit, stopped: &AtomicBool, limit: Duration) {
     let _permit = permit;
     let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
-    if write_within(&mut socket, head.as_bytes(), limit).and_then(|_| write_within(&mut socket, first.as_bytes(), limit)).is_err() {
+    if write_within(socket, head.as_bytes(), limit).and_then(|_| write_within(socket, first.as_bytes(), limit)).is_err() {
         return;
     }
     let mut quiet = Instant::now();
@@ -208,7 +235,7 @@ fn stream(mut socket: TcpStream, first: Frame, frames: Receiver<Frame>, permit: 
             Err(RecvTimeoutError::Timeout) => continue,
             Err(RecvTimeoutError::Disconnected) => break,
         };
-        if write_within(&mut socket, frame.as_bytes(), limit).is_err() {
+        if write_within(socket, frame.as_bytes(), limit).is_err() {
             return;
         }
         quiet = Instant::now();

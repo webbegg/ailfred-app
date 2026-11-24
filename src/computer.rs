@@ -71,6 +71,29 @@ mod tests {
         let second = running.endpoint().cloned().expect("served again");
         assert_ne!(second.token, first.token, "a token handed out before is dead");
     }
+
+    #[test]
+    fn switched_off_the_endpoint_is_unpublished_and_the_port_closed_before_the_session_ends() {
+        // What the session's end saw: the tools' port still open, and the endpoint still handed
+        // to a model started now.
+        let seen = Arc::new(std::sync::Mutex::new(None::<(bool, bool)>));
+        let address = Arc::new(std::sync::Mutex::new(None::<server::Endpoint>));
+        let (sink, ours) = (seen.clone(), address.clone());
+        let control = Arc::new(control::Control::new(move |state| {
+            let Some(endpoint) = ours.lock().unwrap().clone().filter(|_| !state.active) else { return };
+            let port = endpoint.url.trim_start_matches("http://").trim_end_matches("/mcp").to_owned();
+            *sink.lock().unwrap() = Some((TcpStream::connect(port).is_ok(), endpoint_now().as_ref() == Some(&endpoint)));
+        }));
+        let shared = control.clone();
+        let mut running = Running::with(control.clone(), move |token| {
+            mcp::Helper::new(Arc::new(FakeDesktop::default()), Arc::new(FakeDialogs::new(false, false)), Arc::new(FakeClock::new(0)), shared.clone(), token, 1)
+        });
+        set_enabled(&mut running, true).unwrap();
+        *address.lock().unwrap() = running.endpoint().cloned();
+        control.grant(0);
+        set_enabled(&mut running, false).unwrap();
+        assert_eq!(*seen.lock().unwrap(), Some((false, false)), "(port open, endpoint published) when the session ended");
+    }
 }
 
 use std::sync::{Arc, RwLock};
@@ -101,17 +124,19 @@ impl Running {
     }
 
     /// On: serves the tools, if they aren't yet, on a fresh loopback port with a fresh token, and
-    /// turns the session's switch on. Off: turns it off (the session ends) and stops serving: the
-    /// port closes, and the token handed out is dead.
+    /// turns the session's switch on. Off: stops serving (the port closes, the token handed out
+    /// is dead, and what its server let in does nothing), then turns the switch off (the session
+    /// ends). In that order: a request let in reads the session's epoch before its helper
+    /// retires, or sees it retired.
     pub fn switch(&mut self, on: bool) -> std::io::Result<()> {
         if on && self.serving.is_none() {
             let token = server::new_token()?;
             self.serving = Some(server::start(Arc::new((self.helper)(token.clone())), token)?);
         }
-        self.control.set_enabled(on);
         if !on && let Some(serving) = self.serving.take() {
             serving.stop();
         }
+        self.control.set_enabled(on);
         Ok(())
     }
 }
@@ -145,7 +170,11 @@ pub fn endpoint_now() -> Option<server::Endpoint> {
 }
 
 /// Turns `running` on or off (`Running::switch`), and publishes where it's served while it's on.
+/// Off, it's unpublished first: no model started meanwhile is handed a port that's closing.
 pub fn set_enabled(running: &mut Running, on: bool) -> std::io::Result<()> {
+    if !on {
+        *ENDPOINT_NOW.write().unwrap_or_else(|e| e.into_inner()) = None;
+    }
     let switched = running.switch(on);
     *ENDPOINT_NOW.write().unwrap_or_else(|e| e.into_inner()) = running.endpoint().filter(|_| running.control.enabled()).cloned();
     switched

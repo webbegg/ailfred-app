@@ -68,6 +68,13 @@ fn folded_lines_and_malformed_lines_are_400() {
 }
 
 #[test]
+fn two_authorization_headers_are_400_whichever_comes_first() {
+    for head in ["GET / HTTP/1.1\r\nAuthorization: Bearer good\r\nAuthorization: Bearer bad", "GET / HTTP/1.1\r\nauthorization: Bearer bad\r\nAUTHORIZATION: Bearer good"] {
+        assert_eq!(status(head), 400, "{head:?}");
+    }
+}
+
+#[test]
 fn transfer_encoding_is_501_and_content_length_must_be_one_number() {
     for te in ["chunked", "identity", "gzip, chunked"] {
         assert_eq!(status(&format!("POST /v1/commands HTTP/1.1\r\nTransfer-Encoding: {te}\r\nContent-Length: 1")), 501, "{te}");

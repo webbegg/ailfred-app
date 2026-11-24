@@ -192,6 +192,15 @@ impl SettingsUi {
         }
     }
 
+    /// Computer control was switched on but couldn't start (its port, say): the switch shows
+    /// off again, is kept off, and the error says why.
+    pub fn computer_control_failed(&mut self, reason: String) {
+        self.computer_control = false;
+        self.settings.set_computer_control(false);
+        self.accessibility = None;
+        self.error = Some(format!("Computer control couldn't start: {reason}. Turn it on to try again."));
+    }
+
     /// The local-server switch: kept, and handed to the app, which starts or stops the server.
     fn toggle_local_server(&mut self) {
         self.local_server = !self.local_server;
@@ -540,6 +549,19 @@ mod tests {
         let says = els.iter().find(|e| e.key.as_deref() == Some("accessibility")).and_then(|e| e.text.clone()).unwrap_or_default();
         assert!(says.contains("Accessibility: Off"), "{says:?}");
         assert!(els.iter().any(|e| e.role == "button" && e.label.as_deref() == Some("Open Accessibility Settings…")));
+    }
+
+    #[test]
+    fn computer_control_that_couldnt_start_shows_the_switch_off_again_and_says_why() {
+        let mut s = ui();
+        s.check_accessibility = || false;
+        s.toggle_computer_control();
+        s.computer_control_failed("Address already in use".into());
+        assert!(!s.computer_control && !s.settings.computer_control(), "off again, and kept off");
+        assert_eq!(s.accessibility, None, "not needed while it's off");
+        let rt = frames(s);
+        let els = shown(&rt);
+        assert!(els.iter().any(|e| e.text.as_deref().is_some_and(|t| t.contains("Computer control couldn't start") && t.contains("Address already in use"))));
     }
 
     #[test]

@@ -115,10 +115,17 @@ impl Gate {
         Gate { port, token, in_flight: Arc::default(), streams: Arc::default() }
     }
 
-    /// The guards, in order, on the head alone: the `Host` header names this server (403:
-    /// DNS rebinding), no `Origin` (403: no page in a browser), the token (401), the route
-    /// (404, 405), the body's size (413), room (503).
+    /// The guards, in order, on the head alone: `guards`, then `route` (the server calls each
+    /// itself, its connection served in between).
+    #[cfg(test)]
     pub fn admit(&self, head: &Head) -> Result<Admitted, Answer> {
+        self.guards(head)?;
+        self.route(head)
+    }
+
+    /// Who may come in: the `Host` header names this server (403: DNS rebinding), no `Origin`
+    /// (403: no page in a browser), the token (401). Past them, a connection is served.
+    pub fn guards(&self, head: &Head) -> Result<(), Answer> {
         if !head.host.is_some_and(|h| self.ours(h)) {
             return Err(Answer::error(403, "the Host header must be this server's loopback address"));
         }
@@ -128,6 +135,11 @@ impl Gate {
         if !self.authorized(head.authorization) {
             return Err(Answer::error(401, "a valid bearer token is required"));
         }
+        Ok(())
+    }
+
+    /// Past the guards: the route (404, 405), the body's size (413), room (503).
+    pub fn route(&self, head: &Head) -> Result<Admitted, Answer> {
         let route = match (head.path, head.method) {
             (EVENTS, "GET") => Route::Events,
             (COMMANDS, "POST") => Route::Commands,

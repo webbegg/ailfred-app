@@ -19,6 +19,7 @@ use super::rate::{MAX_ACTIONS_PER_SECOND, RateLimiter};
 use super::risk::{Act, assess};
 use super::{Clock, Desktop, Dialogs, InputEvent, MouseButton};
 use serde_json::{Map, Value, json};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 /// Supported MCP revisions, newest first; the newest answers an unknown request.
@@ -348,6 +349,8 @@ pub struct Helper {
     actions: Mutex<Option<ScreenshotGeometry>>,
     /// The app in front when the latest screenshot was taken: keys and text go only to it.
     seen_front: Mutex<Option<i32>>,
+    /// Its server stopped (`retire`).
+    retired: AtomicBool,
 }
 
 impl Helper {
@@ -369,7 +372,14 @@ impl Helper {
             limiter: Mutex::new(RateLimiter::new(MAX_ACTIONS_PER_SECOND, 1000)),
             actions: Mutex::new(None),
             seen_front: Mutex::new(None),
+            retired: AtomicBool::new(false),
         }
+    }
+
+    /// Its server stopped: no call it let in does anything from now on, even once computer
+    /// control is on again (another server, another helper).
+    pub fn retire(&self) {
+        self.retired.store(true, Ordering::SeqCst);
     }
 
     pub fn authorized(&self, header: Option<&str>) -> bool {
@@ -438,14 +448,20 @@ impl Helper {
         })
     }
 
+    /// Computer control is on, and this helper's server too. Read after the call's epoch: a
+    /// server stops (`retire`) before switching off moves the epoch on.
+    fn on(&self) -> bool {
+        self.control.enabled() && !self.retired.load(Ordering::SeqCst)
+    }
+
     fn run(&self, epoch: u64, call: Call) -> Result<Content, Failed> {
-        if !self.control.enabled() {
+        if !self.on() {
             return Err(OFF.into());
         }
         self.check_permissions(&call.tool)?;
         let mut latest = lock(&self.actions);
         // Turned off while this call waited for the one before it.
-        if !self.control.enabled() {
+        if !self.on() {
             return Err(OFF.into());
         }
         self.control.expire(self.clock.now_ms());
@@ -460,7 +476,7 @@ impl Helper {
                 return Err(NOT_ALLOWED.into());
             }
             // Stop, the panic chord or the switch may have come while the user read the question.
-            if !self.control.enabled() {
+            if !self.on() {
                 return Err(OFF.into());
             }
             if self.control.epoch() != epoch {
@@ -516,7 +532,7 @@ impl Helper {
     }
 
     fn still_running(&self, epoch: u64) -> Result<(), String> {
-        if self.control.epoch() != epoch || !self.control.is_active(self.clock.now_ms()) {
+        if self.retired.load(Ordering::SeqCst) || self.control.epoch() != epoch || !self.control.is_active(self.clock.now_ms()) {
             return Err(STOPPED.into());
         }
         Ok(())

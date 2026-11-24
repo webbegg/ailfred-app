@@ -7,6 +7,7 @@ use super::*;
 use std::io::{self, BufRead, BufReader, ErrorKind, Write};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
+use crate::server::conn::MAX_WAITING;
 
 #[test]
 fn tokens_are_long_random_and_fresh() {
@@ -241,6 +242,32 @@ fn a_body_over_1_mib_gets_413_without_being_read() {
     assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
 }
 
+/// How many of 20 tries of `head` then `body` (sent along, unread) got an answer starting with
+/// `expected` whole, not a reset.
+fn intact_of_20(s: &Served, head: &str, body: &[u8], expected: &str) -> usize {
+    (0..20)
+        .filter(|_| {
+            let mut stream = connect(&s.address);
+            stream.write_all(head.as_bytes()).unwrap();
+            let _ = stream.write_all(body);
+            std::thread::sleep(Duration::from_millis(50));
+            until_closed(&mut stream, Duration::from_secs(2)).is_ok_and(|a| a.starts_with(expected))
+        })
+        .count()
+}
+
+#[test]
+fn a_refusal_reaches_the_client_whole_even_with_bytes_it_never_read() {
+    let s = served(Limits::DEFAULT);
+    let body = vec![b'x'; 60_000];
+    let tokenless = format!("POST /mcp HTTP/1.1\r\nHost: {}\r\nContent-Length: 200000\r\n\r\n", s.address);
+    assert_eq!(intact_of_20(&s, &tokenless, &body, "HTTP/1.1 401"), 20, "401 with a body sent along");
+    let too_big = format!("POST /mcp HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Length: {}\r\n\r\n", s.address, s.token, MAX_BODY + 1);
+    assert_eq!(intact_of_20(&s, &too_big, &body, "HTTP/1.1 413"), 20, "413 with a body sent along");
+    let long = s.post(&format!("Authorization: Bearer {}\r\nX-Pad: {}\r\n", s.token, "a".repeat(17 << 10)), r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
+    assert_eq!(intact_of_20(&s, &long, b"", "HTTP/1.1 431"), 20, "431 for a 17 KiB head");
+}
+
 #[test]
 fn a_head_sent_a_byte_at_a_time_is_cut_off_when_the_heads_time_is_up() {
     let s = served(QUICK);
@@ -264,21 +291,64 @@ fn a_head_sent_a_byte_at_a_time_is_cut_off_when_the_heads_time_is_up() {
 }
 
 #[test]
-fn connections_past_the_cap_are_closed_at_once_and_take_no_thread() {
+fn requests_past_the_served_cap_get_503_at_once_and_clients_without_the_token_take_no_place() {
     let s = served(Limits::DEFAULT);
-    let held: Vec<TcpStream> = (0..MAX_CONNECTIONS).map(|_| connect(&s.address)).collect();
+    // Let in, their bodies never come: each holds a served place.
+    let head = format!("POST /mcp HTTP/1.1\r\nHost: {}\r\nAuthorization: Bearer {}\r\nContent-Length: 100000\r\n\r\n", s.address, s.token);
+    let stalled: Vec<TcpStream> = (0..MAX_CONNECTIONS).map(|_| s.send(&head)).collect();
     let open = s.serving.as_ref().map(Serving::connections).expect("on");
     assert!(eventually(Duration::from_secs(1), || open() == MAX_CONNECTIONS), "{} open", open());
     let started = Instant::now();
-    for _ in 0..3 * MAX_CONNECTIONS {
-        let got = until_closed(&mut connect(&s.address), Duration::from_secs(2));
-        assert!(closed(&got) && got.as_ref().map_or(true, String::is_empty), "{got:?}");
-    }
+    let busy = s.answer(&s.valid());
+    assert!(status(&busy).starts_with("HTTP/1.1 503"), "{busy}");
+    let refused = s.answer(&s.tokenless("10"));
+    assert!(status(&refused).starts_with("HTTP/1.1 401"), "a client without the token is still answered: {refused}");
     assert!(started.elapsed() < Duration::from_secs(1), "{:?}", started.elapsed());
-    assert_eq!(open(), MAX_CONNECTIONS, "no more connections, so no more threads");
-    drop(held);
-    let free = eventually(Duration::from_secs(2), || first_line(&mut s.send(&s.valid()), Duration::from_millis(500)).is_ok_and(|l| l.starts_with("HTTP/1.1 200")));
+    drop(stalled);
+    let free = eventually(Duration::from_secs(3), || first_line(&mut s.send(&s.valid()), Duration::from_millis(500)).is_ok_and(|l| l.starts_with("HTTP/1.1 200")));
     assert!(free, "their places come free once they're gone");
+}
+
+/// A client without the token holding `held` connections that each sent one byte of a head,
+/// each opened again after `refresh`, until `stop`.
+fn attack(address: String, held: usize, refresh: Duration, stop: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let mut open: std::collections::VecDeque<(Instant, TcpStream)> = Default::default();
+        while !stop.load(Ordering::SeqCst) {
+            while open.front().is_some_and(|(at, _)| at.elapsed() >= refresh) {
+                open.pop_front();
+            }
+            while open.len() < held {
+                let Ok(mut c) = TcpStream::connect(&address) else { break };
+                let _ = c.write_all(b"P");
+                open.push_back((Instant::now(), c));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    })
+}
+
+#[test]
+fn a_client_without_the_token_holding_more_connections_than_the_waiting_pool_locks_no_one_out() {
+    let _turn = crate::server::conn::flood_room();
+    let s = served(LIMITS);
+    let open = s.serving.as_ref().map(Serving::connections).expect("on");
+    let stop = Arc::new(AtomicBool::new(false));
+    let attacker = attack(s.address.clone(), MAX_WAITING + 36, Duration::from_millis(900), stop.clone());
+    std::thread::sleep(Duration::from_millis(300));
+    let (started, mut answered, mut tries, mut most) = (Instant::now(), 0, 0, 0);
+    while started.elapsed() < Duration::from_secs(4) {
+        tries += 1;
+        if first_line(&mut s.send(&s.valid()), Duration::from_secs(1)).is_ok_and(|l| l.starts_with("HTTP/1.1 200")) {
+            answered += 1;
+        }
+        most = most.max(open());
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    stop.store(true, Ordering::SeqCst);
+    attacker.join().unwrap();
+    assert!(answered * 10 >= tries * 9, "answered {answered} of {tries}");
+    assert!(most <= MAX_WAITING + MAX_CONNECTIONS, "{most} threads at once");
 }
 
 #[test]
@@ -303,6 +373,16 @@ fn a_request_from_a_web_page_is_refused_even_with_the_token() {
         let request = s.post(&format!("Origin: {origin}\r\nAuthorization: Bearer {}\r\n", s.token), r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
         let answer = s.answer(&request);
         assert!(status(&answer).starts_with("HTTP/1.1 403"), "{origin}: {answer}");
+    }
+}
+
+#[test]
+fn a_request_with_two_authorization_headers_gets_400_whichever_comes_first() {
+    let s = served(Limits::DEFAULT);
+    let (good, bad) = (format!("Authorization: Bearer {}\r\n", s.token), "Authorization: Bearer x\r\n".to_owned());
+    for (first, second) in [(&good, &bad), (&bad, &good)] {
+        let answer = s.answer(&s.post(&format!("{first}{second}"), r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#));
+        assert!(status(&answer).starts_with("HTTP/1.1 400"), "{first:?} then {second:?}: {answer}");
     }
 }
 
@@ -335,6 +415,22 @@ fn the_path_and_method_are_matched_as_before() {
     assert!(status(&s.answer(&query)).starts_with("HTTP/1.1 200"), "the query is left out");
     let notification = s.post(&format!("Authorization: Bearer {}\r\n", s.token), r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
     assert!(status(&s.answer(&notification)).starts_with("HTTP/1.1 202"));
+}
+
+#[test]
+fn once_stopped_a_request_it_let_in_does_nothing_even_with_computer_control_on_again() {
+    let token = new_token().unwrap();
+    let (desktop, control) = (Arc::new(FakeDesktop::default()), Arc::new(Control::new(|_| {})));
+    control.set_enabled(true);
+    let helper = Arc::new(Helper::new(desktop.clone(), Arc::new(FakeDialogs::new(true, true)), Arc::new(FakeClock::new(0)), control.clone(), token.clone(), 1));
+    start_with(helper.clone(), token.clone(), QUICK).unwrap().stop();
+    control.set_enabled(false);
+    control.set_enabled(true);
+    // Its body came in just now: the server it came on is gone.
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"screenshot","arguments":{}}}"#;
+    let reply = helper.handle(&HttpRequest { method: "POST", path: "/mcp", authorization: Some(&format!("Bearer {token}")), body });
+    assert_eq!(reply.body.as_ref().map(|b| b["result"]["isError"].clone()), Some(serde_json::json!(true)), "{reply:?}");
+    assert_eq!(desktop.captures.load(Ordering::SeqCst), 0, "nothing done on the desktop");
 }
 
 #[test]
