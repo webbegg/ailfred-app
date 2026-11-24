@@ -152,7 +152,7 @@ impl Encoder {
                 let outcome = if self.asks.is_empty() { RunOutcome::Success } else { RunOutcome::Interrupt { interrupts: std::mem::take(&mut self.asks) } };
                 self.finish(outcome, at, &mut out);
             }
-            Event::Taken => {}
+            Event::Taken | Event::Dropped => {}
         }
         out
     }

@@ -29,6 +29,9 @@ pub enum Event {
     Done,
     /// A queued message's reply starts: the model read it (pi, steered into its run).
     Taken,
+    /// A message steered into a run that stopped: pi let it go unread, so it goes again as a
+    /// message of its own. Nothing of the reply's.
+    Dropped,
 }
 
 /// What an agent step does.
@@ -233,6 +236,9 @@ impl Reply {
 
     /// Takes in the next event (`now`: when it arrived); none once it's over.
     pub fn apply(&mut self, event: Event, now: Instant) {
+        if event == Event::Dropped {
+            return;
+        }
         // A queued reply starts with what the model says to it.
         if self.state == State::Queued && self.steered {
             self.state = State::Streaming;
@@ -290,7 +296,7 @@ impl Reply {
                 self.end_steps(StepStatus::Done);
                 self.state = State::Done;
             }
-            Event::Taken => {}
+            Event::Taken | Event::Dropped => {}
         }
     }
 

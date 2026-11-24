@@ -193,6 +193,10 @@ pub struct Chat {
     /// The questions that went out, by the interrupt ids a client may answer them with: their
     /// reply stream and part.
     asked: HashMap<String, (u64, usize)>,
+    /// Replies steered into a run that was stopped: pi may have read one just before. pi says
+    /// which: one it read gets `Taken` (and stops with the run), one it didn't `Dropped` (and
+    /// goes again).
+    cut: Vec<u64>,
     /// The streams whose runs were cancelled (the host ends their processes), for tests.
     #[cfg(test)]
     cancelled: Vec<u64>,
@@ -211,7 +215,7 @@ pub struct Chat {
 
 impl Chat {
     pub fn new(host: Option<AppHandle<Host>>) -> Self {
-        Chat { messages: Vec::new(), hidden: 0, draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: None, resync_at: None, host, next_shot: 0, replies: Vec::new(), next_token: 0, others: HashMap::new(), kept: HashMap::new(), scratch: TextEdit::new(""), away: false, windowed: false, session: None, conv: history::Meta::fresh(), running_model: String::new(), models_open: false, feed: None, client_run: None, asked: HashMap::new(), #[cfg(test)] cancelled: Vec::new(), #[cfg(test)] saved: Vec::new(), #[cfg(test)] title_asks: Vec::new(), #[cfg(test)] model: None, #[cfg(test)] requests: Vec::new() }
+        Chat { messages: Vec::new(), hidden: 0, draft: TextEdit::new(""), shots: Vec::new(), preview: None, open: false, insets: Insets::default(), screen: [1440.0, 900.0], landed: true, over: None, resync_at: None, host, next_shot: 0, replies: Vec::new(), next_token: 0, others: HashMap::new(), kept: HashMap::new(), scratch: TextEdit::new(""), away: false, windowed: false, session: None, conv: history::Meta::fresh(), running_model: String::new(), models_open: false, feed: None, client_run: None, asked: HashMap::new(), cut: Vec::new(), #[cfg(test)] cancelled: Vec::new(), #[cfg(test)] saved: Vec::new(), #[cfg(test)] title_asks: Vec::new(), #[cfg(test)] model: None, #[cfg(test)] requests: Vec::new() }
     }
 
     pub fn is_open(&self) -> bool {
@@ -492,6 +496,7 @@ impl Chat {
         let replies = &self.replies;
         self.others.retain(|(token, _), _| replies.iter().any(|r| r.token == *token));
         self.kept.retain(|token, _| replies.iter().any(|r| r.token == *token));
+        self.cut.retain(|token| replies.iter().any(|r| r.token == *token));
     }
 
     /// `request` goes to the model for the reply `token`.
@@ -545,6 +550,16 @@ impl Chat {
     /// ending lets the next queued one go, unless it asks the user something.
     pub fn reply_event(&mut self, token: u64, event: Event, now: Instant) {
         let Some(at) = self.replies.iter().position(|r| r.token == token) else { return };
+        let cut = self.cut.iter().position(|&t| t == token).map(|i| self.cut.remove(i)).is_some();
+        if event == Event::Dropped {
+            // pi let it go unread with its run: it goes again, as a message of its own.
+            let reply = &mut self.replies[at];
+            if reply.state == reply::State::Queued && reply.steered {
+                reply.steered = false;
+                self.next_queued();
+            }
+            return;
+        }
         let sent = self.note_event(token, &event);
         let question = matches!(event, Event::Ask { .. });
         let reply = &mut self.replies[at];
@@ -552,6 +567,11 @@ impl Chat {
         reply.apply(event, now);
         if question {
             self.note_question(at, sent);
+        }
+        if cut && self.replies[at].streaming() {
+            // pi read it just before the Stop reached it: it's in the run that stopped.
+            self.replies[at].stop(now);
+            self.note_stop(&[token]);
         }
         let reply = &self.replies[at];
         if was && !reply.live() {
@@ -606,12 +626,12 @@ impl Chat {
         for reply in &mut self.replies {
             reply.stop(now);
         }
+        // What was steered into the run waits for pi to say whether it read it (`reply_event`).
+        let steered = self.replies.iter().filter(|r| r.state == reply::State::Queued && r.steered).map(|r| r.token);
+        let fresh: Vec<u64> = steered.filter(|t| !self.cut.contains(t)).collect();
+        self.cut.extend(fresh);
         if tokens.is_empty() {
             return false;
-        }
-        // pi drops what was steered into the run with it: those wait to go again on their own.
-        for r in &mut self.replies {
-            r.steered = false;
         }
         self.note_stop(&tokens);
         #[cfg(test)]

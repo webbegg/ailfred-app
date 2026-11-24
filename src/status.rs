@@ -69,7 +69,7 @@ impl Tracker {
         // A steered reply takes over once the model starts on it; one refused never does.
         if let Some(at) = self.steered.iter().position(|&t| t == token) {
             self.steered.remove(at);
-            if matches!(event, Event::Done | Event::Fail(_) | Event::Lost(_)) {
+            if matches!(event, Event::Done | Event::Fail(_) | Event::Lost(_) | Event::Dropped) {
                 return;
             }
             self.start(token, false);
