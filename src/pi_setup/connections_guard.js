@@ -10,13 +10,17 @@
 //   also as a slug in a batch; so is a batch whose actions can't be read. A Composio tool is
 //   known by its name (`…__COMPOSIO_…`) whatever server serves it.
 // - Tainted: once a result of a Composio tool or of computer control (screenshots show what's on
-//   the screen) came into the session, every tool but pi's reads (read, grep, find, ls), the
+//   the screen), or a resource read from either (RESOURCES), came into the session, every tool but pi's reads (read, grep, find, ls), the
 //   tools that call other tools (codemode, tool_search: each call they make comes here too),
 //   computer control (it asks the user itself) and Composio's (above) asks first: bash, write,
 //   edit, another server's tools, and any tool this doesn't know. The taint is the session's: an
 //   entry in it (TAINT) and, should that be missing, its tool results; a new session starts
 //   without. A message that carries an earlier conversation's untrusted turns into a new session
 //   (UNTRUSTED_CONTEXT, from Ailfred's core) taints it too.
+// - pi's own setup: write or edit of a file in pi's agent folder (PI_CODING_AGENT_DIR as the guard
+//   loads: its extensions, this guard among them, mcp.json, mcp-auth.json, settings.json), and a
+//   bash command that names it (SETUP_WORDS), ask first, tainted or not. Best effort for bash: a
+//   command can reach a path without naming it.
 // - Read-only mode (the AILFRED_CONNECTIONS variable as the guard loads: any value but none, ""
 //   or "ask") blocks, without asking, all that would ask above, tainted or not.
 // - With no one to ask (no UI), what would ask is blocked.
@@ -27,6 +31,8 @@
 // Written to pi's agent folder by `pi_setup::connections`; plain JavaScript, no imports.
 
 const MODE = "AILFRED_CONNECTIONS";
+// pi's agent folder, as Ailfred starts pi (else pi's default, `~/.pi/agent`).
+const AGENT_DIR = "PI_CODING_AGENT_DIR";
 // `ailfred_core::reply::LOCAL_ONLY`.
 const LOCAL_ONLY = "Ailfred guard: ";
 // `pi_setup::connections::GUARD_COMMAND`: Ailfred asks pi for it to know the guard loaded.
@@ -41,6 +47,15 @@ const COMPUTER = "mcp__computer__";
 const EXECUTE = "COMPOSIO_MULTI_EXECUTE_TOOL";
 const WRITE_TITLE = `${LOCAL_ONLY}allow these actions on your connected apps?`;
 const TAINTED_TITLE = `${LOCAL_ONLY}allow this? This conversation has read content from your connected apps or screen, which can carry instructions that aren't yours.`;
+const SETUP_TITLE = `${LOCAL_ONLY}allow this change to pi's own setup? It can turn off Ailfred's guard or reach your sign-ins.`;
+
+// pi's tools that change a file, and the arguments naming it.
+const WRITERS = new Set(["write", "edit"]);
+const PATH_ARGS = ["path", "file_path", "filePath"];
+// What a bash command names when it reaches pi's own setup (besides the agent folder's path).
+const SETUP_WORDS = ["mcp-auth", AGENT_DIR, "ailfred-connections-guard", "mcp.json"];
+// pi's tools that read or list MCP servers' resources (`server` names the server; none: all).
+const RESOURCES = new Set(["read_mcp_resource", "list_mcp_resources", "list_mcp_resource_templates"]);
 
 // pi's own tools that only read.
 const PI_READS = new Set(["read", "grep", "find", "ls"]);
@@ -192,12 +207,15 @@ const MAX_NAME = 100;
 const MAX_TEXT = 20000;
 const TOO_LARGE = "Too large to show for approval: ask for one action at a time.";
 
-// Field names shown first, in this order: who or what the action reaches; then its subject or
-// title; then its body; then the rest as they came.
+// Field names (any case) shown first, in this order: who or what the action reaches; then its
+// subject or title; then the rest as they came; its body last.
 const FIRST = [
-  /^(to|from|cc|bcc|reply_to)$/,
-  /^recipient/,
-  /^extra_recipients$/,
+  /^to$/,
+  /recipient/,
+  /^send_to$/,
+  /_to$/,
+  /^cc$/,
+  /^bcc$/,
   /^attendee/,
   /^invitee/,
   /^channel/,
@@ -209,14 +227,14 @@ const FIRST = [
   /^org/,
   /^repo/,
   /^project/,
-  /^issue/,
   /^assignee/,
   /^reviewer/,
+  /^issue/,
   /^calendar/,
-  /^(command|path|file_path|url|cwd)$/,
+  /^(from|command|path|file_path|url|cwd)$/,
 ];
 const SUBJECT = /^(subject|title|summary|name)$/;
-const BODY = /^(body|message|text|markdown_text|html|content|description|comment)$/;
+const BODY = /^(body|message_body|message|text|markdown_text|html|content|description|comment)$/;
 
 const isBlocked = (name) => BLOCKED.some((pattern) => pattern.test(name));
 const isExecute = (tool) => tool === EXECUTE || tool.startsWith(`${EXECUTE}_`);
@@ -232,9 +250,14 @@ function composioTool(name) {
   return null;
 }
 
-// What tool `name` returns can carry instructions that aren't the user's.
-function untrusted(name) {
-  return typeof name === "string" && (composioTool(name) !== null || name.startsWith(COMPUTER));
+// What tool `name` returns, called with `input`, can carry instructions that aren't the user's:
+// Composio's tools, computer control's, and the resources of either (or of every server).
+function untrusted(name, input) {
+  if (typeof name !== "string") return false;
+  if (composioTool(name) !== null || name.startsWith(COMPUTER)) return true;
+  if (!RESOURCES.has(name)) return false;
+  const server = typeof input?.server === "string" ? input.server.trim().toLowerCase() : "";
+  return server === "" || server.includes("composio") || server === "computer";
 }
 
 function readOnly(mode) {
@@ -259,6 +282,8 @@ function classify(tool, input) {
   const keeps = kept.length > 0 ? [{ slug: `${tool} (kept at Composio)`, args: Object.fromEntries(kept.map((name) => [name, input[name]])) }] : [];
   if (META_READS.has(tool)) return keeps.length > 0 ? { kind: "ask", actions: keeps, writes: false } : { kind: "read" };
   if (!isExecute(tool)) return { kind: "ask", actions: [{ slug: tool, args: input }], writes: true };
+  // The call's own fields besides its actions, all shown when it asks.
+  const own = input && typeof input === "object" && !Array.isArray(input) ? Object.fromEntries(Object.entries(input).filter(([key]) => key !== "tools")) : {};
   // `{ tools: [{ tool_slug, arguments }], ... }`. A slug that isn't a string is empty: a write.
   const tools = input?.tools;
   if (!Array.isArray(tools) || tools.length === 0) {
@@ -277,13 +302,15 @@ function classify(tool, input) {
   }
   const writes = actions.filter((action) => !(action.plain && READS.has(action.slug)));
   if (writes.length === 0 && keeps.length === 0) return { kind: "read" };
-  return { kind: "ask", actions: [...keeps, ...writes], writes: writes.length > 0 };
+  const call = holds(own) ? [{ slug: kept.length > 0 ? `${tool} (kept at Composio)` : tool, args: own }] : [];
+  return { kind: "ask", actions: [...call, ...writes], writes: writes.length > 0 };
 }
 
 // A character that would hide, reorder or fake text: a control or format character (C0, DEL,
-// C1, zero-width ones, direction marks and overrides, tags, the soft hyphen, the BOM, …), or a
-// line or paragraph separator.
-const INVISIBLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+// C1, zero-width ones, direction marks and overrides, tags, the soft hyphen, the BOM, …), a line
+// or paragraph separator, or any other character Unicode says to draw as nothing (variation
+// selectors, the combining grapheme joiner, Hangul fillers, …).
+const INVISIBLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/u;
 
 // `text` with each invisible character written out as `\u{…}`, so the dialog shows it on one
 // line, as it is.
@@ -308,8 +335,8 @@ function rank(name) {
   const first = FIRST.findIndex((pattern) => pattern.test(key));
   if (first >= 0) return first;
   if (SUBJECT.test(key)) return FIRST.length;
-  if (BODY.test(key)) return FIRST.length + 1;
-  return FIRST.length + 2;
+  if (BODY.test(key)) return FIRST.length + 2;
+  return FIRST.length + 1;
 }
 
 // An action's arguments, one `name: value` line each, who it reaches first, the empty ones left
@@ -375,8 +402,47 @@ function connected(tool, input, ctx, readonly) {
   return ask(ctx, WRITE_TITLE, call.actions, names);
 }
 
+// `path` as an absolute path, lowercased (macOS's disks ignore case): `@` and `~` as pi reads
+// them, relative to `cwd`, `.` and `..` taken out. Symlinks aren't followed.
+function resolved(path, cwd, home) {
+  let text = String(path).trim();
+  if (text.startsWith("@")) text = text.slice(1);
+  if (text === "~" || text.startsWith("~/")) text = `${home ?? ""}${text.slice(1)}`;
+  if (!text.startsWith("/")) text = `${cwd ?? ""}/${text}`;
+  const parts = [];
+  for (const part of text.split("/")) {
+    if (part === "..") parts.pop();
+    else if (part !== "" && part !== ".") parts.push(part);
+  }
+  return `/${parts.join("/")}`.toLowerCase();
+}
+
+// pi's agent folder, resolved, as the guard loads.
+function agentDir() {
+  const home = process.env.HOME ?? "";
+  const dir = process.env[AGENT_DIR];
+  return resolved(typeof dir === "string" && dir.trim() !== "" ? dir : `${home}/.pi/agent`, process.cwd(), home);
+}
+
+// The call `name` with `input` reaches pi's own setup in `setup` (its agent folder): a write or
+// edit of a file in it, or a bash command naming it.
+function touchesSetup(name, input, ctx, setup) {
+  if (WRITERS.has(name)) {
+    const home = process.env.HOME ?? "";
+    const cwd = typeof ctx?.cwd === "string" ? ctx.cwd : process.cwd();
+    return PATH_ARGS.some((key) => {
+      if (typeof input?.[key] !== "string") return false;
+      const path = resolved(input[key], cwd, home);
+      return path === setup || path.startsWith(`${setup}/`);
+    });
+  }
+  if (name !== "bash") return false;
+  const command = typeof input?.command === "string" ? input.command.toLowerCase() : "";
+  return command.includes(setup) || SETUP_WORDS.some((word) => command.includes(word.toLowerCase()));
+}
+
 // What the call `event` gets: undefined (it runs) or `{ block, reason }`.
-async function guard(event, ctx, readonly, tainted) {
+async function guard(event, ctx, readonly, tainted, setup) {
   const name = typeof event?.toolName === "string" ? event.toolName : "";
   const tool = composioTool(name);
   if (tool !== null) return connected(tool, event.input, ctx, readonly);
@@ -386,6 +452,7 @@ async function guard(event, ctx, readonly, tainted) {
   if (readonly) {
     return { block: true, reason: `Blocked: ${shownName} doesn't run in read-only mode, where only the connected apps' known reads and read, grep, find and ls do.` };
   }
+  if (touchesSetup(name, event.input, ctx, setup)) return ask(ctx, SETUP_TITLE, [{ slug: name, args: event.input }], shownName);
   if (!tainted()) return undefined;
   return ask(ctx, TAINTED_TITLE, [{ slug: name, args: event.input }], shownName);
 }
@@ -418,6 +485,7 @@ function entriesOf(ctx) {
 export default function (pi) {
   // Read once, as the guard loads.
   const readonly = readOnly(process.env[MODE]);
+  const setup = agentDir();
   // This session's (pi loads the guard afresh for each one).
   let tainted = false;
   const taint = (why) => {
@@ -445,12 +513,12 @@ export default function (pi) {
     if (typeof event?.text === "string" && event.text.includes(UNTRUSTED_CONTEXT)) taint("an earlier conversation");
   });
   pi.on("tool_result", (event) => {
-    if (untrusted(event?.toolName)) taint(event.toolName);
+    if (untrusted(event?.toolName, event?.input)) taint(event.toolName);
   });
   pi.on("tool_call", async (event, ctx) => {
-    const verdict = await guard(event, ctx, readonly, () => isTainted(ctx));
+    const verdict = await guard(event, ctx, readonly, () => isTainted(ctx), setup);
     // Let through, its result comes in: tainted before it runs.
-    if (verdict === undefined && untrusted(event?.toolName)) taint(event.toolName);
+    if (verdict === undefined && untrusted(event?.toolName, event?.input)) taint(event.toolName);
     return verdict;
   });
 }

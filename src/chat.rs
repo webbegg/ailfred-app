@@ -335,15 +335,19 @@ impl Chat {
     }
 
     /// The request that asks the model message `id` (None: no such message): the earlier
-    /// messages whose reply came (done, or stopped with something) as the history.
+    /// messages whose reply came (done, or stopped with something) as the history. A turn is
+    /// untrusted once any reply up to it read the connected apps or the screen, one with no text
+    /// of its own (left out of the history) included: what came after can carry what it read.
     pub fn request_for(&self, id: u64, model: &str) -> Option<model::Request> {
         let at = self.messages.iter().position(|m| m.id == id)?;
+        let mut tainted = false;
         let turns: Vec<(u64, model::Turn)> = self.messages[..at]
             .iter()
             .filter_map(|m| {
                 let saved = self.replies.iter().find(|r| r.id == m.id)?;
+                tainted |= saved.untrusted();
                 let reply = saved.history_text()?;
-                Some((m.id, model::Turn { text: m.text.clone(), pngs: m.pngs.clone(), reply, untrusted: saved.untrusted() }))
+                Some((m.id, model::Turn { text: m.text.clone(), pngs: m.pngs.clone(), reply, untrusted: tainted }))
             })
             .collect();
         // Resumed only when it ends where this message's history does: a retry's session
@@ -352,7 +356,7 @@ impl Chat {
         let session = self.session.as_ref().filter(|(_, ends_at)| Some(*ends_at) == last).map(|(s, _)| s.clone());
         let history = turns.into_iter().map(|(_, turn)| turn).collect();
         let message = &self.messages[at];
-        Some(model::Request { model: model.into(), history, text: message.text.clone(), pngs: message.pngs.clone(), session, answer: false, decline: false, steer: false })
+        Some(model::Request { model: model.into(), history, text: message.text.clone(), pngs: message.pngs.clone(), session, answers: None, decline: false, steer: false })
     }
 
     /// Reply `token` reports Claude Code's session: the next message resumes it. A stream that's
@@ -511,13 +515,15 @@ impl Chat {
         }
     }
 
-    /// Asks message `id` again: from `prompt` (`answer`: the user's answer to a question).
+    /// Asks message `id` again: from `prompt` (`answer`: the user's answer to a question). To pi
+    /// it's a message: it answers no dialog.
     fn start_reply(&mut self, id: u64, prompt: String, answer: bool) -> u64 {
-        self.start_reply_as(id, prompt, answer, false)
+        self.start_reply_as(id, prompt, answer, None, false)
     }
 
-    /// The same, `decline`: the answer declines pi's question (`DECLINED`).
-    fn start_reply_as(&mut self, id: u64, prompt: String, answer: bool, decline: bool) -> u64 {
+    /// The same, the answer to pi's dialog `dialog` (the question's, the user answering it),
+    /// `decline`: declining it (`DECLINED`).
+    fn start_reply_as(&mut self, id: u64, prompt: String, answer: bool, dialog: Option<String>, decline: bool) -> u64 {
         self.stop_replies(Instant::now());
         self.next_token += 1;
         let token = self.next_token;
@@ -540,7 +546,7 @@ impl Chat {
             }
             None => {
                 if let Some(request) = self.request_for(id, &model) {
-                    self.send_request(token, model::Request { answer, decline, ..request });
+                    self.send_request(token, model::Request { answers: dialog, decline, ..request });
                 }
             }
         }
@@ -694,7 +700,9 @@ impl Chat {
 
     /// Retry: the reply `token` starts over; its new token. Clients get the conversation
     /// without it, then its new run. None once the conversation is over (Cmd+N): it still
-    /// shows as it slides out, but starts nothing.
+    /// shows as it slides out, but starts nothing. A reply to an answer goes to pi as a message
+    /// of the answer's words, never as an answer: pi's dialog open then (which may be another
+    /// than the one answered, as the guard's next) is cancelled, not answered.
     pub fn retry(&mut self, token: u64) -> Option<u64> {
         if self.over.is_some() {
             return None;
@@ -768,6 +776,11 @@ impl Chat {
             return None;
         }
         let reply = self.replies.iter_mut().find(|r| r.token == token)?;
+        // pi's dialog the first question answered stands for: the answer goes to it alone.
+        let dialog = answers.iter().find_map(|(part, _)| match reply.parts.get(*part) {
+            Some(reply::Part::Question(q)) if q.open() => q.dialog.clone(),
+            _ => None,
+        });
         let texts: Vec<String> = answers.iter().filter_map(|(part, other)| reply.answer(*part, other)).collect();
         if texts.is_empty() {
             return None;
@@ -775,7 +788,7 @@ impl Chat {
         let text = texts.join("\n\n");
         let id = self.next_id();
         self.push(Message::text(id, text.clone()));
-        Some(self.start_reply(id, text, true))
+        Some(self.start_reply_as(id, text, true, dialog, false))
     }
 
     fn next_id(&self) -> u64 {

@@ -88,7 +88,7 @@ fn scripts() -> Vec<Script> {
             "run-question",
             vec![
                 (0, text("I can change a few files.")),
-                (100, ev(Event::Ask { prompt: "Which ones?".into(), options: vec!["src/a.rs".into(), "src/b.rs".into(), "src/c.rs".into()], multi: true })),
+                (100, ev(Event::Ask { prompt: "Which ones?".into(), options: vec!["src/a.rs".into(), "src/b.rs".into(), "src/c.rs".into()], multi: true, dialog: None })),
                 (100, ev(Event::Done)),
             ],
         ),
@@ -264,7 +264,7 @@ fn replaying_a_fixture_builds_the_same_reply_as_its_script() {
 }
 
 fn ask(prompt: &str) -> Kind {
-    Kind::Event(Event::Ask { prompt: prompt.into(), options: vec!["A".into(), "B".into()], multi: false })
+    Kind::Event(Event::Ask { prompt: prompt.into(), options: vec!["A".into(), "B".into()], multi: false, dialog: None })
 }
 
 #[test]

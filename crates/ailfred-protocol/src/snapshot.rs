@@ -176,7 +176,7 @@ pub fn conversation_from_snapshot(messages: &[Message]) -> Vec<Restored> {
                     ASK => {
                         let options = content.get("options").and_then(Value::as_array).map(|o| o.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect()).unwrap_or_default();
                         let multi = content.get("multi").and_then(Value::as_bool).unwrap_or(false);
-                        reply.apply(Event::Ask { prompt: field("message"), options, multi }, now);
+                        reply.apply(Event::Ask { prompt: field("message"), options, multi, dialog: None }, now);
                         if let Some(Part::Question(q)) = reply.parts.last_mut() {
                             q.answered = content.get("answered").and_then(Value::as_str).map(str::to_owned);
                             q.closed = q.answered.is_none() && content.get("closed").and_then(Value::as_bool) == Some(true);

@@ -809,7 +809,7 @@ mod tests {
     fn a_reopened_question_nobody_answered_says_not_answered_and_offers_no_answer() {
         use crate::history::{self, Loaded, LoadedMessage};
         let mut asked = Reply::new(1, "which?");
-        asked.apply(Event::Ask { prompt: "Which one?".into(), options: vec!["A".into(), "B".into()], multi: true }, Instant::now());
+        asked.apply(Event::Ask { prompt: "Which one?".into(), options: vec!["A".into(), "B".into()], multi: true, dialog: None }, Instant::now());
         asked.apply(Event::Done, Instant::now());
         let reply = Some(history::saved_reply(&asked, "20240101-000000-0003", "20240101-000000-0003-0"));
         let mut chat = Chat::new(None);

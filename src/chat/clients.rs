@@ -373,6 +373,8 @@ impl Chat {
             }
         }
         let token = reply.token;
+        // pi's dialog a declined question stands for: the decline dismisses that one alone.
+        let dialog = declined.iter().find_map(|&part| if let Part::Question(q) = &reply.parts[part] { q.dialog.clone() } else { None });
         for &part in &declined {
             if let Some(q) = self.question_mut(token, part) {
                 q.closed = true;
@@ -384,7 +386,7 @@ impl Chat {
             let id = self.next_id();
             self.client_run = Some(run.to_owned());
             self.push(Message::text(id, DECLINED));
-            self.start_reply_as(id, DECLINED.into(), true, true);
+            self.start_reply_as(id, DECLINED.into(), true, dialog, true);
             self.client_run = None;
         } else if answers.is_empty() {
             feed.with(|hub| hub.claim(run));

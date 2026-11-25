@@ -179,7 +179,9 @@ answer **202** `{"threadId","runId"}`; the run's events come on the stream.
   stopped or failed: the footer's, or the error's), not on one streaming or queued, so
   `replyRunId` names the reply by its run: the live run's `runId` (its `RUN_STARTED`), or the
   snapshot's `{run}` (its user message's id without `-user`), matched whole. Retrying stops a
-  reply that streams. **202** `{"threadId","runId"}`, then a snapshot without the retried
+  reply that streams. A retried reply to an answer goes to the model as a message of the
+  answer's words, never as an answer: with pi, its dialog open then is cancelled, not answered
+  (`docs/connected-apps.md`). **202** `{"threadId","runId"}`, then a snapshot without the retried
   message, then the new run. A wrong thread, a used `runId`, or a `replyRunId` naming no reply
   that ended (one streaming or queued, one already retried, after Cmd+N) gets **409**. Live
   run ids and saved ones can't clash: a client's `runId` never has the saved shape.

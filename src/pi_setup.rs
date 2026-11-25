@@ -281,6 +281,8 @@ pub fn start(pi: &Path, data: &Path, real_home: &Path) -> io::Result<crate::pi::
 /// sent meanwhile waits for it.
 pub struct Pi {
     state: Arc<Mutex<PiState>>,
+    /// Its folders' root, with pi installed: Cmd+N writes the guard there again.
+    data: Option<PathBuf>,
 }
 
 enum PiState {
@@ -318,7 +320,7 @@ impl Pi {
         let Some(pi) = pi else {
             return Pi::with(PiState::Failed("pi isn't installed (~/.pi/agent/bin/pi, or set AILFRED_PI).".into()));
         };
-        let pi_ = Pi::with(PiState::Starting(Vec::new()));
+        let pi_ = Pi { data: Some(data.clone()), ..Pi::with(PiState::Starting(Vec::new())) };
         let state = pi_.state.clone();
         std::thread::spawn(move || {
             let started = start(&pi, &data, &real_home).map_err(|e| {
@@ -331,7 +333,7 @@ impl Pi {
     }
 
     fn with(state: PiState) -> Pi {
-        Pi { state: Arc::new(Mutex::new(state)) }
+        Pi { state: Arc::new(Mutex::new(state)), data: None }
     }
 
     #[cfg(test)]
@@ -355,7 +357,7 @@ impl crate::model::Model for Pi {
         use crate::model::Item;
         use crate::reply::Event;
         let context = crate::pi::context(&request.history);
-        let prompt = crate::pi::Prompt { text: request.text, pngs: request.pngs, answer: request.answer, decline: request.decline, steer: request.steer, context };
+        let prompt = crate::pi::Prompt { text: request.text, pngs: request.pngs, answers: request.answers, decline: request.decline, steer: request.steer, context };
         let sink: crate::pi::Sink = Arc::new(move |event| sink(Item::Event(event)));
         match &mut *self.state.lock().unwrap_or_else(|e| e.into_inner()) {
             PiState::Up(engine) => engine.send(prompt, sink),
@@ -379,7 +381,15 @@ impl crate::model::Model for Pi {
         }
     }
 
+    /// Cmd+N: the guard is written again and checked first (an untainted session's bash or write
+    /// could have changed it), as pi's new session loads its extensions afresh; pi then asks it
+    /// for its command again (`PiEngine::new_conversation`).
     fn new_conversation(&mut self) {
+        if let Some(data) = &self.data
+            && let Err(e) = connections::renew_guard(data)
+        {
+            eprintln!("Ailfred: pi's guard couldn't be written again: {e}");
+        }
         if let PiState::Up(engine) = &mut *self.state.lock().unwrap_or_else(|e| e.into_inner()) {
             engine.new_conversation();
         }
@@ -780,6 +790,18 @@ process.stdout.write(JSON.stringify(out));
         }
     }
 
+    #[test]
+    fn cmd_n_writes_the_guard_again_before_pis_new_session_loads_it() {
+        use crate::model::Model;
+        let data = scratch("pi-new-session-guard");
+        let guard = Layout::under(&data).agent.join("extensions/ailfred-connections-guard.js");
+        std::fs::create_dir_all(guard.parent().unwrap()).unwrap();
+        std::fs::write(&guard, "export default function () {}").unwrap();
+        let mut pi = Pi { data: Some(data.clone()), ..Pi::with(PiState::Failed("down".into())) };
+        pi.new_conversation();
+        assert_eq!(std::fs::read_to_string(&guard).unwrap(), connections::GUARD, "an untainted session's bash could have changed it");
+    }
+
     fn sink() -> (crate::model::Sink, std::sync::mpsc::Receiver<crate::model::Item>) {
         let (tx, rx) = std::sync::mpsc::channel();
         let tx = Mutex::new(tx);
@@ -787,7 +809,7 @@ process.stdout.write(JSON.stringify(out));
     }
 
     fn pi_request(text: &str) -> crate::model::Request {
-        crate::model::Request { model: crate::model::PI.into(), history: Vec::new(), text: text.into(), pngs: Vec::new(), session: None, answer: false, decline: false, steer: false }
+        crate::model::Request { model: crate::model::PI.into(), history: Vec::new(), text: text.into(), pngs: Vec::new(), session: None, answers: None, decline: false, steer: false }
     }
 
     #[test]

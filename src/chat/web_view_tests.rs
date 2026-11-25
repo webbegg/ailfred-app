@@ -245,7 +245,7 @@ fn the_web_views_commands_get_what_post_v1_commands_answers_for_the_same_body() 
         assert_eq!(web.replies[0].state, twin.replies[0].state, "and the same Stop");
     }
     // Retry the stopped reply, which then asks; decline its question.
-    let ask = Event::Ask { prompt: "Which?".into(), options: vec!["A".into()], multi: false };
+    let ask = Event::Ask { prompt: "Which?".into(), options: vec!["A".into()], multi: false, dialog: None };
     let decline = |run: &str, interrupt: &str| json(command::decline(&thread, run, &[], interrupt));
     same(&mut web, vec![
         (json(command::retry(&thread, "c4", "nope")), 409),

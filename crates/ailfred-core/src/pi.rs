@@ -24,9 +24,10 @@ pub struct Prompt {
     pub text: String,
     /// Its shots, as PNG bytes.
     pub pngs: Vec<Arc<Vec<u8>>>,
-    /// The user's answer to pi's question (a dialog), not a new message.
-    pub answer: bool,
-    /// With `answer`: the user declined the question, as when they dismiss the dialog.
+    /// The user's answer to pi's question, the dialog with this id (`Event::Ask`'s), not a new
+    /// message. It answers that dialog only: with another open, or none, it's a message.
+    pub answers: Option<String>,
+    /// With `answers`: the user declined the question, as when they dismiss the dialog.
     pub decline: bool,
     /// Sent while pi works: it goes into the run going (`steer`), its reply starting where pi
     /// reads it; a stop drops it.
@@ -147,14 +148,37 @@ pub struct Core {
     required: Option<Required>,
     /// pi hasn't it: what every message gets, until pi starts again.
     refused: Option<String>,
+    /// What pi must have once the new session Cmd+N asked for is there (its extensions load
+    /// afresh): asked again then.
+    renewal: Option<Requirement>,
+    /// The `new_session` command's id, until pi answers it.
+    renewing: Option<String>,
 }
 
-/// An extension command pi must have.
+/// An extension command pi must have: `command` (or pi's `command:N`, should two extensions
+/// register it) registered by the extension in one of `paths` (one file, as written and as its
+/// links resolve), and what every message gets without it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Requirement {
+    pub command: String,
+    pub paths: Vec<String>,
+    pub refusal: String,
+}
+
+impl Requirement {
+    /// pi's `get_commands` lists it: an extension's, by its name, from its file.
+    fn listed_in(&self, record: &Value) -> bool {
+        let named = |name: &str| name == self.command || name.strip_prefix(self.command.as_str()).and_then(|n| n.strip_prefix(':')).is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+        let ours = |c: &Value| c["source"] == "extension" && c["name"].as_str().is_some_and(named) && c["sourceInfo"]["path"].as_str().is_some_and(|p| self.paths.iter().any(|q| q == p));
+        record["success"] == true && record["data"]["commands"].as_array().is_some_and(|commands| commands.iter().any(ours))
+    }
+}
+
+/// An extension command pi must have, asked about.
 struct Required {
     /// The `get_commands` command's id: pi's response names it.
     id: String,
-    command: String,
-    refusal: String,
+    requirement: Requirement,
 }
 
 /// A message steered into pi's run.
@@ -188,14 +212,15 @@ impl Core {
             sink(Event::Fail(refusal.clone()));
             return Vec::new();
         }
-        if prompt.decline && self.dialog.is_none() {
-            // Nothing to dismiss (pi started again, or the dialog went): nothing to say.
+        // It answers the dialog open only if it names it.
+        let answers = prompt.answers.is_some() && self.dialog.as_ref().map(|d| &d.id) == prompt.answers.as_ref();
+        if prompt.decline && !answers {
+            // Nothing to dismiss (pi started again, or the dialog went; another is open, to be
+            // answered on its own): nothing to say.
             sink(Event::Done);
             return Vec::new();
         }
-        if prompt.answer
-            && let Some(dialog) = self.dialog.take()
-        {
+        if answers && let Some(dialog) = self.dialog.take() {
             // pi goes on from its dialog: what it says next is this reply.
             self.sink = Some(sink);
             let mut response = json!({"type": "extension_ui_response", "id": dialog.id});
@@ -327,6 +352,12 @@ impl Core {
         let kind = record["type"].as_str().unwrap_or_default();
         match kind {
             "response" if self.required.as_ref().is_some_and(|r| record["id"] == r.id.as_str()) => return self.commands_listed(record),
+            "response" if self.renewing.as_ref().is_some_and(|id| record["id"] == id.as_str()) => {
+                self.renewing = None;
+                if let Some(requirement) = self.renewal.take() {
+                    return self.require(requirement);
+                }
+            }
             "response" if record["command"] == "prompt" && self.steers.iter().any(|s| record["id"] == s.id.as_str()) => {
                 if let Some(at) = self.steers.iter().position(|s| record["id"] == s.id.as_str()) {
                     return self.steer_answered(at, record);
@@ -417,10 +448,17 @@ impl Core {
         if self.busy {
             self.renew = true;
         } else {
-            out.push(self.command(json!({"type": "new_session"})));
-            self.seen = false;
+            out.push(self.new_session());
         }
         out
+    }
+
+    /// pi's new session, the command pi must have asked about again once it's there.
+    fn new_session(&mut self) -> Value {
+        let command = self.command(json!({"type": "new_session"}));
+        self.renewing = command["id"].as_str().map(str::to_owned);
+        self.seen = false;
+        command
     }
 
     /// pi is up (again): messages go to it.
@@ -428,29 +466,27 @@ impl Core {
         self.down = false;
     }
 
-    /// pi, just started, must have extension command `command` (an extension that must have
-    /// loaded registers it): pi is asked for its commands (what this returns, to write). Without
-    /// it, or if pi can't say, the run going stops failing with `refusal`, and so does every
-    /// message until pi starts again. A message sent before pi answers goes to it, to be stopped
-    /// then: pi answers long before its model asks for a tool.
-    pub fn require(&mut self, command: &str, refusal: &str) -> Vec<Value> {
+    /// pi, just started (or in a new session), must have `requirement`'s extension command (an
+    /// extension that must have loaded registers it): pi is asked for its commands (what this
+    /// returns, to write). Without it, or if pi can't say, the run going stops failing with its
+    /// refusal, and so does every message until pi starts again. A message sent before pi
+    /// answers goes to it, to be stopped then: pi answers long before its model asks for a tool.
+    pub fn require(&mut self, requirement: Requirement) -> Vec<Value> {
         let asked = self.command(json!({"type": "get_commands"}));
         let id = asked["id"].as_str().unwrap_or_default().to_owned();
-        self.required = Some(Required { id, command: command.to_owned(), refusal: refusal.to_owned() });
+        self.required = Some(Required { id, requirement });
         vec![asked]
     }
 
     /// pi's answer to [`Core::require`]'s question.
     fn commands_listed(&mut self, record: &Value) -> Vec<Value> {
-        let Some(required) = self.required.take() else { return Vec::new() };
-        let listed = record["success"] == true
-            && record["data"]["commands"].as_array().is_some_and(|commands| commands.iter().any(|c| c["name"] == required.command.as_str() && c["source"] == "extension"));
-        if listed {
+        let Some(Required { requirement, .. }) = self.required.take() else { return Vec::new() };
+        if requirement.listed_in(record) {
             return Vec::new();
         }
-        eprintln!("Ailfred: pi has no /{} command: it takes no message", required.command);
-        self.emit(Event::Fail(required.refusal.clone()));
-        self.refused = Some(required.refusal);
+        eprintln!("Ailfred: pi has no /{} command from {:?}: it takes no message", requirement.command, requirement.paths);
+        self.emit(Event::Fail(requirement.refusal.clone()));
+        self.refused = Some(requirement.refusal);
         self.stop()
     }
 
@@ -474,7 +510,7 @@ impl Core {
         self.down = true;
         // The pi that comes back starts a session of its own, and is asked again.
         (self.renew, self.seen) = (false, false);
-        (self.required, self.refused) = (None, None);
+        (self.required, self.refused, self.renewing) = (None, None, None);
         self.busy = false;
         self.aborting = false;
         self.dialog = None;
@@ -504,8 +540,7 @@ impl Core {
         // A stopped steer pi started runs until its abort settles: the new session waits for it.
         let aborts_next = started.as_ref().is_some_and(|s| s.stopped);
         if !aborts_next && std::mem::take(&mut self.renew) {
-            out.push(self.command(json!({"type": "new_session"})));
-            self.seen = false;
+            out.push(self.new_session());
         }
         if let Some(steer) = started {
             let stopped = steer.stopped;
@@ -579,7 +614,7 @@ impl Core {
             _ => Vec::new(),
         };
         self.dialog = Some(Dialog { id: id.to_owned(), confirm: method == "confirm" });
-        self.emit(Event::Ask { prompt, options, multi: false });
+        self.emit(Event::Ask { prompt, options, multi: false, dialog: Some(id.to_owned()) });
         self.emit(Event::Done);
     }
 }
@@ -644,7 +679,7 @@ struct Shared {
 /// Makes the command that starts pi again.
 type Make = Box<dyn Fn() -> Command + Send + Sync>;
 /// Says which extension command the pi starting must have, and the refusal without it.
-type Require = Box<dyn Fn() -> Option<(String, String)> + Send + Sync>;
+type Require = Box<dyn Fn() -> Option<Requirement> + Send + Sync>;
 
 /// How long after its `attempt`th crash in a row pi starts again: 1 s, doubling to 30 s.
 pub fn backoff(attempt: u32) -> Duration {
@@ -675,7 +710,7 @@ impl PiEngine {
     /// [`PiEngine::supervised`], each pi it starts asked (`require`, once that pi is made) for an
     /// extension command it must have, and the refusal every message gets without it
     /// ([`Core::require`]); None: nothing to have.
-    pub fn supervised_requiring(make: impl Fn() -> Command + Send + Sync + 'static, require: impl Fn() -> Option<(String, String)> + Send + Sync + 'static, grace: Duration) -> std::io::Result<Self> {
+    pub fn supervised_requiring(make: impl Fn() -> Command + Send + Sync + 'static, require: impl Fn() -> Option<Requirement> + Send + Sync + 'static, grace: Duration) -> std::io::Result<Self> {
         Self::start(make(), Some(Box::new(make)), Some(Box::new(require)), grace)
     }
 
@@ -723,8 +758,8 @@ impl Shared {
         let mut core = self.core.lock().unwrap();
         core.started();
         // Asked before any message goes: the core's lock is held.
-        if let Some((command, refusal)) = self.require.as_ref().and_then(|require| require()) {
-            let asked = core.require(&command, &refusal);
+        if let Some(requirement) = self.require.as_ref().and_then(|require| require()) {
+            let asked = core.require(requirement);
             write(&self.stdin, asked);
         }
         drop(core);
@@ -874,9 +909,11 @@ impl PiEngine {
         write(&self.shared.stdin, commands);
     }
 
-    /// Cmd+N: pi starts a new session.
+    /// Cmd+N: pi starts a new session, which is asked again for the command it must have (its
+    /// extensions load afresh).
     pub fn new_conversation(&mut self) {
         let mut core = self.shared.core.lock().unwrap();
+        core.renewal = self.shared.require.as_ref().and_then(|require| require());
         let commands = core.new_conversation();
         write(&self.shared.stdin, commands);
     }
@@ -931,8 +968,13 @@ mod tests {
         Prompt { text: text.into(), ..Prompt::default() }
     }
 
+    /// The answer `text` to the dialog `u1` (most tests' only one).
     fn answer(text: &str) -> Prompt {
-        Prompt { text: text.into(), answer: true, ..Prompt::default() }
+        answer_to("u1", text)
+    }
+
+    fn answer_to(dialog: &str, text: &str) -> Prompt {
+        Prompt { text: text.into(), answers: Some(dialog.into()), ..Prompt::default() }
     }
 
     fn steer(text: &str) -> Prompt {
@@ -1398,7 +1440,7 @@ mod tests {
         core.send(prompt("hi"), sink);
         feed(&mut core, &[STARTED, r#"{"type":"extension_ui_request","id":"u1","method":"select","title":"Allow it?","options":["Allow","Block"]}"#]);
         assert_eq!(rx.try_iter().collect::<Vec<_>>(), [
-            Event::Ask { prompt: "Allow it?".into(), options: vec!["Allow".into(), "Block".into()], multi: false },
+            Event::Ask { prompt: "Allow it?".into(), options: vec!["Allow".into(), "Block".into()], multi: false, dialog: Some("u1".into()) },
             Event::Done,
         ]);
         let (sink, rx) = channel();
@@ -1417,7 +1459,7 @@ mod tests {
         feed(&mut core, &[STARTED, r#"{"type":"extension_ui_request","id":"u4","method":"select","title":"Allow it?","options":["Allow","Block"]}"#]);
         assert_eq!(asked.try_iter().last(), Some(Event::Done));
         let (sink, rx) = channel();
-        let wrote = core.send(Prompt { decline: true, ..answer("Declined.") }, sink);
+        let wrote = core.send(Prompt { decline: true, ..answer_to("u4", "Declined.") }, sink);
         assert_eq!(wrote, [json!({"type":"extension_ui_response","id":"u4","cancelled":true})], "as when the user dismisses it");
         let ok = text("Skipped it.");
         assert!(feed(&mut core, &[ASSISTANT, TEXT_START, &ok, END_OK, SETTLED]).is_empty());
@@ -1439,9 +1481,37 @@ mod tests {
         let (sink, rx) = channel();
         core.send(prompt("hi"), sink);
         feed(&mut core, &[STARTED, r#"{"type":"extension_ui_request","id":"u2","method":"confirm","title":"Clear it?","message":"All is lost."}"#]);
-        assert_eq!(rx.try_iter().next(), Some(Event::Ask { prompt: "Clear it?\n\nAll is lost.".into(), options: vec!["Yes".into(), "No".into()], multi: false }));
+        assert_eq!(rx.try_iter().next(), Some(Event::Ask { prompt: "Clear it?\n\nAll is lost.".into(), options: vec!["Yes".into(), "No".into()], multi: false, dialog: Some("u2".into()) }));
         let (sink, _rx) = channel();
-        assert_eq!(core.send(answer("No"), sink), [json!({"type":"extension_ui_response","id":"u2","confirmed":false})]);
+        assert_eq!(core.send(answer_to("u2", "No"), sink), [json!({"type":"extension_ui_response","id":"u2","confirmed":false})]);
+    }
+
+    #[test]
+    fn an_answer_naming_another_dialog_than_the_one_open_answers_nothing() {
+        // The guard asks (u1), the user says yes, and the guard asks again (u2).
+        let asked_twice = || {
+            let mut core = Core::default();
+            let (sink, rx) = channel();
+            core.send(prompt("mail Ann"), sink);
+            feed(&mut core, &[STARTED, r#"{"type":"extension_ui_request","id":"u1","method":"confirm","title":"Ailfred guard: send it?"}"#]);
+            assert!(matches!(rx.try_iter().next(), Some(Event::Ask { dialog: Some(ref d), .. }) if d == "u1"), "the question names its dialog");
+            let (sink, _rx) = channel();
+            assert_eq!(core.send(answer_to("u1", "Yes"), sink), [json!({"type":"extension_ui_response","id":"u1","confirmed":true})]);
+            feed(&mut core, &[r#"{"type":"extension_ui_request","id":"u2","method":"confirm","title":"Ailfred guard: run bash?"}"#]);
+            core
+        };
+        // A stale answer (to u1, or to no dialog) confirms nothing.
+        for stale in [answer_to("u1", "Yes"), Prompt { text: "Yes".into(), ..Prompt::default() }, Prompt { decline: true, ..answer_to("u1", "Declined.") }] {
+            let mut core = asked_twice();
+            let (sink, _rx) = channel();
+            let wrote = core.send(stale.clone(), sink);
+            assert!(!wrote.iter().any(|w| w["confirmed"] == true || w.get("value").is_some()), "{stale:?} → {wrote:?}");
+            if stale.decline {
+                assert!(wrote.is_empty(), "a stale decline leaves the open dialog to its own answer: {wrote:?}");
+            } else {
+                assert_eq!(wrote[0], json!({"type":"extension_ui_response","id":"u2","cancelled":true}), "a message, as any: the dialog open is cancelled");
+            }
+        }
     }
 
     #[test]
@@ -1702,19 +1772,75 @@ mod tests {
     }
 
     const GUARD: &str = "ailfred-connections-guard";
+    const GUARD_PATH: &str = "/data/agent/extensions/ailfred-connections-guard.js";
     const REFUSAL: &str = "The guard didn't load.";
 
-    /// pi's answer to `asked` (its `get_commands`), listing `commands` (name, source).
+    /// The guard's command, from its file.
+    fn requirement() -> Requirement {
+        Requirement { command: GUARD.into(), paths: vec!["/elsewhere/guard.js".into(), GUARD_PATH.into()], refusal: REFUSAL.into() }
+    }
+
+    /// pi's answer to `asked` (its `get_commands`), listing `commands` (name, source), each from
+    /// the guard's file.
     fn commands(asked: &Value, commands: &[(&str, &str)]) -> Value {
-        let listed: Vec<Value> = commands.iter().map(|(name, source)| json!({"name": name, "source": source})).collect();
+        let listed: Vec<(&str, &str, &str)> = commands.iter().map(|(name, source)| (*name, *source, GUARD_PATH)).collect();
+        commands_from(asked, &listed)
+    }
+
+    /// The same, each command (name, source, path) from its own file.
+    fn commands_from(asked: &Value, commands: &[(&str, &str, &str)]) -> Value {
+        let listed: Vec<Value> = commands.iter().map(|(name, source, path)| json!({"name": name, "source": source, "sourceInfo": {"path": path, "source": "auto", "scope": "user", "origin": "top-level"}})).collect();
         json!({"type": "response", "id": asked["id"], "command": "get_commands", "success": true, "data": {"commands": listed}})
+    }
+
+    #[test]
+    fn the_command_pi_must_have_counts_only_from_the_guards_own_file_renamed_or_not() {
+        let listed = |commands: &[(&str, &str, &str)]| {
+            let mut core = Core::default();
+            core.started();
+            let asked = core.require(requirement());
+            core.record(&commands_from(&asked[0], commands));
+            let (sink, rx) = channel();
+            let wrote = core.send(prompt("hi"), sink);
+            !wrote.is_empty() && rx.try_iter().next().is_none()
+        };
+        assert!(listed(&[(GUARD, "extension", GUARD_PATH)]));
+        assert!(listed(&[("ailfred-connections-guard:1", "extension", "/data/agent/extensions/fake.js"), ("ailfred-connections-guard:2", "extension", GUARD_PATH)]), "pi's renaming of a name two extensions register");
+        assert!(!listed(&[(GUARD, "extension", "/data/agent/extensions/fake.js")]), "another file registering the name isn't the guard");
+        assert!(!listed(&[("ailfred-connections-guard:1", "extension", "/data/agent/extensions/fake.js")]));
+        assert!(!listed(&[("ailfred-connections-guard-x", "extension", GUARD_PATH)]));
+        assert!(!listed(&[("ailfred-connections-guard:x", "extension", GUARD_PATH)]));
+        assert!(!listed(&[(GUARD, "prompt", GUARD_PATH)]));
+    }
+
+    #[test]
+    fn after_a_new_session_pi_is_asked_again_for_the_command_it_must_have() {
+        let mut core = Core::default();
+        core.started();
+        let asked = core.require(requirement());
+        assert!(core.record(&commands(&asked[0], &[(GUARD, "extension")])).is_empty());
+        core.renewal = Some(requirement());
+        let renewed = core.new_conversation();
+        assert_eq!(types(&renewed), ["new_session"]);
+        let asked = core.record(&json!({"type": "response", "id": renewed[0]["id"], "command": "new_session", "success": true, "data": {"cancelled": false}}));
+        assert_eq!(types(&asked), ["get_commands"], "its extensions loaded afresh");
+        // The new session's pi lacks it: refused.
+        core.record(&commands(&asked[0], &[]));
+        let (sink, rx) = channel();
+        assert!(core.send(prompt("hi"), sink).is_empty());
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), [Event::Fail(REFUSAL.into())]);
+        // Nothing to have: not asked.
+        let mut core = Core::default();
+        core.started();
+        let renewed = core.new_conversation();
+        assert!(core.record(&json!({"type": "response", "id": renewed[0]["id"], "command": "new_session", "success": true})).is_empty());
     }
 
     #[test]
     fn a_pi_that_must_have_an_extensions_command_is_asked_for_its_commands_as_it_starts_and_with_it_runs_as_before() {
         let mut core = Core::default();
         core.started();
-        let asked = core.require(GUARD, REFUSAL);
+        let asked = core.require(requirement());
         assert_eq!(types(&asked), ["get_commands"]);
         assert!(core.record(&commands(&asked[0], &[("other", "extension"), (GUARD, "extension")])).is_empty());
         let (sink, rx) = channel();
@@ -1728,7 +1854,7 @@ mod tests {
         for listed in [vec![], vec![(GUARD, "prompt")]] {
             let mut core = Core::default();
             core.started();
-            let asked = core.require(GUARD, REFUSAL);
+            let asked = core.require(requirement());
             let (sink, rx) = channel();
             core.send(prompt("hi"), sink);
             feed(&mut core, &[STARTED]);
@@ -1740,7 +1866,7 @@ mod tests {
             // A new pi is asked again.
             core.exited();
             core.started();
-            let asked = core.require(GUARD, REFUSAL);
+            let asked = core.require(requirement());
             core.record(&commands(&asked[0], &[(GUARD, "extension")]));
             let (sink, _rx) = channel();
             assert_eq!(types(&core.send(prompt("hi"), sink)), ["prompt"]);
@@ -1748,7 +1874,7 @@ mod tests {
         // pi couldn't say: refused too.
         let mut core = Core::default();
         core.started();
-        let asked = core.require(GUARD, REFUSAL);
+        let asked = core.require(requirement());
         core.record(&json!({"type": "response", "id": asked[0]["id"], "command": "get_commands", "success": false, "error": "no"}));
         let (sink, rx) = channel();
         assert!(core.send(prompt("hi"), sink).is_empty());
@@ -1758,7 +1884,7 @@ mod tests {
     #[test]
     fn the_engine_asks_each_pi_it_starts_for_the_command_it_must_have() {
         let script = r#"read line; id=$(printf '%s' "$line" | sed 's/.*"id":"\([^"]*\)".*/\1/'); printf '{"type":"response","id":"%s","command":"get_commands","success":true,"data":{"commands":[]}}\n' "$id"; while read line; do :; done"#;
-        let mut engine = PiEngine::supervised_requiring(move || sh(script), || Some((GUARD.into(), REFUSAL.into())), Duration::from_millis(200)).expect("spawned");
+        let mut engine = PiEngine::supervised_requiring(move || sh(script), || Some(requirement()), Duration::from_millis(200)).expect("spawned");
         std::thread::sleep(Duration::from_millis(300));
         let (sink, rx) = channel();
         engine.send(prompt("hi"), sink);

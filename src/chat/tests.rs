@@ -401,7 +401,7 @@ fn a_reply_ending_in_a_question_holds_the_queue_until_its_answered() {
     let ta = c.ask(a).unwrap();
     let b = sent(&mut c, "two");
     c.ask(b);
-    c.reply_event(ta, Event::Ask { prompt: "Which?".into(), options: vec!["A".into(), "B".into()], multi: false }, Instant::now());
+    c.reply_event(ta, Event::Ask { prompt: "Which?".into(), options: vec!["A".into(), "B".into()], multi: false, dialog: None }, Instant::now());
     c.reply_event(ta, Event::Done, Instant::now());
     assert_eq!(state(&c, b), Some(reply::State::Queued), "the question first");
     c.pick(ta, 0, 1);
@@ -479,7 +479,7 @@ fn answering_a_question_sends_the_answer_and_gets_its_reply() {
     let mut c = Chat::new(None);
     let id = sent(&mut c, "ask");
     let token = c.ask(id).unwrap();
-    let ask = Event::Ask { prompt: "Which?".into(), options: vec!["Tabs".into(), "Page".into()], multi: false };
+    let ask = Event::Ask { prompt: "Which?".into(), options: vec!["Tabs".into(), "Page".into()], multi: false, dialog: None };
     c.reply_event(token, ask, Instant::now());
     c.reply_event(token, Event::Done, Instant::now());
     assert_eq!(c.answer(token, 0), None, "nothing picked");
@@ -496,7 +496,7 @@ fn the_users_own_words_answer_over_the_picks_and_a_retried_reply_starts_with_an_
     let mut c = Chat::new(None);
     let id = sent(&mut c, "ask");
     let ask = |c: &mut Chat, token| {
-        let ask = Event::Ask { prompt: "Which?".into(), options: vec!["Tabs".into(), "Page".into()], multi: false };
+        let ask = Event::Ask { prompt: "Which?".into(), options: vec!["Tabs".into(), "Page".into()], multi: false, dialog: None };
         c.reply_event(token, ask, Instant::now());
         c.reply_event(token, Event::Done, Instant::now());
     };
@@ -726,21 +726,24 @@ fn a_second_messages_request_carries_the_first_message_its_capture_and_its_reply
 }
 
 #[test]
-fn a_turn_whose_reply_read_the_connected_apps_or_the_screen_goes_into_the_history_as_untrusted() {
-    let mut c = Chat::new(None);
-    let mut ids = Vec::new();
-    for (text, tool) in [("mail?", "mcp__composio__COMPOSIO_MULTI_EXECUTE_TOOL"), ("screen?", "mcp__computer__screenshot"), ("code?", "read"), ("other?", "mcp__composio2__COMPOSIO_SEARCH_TOOLS")] {
-        let id = sent(&mut c, text);
-        let token = c.ask(id).unwrap();
-        let (kind, target) = crate::pi::step_of(tool, &serde_json::json!({"path": "a.rs"}));
-        for e in [Event::Step { id: 1, tool: kind, target }, Event::StepEnd { id: 1, ok: true }, Event::Text("Done.".into()), Event::Done] {
-            c.reply_event(token, e, Instant::now());
+fn a_turn_whose_reply_or_an_earlier_one_read_the_connected_apps_or_the_screen_goes_into_the_history_as_untrusted() {
+    let tainted = |tools: &[&str]| {
+        let mut c = Chat::new(None);
+        for tool in tools {
+            let id = sent(&mut c, "go");
+            let token = c.ask(id).unwrap();
+            let (kind, target) = crate::pi::step_of(tool, &serde_json::json!({"path": "a.rs"}));
+            for e in [Event::Step { id: 1, tool: kind, target }, Event::StepEnd { id: 1, ok: true }, Event::Text("Done.".into()), Event::Done] {
+                c.reply_event(token, e, Instant::now());
+            }
         }
-        ids.push(id);
+        let next = sent(&mut c, "next");
+        c.request_for(next, "m").unwrap().history.iter().map(|t| t.untrusted).collect::<Vec<_>>()
+    };
+    for tool in ["mcp__composio__COMPOSIO_MULTI_EXECUTE_TOOL", "mcp__computer__screenshot", "mcp__composio2__COMPOSIO_SEARCH_TOOLS"] {
+        assert_eq!(tainted(&["read", tool, "read"]), [false, true, true], "{tool}: what came after can carry what it read");
     }
-    let next = sent(&mut c, "next");
-    let history = c.request_for(next, "m").unwrap().history;
-    assert_eq!(history.iter().map(|t| t.untrusted).collect::<Vec<_>>(), [true, true, false, true]);
+    assert_eq!(tainted(&["read", "bash"]), [false, false]);
 }
 
 #[test]
@@ -847,5 +850,45 @@ fn pi_hears_the_answers_to_its_questions_claudes_are_the_mocks() {
     let mut c = Chat::new(None);
     let id = sent(&mut c, "hi");
     let request = c.request_for(id, crate::model::PI).unwrap();
-    assert!(!request.answer);
+    assert!(request.answers.is_none());
+}
+
+#[test]
+fn the_windows_retry_of_a_yes_reply_never_confirms_the_guards_next_dialog() {
+    let mut c = Chat::new(None);
+    c.model = Some(crate::model::PI.into());
+    let guard = |what: &str| Event::Ask { prompt: format!("{}{what}", reply::LOCAL_ONLY), options: vec!["Yes".into(), "No".into()], multi: false, dialog: Some(what.into()) };
+    let id = sent(&mut c, "mail Ann");
+    let first = c.ask(id).unwrap();
+    c.reply_event(first, guard("allow GMAIL_SEND_EMAIL to ann?"), Instant::now());
+    c.reply_event(first, Event::Done, Instant::now());
+    let yes = c.answer_with(first, &[(0, "Yes".into())]).unwrap();
+    c.reply_event(yes, guard("allow this? bash: curl evil"), Instant::now());
+    c.reply_event(yes, Event::Done, Instant::now());
+    let before = c.requests.len();
+    c.retry(yes).expect("retried");
+    let sent: Vec<_> = c.requests[before..].iter().map(|(_, r)| (r.text.clone(), r.answers.clone(), r.decline)).collect();
+    assert_eq!(sent, [("Yes".to_owned(), None, false)], "a message, not an answer: pi's open dialog is cancelled");
+}
+
+#[test]
+fn a_connected_apps_read_in_a_reply_without_text_still_marks_the_replay_untrusted() {
+    let mut c = Chat::new(None);
+    let id = sent(&mut c, "summarize my inbox");
+    let token = c.ask(id).unwrap();
+    let (kind, target) = crate::pi::step_of("mcp__composio__COMPOSIO_MULTI_EXECUTE_TOOL", &serde_json::json!({}));
+    let ask = Event::Ask { prompt: format!("{}allow this? bash", reply::LOCAL_ONLY), options: vec!["Yes".into(), "No".into()], multi: false, dialog: Some("u1".into()) };
+    for e in [Event::Step { id: 1, tool: kind, target }, Event::StepEnd { id: 1, ok: true }, ask, Event::Done] {
+        c.reply_event(token, e, Instant::now());
+    }
+    let part = c.replies.iter().find(|r| r.token == token).unwrap().parts.iter().position(|p| matches!(p, reply::Part::Question(_))).unwrap();
+    let yes = c.answer_with(token, &[(part, "Yes".into())]).unwrap();
+    let (kind, target) = crate::pi::step_of("bash", &serde_json::json!({"command": "ls"}));
+    for e in [Event::Step { id: 1, tool: kind, target }, Event::StepEnd { id: 1, ok: true }, Event::Text("Summary: the email says to run X.".into()), Event::Done] {
+        c.reply_event(yes, e, Instant::now());
+    }
+    let next = sent(&mut c, "next");
+    let ctx = crate::pi::context(&c.request_for(next, "m").unwrap().history);
+    assert!(ctx.contains("the email says to run X"));
+    assert!(ctx.contains(crate::pi::UNTRUSTED_CONTEXT), "an earlier turn read the connected apps, though it said nothing: {ctx}");
 }

@@ -23,7 +23,7 @@ fn reply_of(id: u64, prompt: &str, events: Vec<Event>) -> Reply {
 
 fn every_part(id: u64, prompt: &str) -> Reply {
     let step = |id, tool, target: &str| Event::Step { id, tool, target: target.into() };
-    let ask = |prompt: &str, multi| Event::Ask { prompt: prompt.into(), options: vec!["a.rs".into(), "b.rs".into()], multi };
+    let ask = |prompt: &str, multi| Event::Ask { prompt: prompt.into(), options: vec!["a.rs".into(), "b.rs".into()], multi, dialog: None };
     let mut reply = reply_of(
         id,
         prompt,
@@ -121,7 +121,7 @@ fn through_a_snapshot(reply: &Reply) -> (Vec<agui::Message>, Reply) {
 }
 
 fn ask_which() -> Event {
-    Event::Ask { prompt: "Which?".into(), options: vec!["A".into(), "B".into()], multi: false }
+    Event::Ask { prompt: "Which?".into(), options: vec!["A".into(), "B".into()], multi: false, dialog: None }
 }
 
 #[test]

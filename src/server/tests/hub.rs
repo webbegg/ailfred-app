@@ -190,7 +190,7 @@ fn every_frame_of_a_full_run_keeps_to_the_official_schema() {
         Event::StepOutput { id: 7, text: "fn a() {}".into() },
         Event::StepEnd { id: 7, ok: false },
         Event::Diff { path: "a.rs".into(), patch: "-a\n+b\n".into() },
-        Event::Ask { prompt: "Which?".into(), options: vec!["A".into(), "B".into()], multi: true },
+        Event::Ask { prompt: "Which?".into(), options: vec!["A".into(), "B".into()], multi: true, dialog: None },
         Event::Done,
     ]
     .iter()

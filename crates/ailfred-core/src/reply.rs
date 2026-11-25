@@ -19,7 +19,8 @@ pub enum Event {
     /// A change to a file, as a unified diff.
     Diff { path: String, patch: String },
     /// It asks the user to pick (`multi`: one or more) of `options`, or write something else.
-    Ask { prompt: String, options: Vec<String>, multi: bool },
+    /// pi's names the dialog it waits on (`dialog`): only an answer naming it answers it.
+    Ask { prompt: String, options: Vec<String>, multi: bool, dialog: Option<String> },
     /// It broke off.
     Fail(String),
     /// The model's process ended mid-reply (why): what came stays, and the reply is
@@ -177,6 +178,8 @@ pub struct Question {
     /// Nothing waits for its answer any more (it was asked in a reply loaded from disk, and the
     /// model's process is a new one): read only, unanswered.
     pub closed: bool,
+    /// pi's dialog it stands for: its answer goes to that one only (`pi::Prompt::answers`).
+    pub dialog: Option<String>,
 }
 
 // A reply holds a handful of parts: boxing the big ones would buy nothing.
@@ -292,8 +295,8 @@ impl Reply {
                 let open = added + removed <= DIFF_OPEN_LINES;
                 self.parts.push(Part::Diff(Diff { path, patch, added, removed, open, applied: false }));
             }
-            Event::Ask { prompt, options, multi } => {
-                self.parts.push(Part::Question(Question { prompt, options, multi, picked: Vec::new(), answered: None, closed: false }));
+            Event::Ask { prompt, options, multi, dialog } => {
+                self.parts.push(Part::Question(Question { prompt, options, multi, picked: Vec::new(), answered: None, closed: false, dialog }));
             }
             Event::Fail(message) => {
                 self.end_steps(StepStatus::Failed);
@@ -552,7 +555,7 @@ mod tests {
 
     #[test]
     fn a_question_answers_with_its_picks_in_order_or_the_users_words_once() {
-        let ask = |multi| Event::Ask { prompt: "Which?".into(), options: vec!["A".into(), "B".into(), "C".into()], multi };
+        let ask = |multi| Event::Ask { prompt: "Which?".into(), options: vec!["A".into(), "B".into(), "C".into()], multi, dialog: None };
         let mut r = run(vec![ask(true), ask(false), ask(false)]);
         fn q(r: &mut Reply, i: usize) -> &mut Question {
             match &mut r.parts[i] {
@@ -573,7 +576,7 @@ mod tests {
 
     #[test]
     fn a_closed_question_takes_no_pick_and_no_answer_and_asks_nothing() {
-        let mut r = run(vec![Event::Ask { prompt: "Which?".into(), options: vec!["A".into(), "B".into()], multi: false }, Event::Done]);
+        let mut r = run(vec![Event::Ask { prompt: "Which?".into(), options: vec!["A".into(), "B".into()], multi: false, dialog: None }, Event::Done]);
         assert!(r.asks());
         let Part::Question(q) = &mut r.parts[0] else { panic!("question") };
         q.closed = true;
