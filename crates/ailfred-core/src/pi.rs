@@ -151,9 +151,17 @@ pub struct Core {
     /// What pi must have once the new session Cmd+N asked for is there (its extensions load
     /// afresh): asked again then.
     renewal: Option<Requirement>,
+    /// What Cmd+N's new session needs first, run as `new_session` goes to pi (after the run
+    /// going settled, so nothing it runs can undo it): see [`Renew`].
+    renewer: Option<Renew>,
     /// The `new_session` command's id, until pi answers it.
     renewing: Option<String>,
 }
+
+/// Readies what pi's new session loads (Cmd+N): Ok with what pi must have then ([`Core::require`],
+/// asked once the session is there), or Err with the refusal every message gets until pi starts
+/// again.
+pub type Renew = Box<dyn FnOnce() -> Result<Option<Requirement>, String> + Send>;
 
 /// An extension command pi must have: `command` (or pi's `command:N`, should two extensions
 /// register it) registered by the extension in one of `paths` (one file, as written and as its
@@ -453,8 +461,20 @@ impl Core {
         out
     }
 
-    /// pi's new session, the command pi must have asked about again once it's there.
+    /// pi's new session, readied first ([`Renew`]), the command pi must have asked about again
+    /// once it's there.
     fn new_session(&mut self) -> Value {
+        if let Some(renew) = self.renewer.take() {
+            match renew() {
+                Ok(requirement) => self.renewal = requirement,
+                Err(refusal) => {
+                    eprintln!("Ailfred: pi's new session couldn't be readied: it takes no message");
+                    self.emit(Event::Fail(refusal.clone()));
+                    self.refused = Some(refusal);
+                    self.renewal = None;
+                }
+            }
+        }
         let command = self.command(json!({"type": "new_session"}));
         self.renewing = command["id"].as_str().map(str::to_owned);
         self.seen = false;
@@ -511,6 +531,8 @@ impl Core {
         // The pi that comes back starts a session of its own, and is asked again.
         (self.renew, self.seen) = (false, false);
         (self.required, self.refused, self.renewing) = (None, None, None);
+        // The pi that comes back is readied as it starts.
+        self.renewer = None;
         self.busy = false;
         self.aborting = false;
         self.dialog = None;
@@ -679,7 +701,7 @@ struct Shared {
 /// Makes the command that starts pi again.
 type Make = Box<dyn Fn() -> Command + Send + Sync>;
 /// Says which extension command the pi starting must have, and the refusal without it.
-type Require = Box<dyn Fn() -> Option<Requirement> + Send + Sync>;
+type Require = Arc<dyn Fn() -> Option<Requirement> + Send + Sync>;
 
 /// How long after its `attempt`th crash in a row pi starts again: 1 s, doubling to 30 s.
 pub fn backoff(attempt: u32) -> Duration {
@@ -711,7 +733,7 @@ impl PiEngine {
     /// extension command it must have, and the refusal every message gets without it
     /// ([`Core::require`]); None: nothing to have.
     pub fn supervised_requiring(make: impl Fn() -> Command + Send + Sync + 'static, require: impl Fn() -> Option<Requirement> + Send + Sync + 'static, grace: Duration) -> std::io::Result<Self> {
-        Self::start(make(), Some(Box::new(make)), Some(Box::new(require)), grace)
+        Self::start(make(), Some(Box::new(make)), Some(Arc::new(require)), grace)
     }
 
     /// Runs `command` (pi with `--mode rpc` among its arguments) once, not again when it ends.
@@ -909,11 +931,16 @@ impl PiEngine {
         write(&self.shared.stdin, commands);
     }
 
-    /// Cmd+N: pi starts a new session, which is asked again for the command it must have (its
-    /// extensions load afresh).
-    pub fn new_conversation(&mut self) {
+    /// Cmd+N: pi starts a new session (once the run going settled), `prepare` run just before
+    /// it goes to pi (Err: the refusal every message gets until pi starts again); the new session
+    /// is then asked again for the command it must have (its extensions load afresh).
+    pub fn new_conversation(&mut self, prepare: impl FnOnce() -> Result<(), String> + Send + 'static) {
+        let require = self.shared.require.clone();
         let mut core = self.shared.core.lock().unwrap();
-        core.renewal = self.shared.require.as_ref().and_then(|require| require());
+        core.renewer = Some(Box::new(move || {
+            prepare()?;
+            Ok(require.as_ref().and_then(|require| require()))
+        }));
         let commands = core.new_conversation();
         write(&self.shared.stdin, commands);
     }
@@ -1251,6 +1278,47 @@ mod tests {
         let (sink, _rx) = channel();
         core.send(prompt("first of the new one"), sink);
         assert!(feed(&mut core, &[STARTED, SETTLED]).is_empty(), "no stale new_session");
+    }
+
+    #[test]
+    fn cmd_n_during_a_run_renews_what_pi_loads_only_as_the_new_session_goes_then_asks_pi_again() {
+        use std::sync::atomic::AtomicU32;
+        let mut core = Core::default();
+        core.started();
+        let (sink, _rx) = channel();
+        core.send(prompt("hi"), sink);
+        feed(&mut core, &[STARTED]);
+        let renewed = Arc::new(AtomicU32::new(0));
+        let counted = renewed.clone();
+        core.renewer = Some(Box::new(move || {
+            counted.fetch_add(1, Ordering::SeqCst);
+            Ok(Some(requirement()))
+        }));
+        assert_eq!(types(&core.new_conversation()), ["abort"]);
+        assert_eq!(renewed.load(Ordering::SeqCst), 0, "a bash still running could change it after");
+        let late = text("late");
+        feed(&mut core, &[&late]);
+        assert_eq!(renewed.load(Ordering::SeqCst), 0, "not settled yet");
+        let renewed_session = feed(&mut core, &[SETTLED]);
+        assert_eq!(types(&renewed_session), ["new_session"]);
+        assert_eq!(renewed.load(Ordering::SeqCst), 1, "renewed as the new session goes");
+        let asked = core.record(&json!({"type": "response", "id": renewed_session[0]["id"], "command": "new_session", "success": true}));
+        assert_eq!(types(&asked), ["get_commands"], "then pi is asked again");
+    }
+
+    #[test]
+    fn what_pi_loads_failing_to_renew_on_cmd_n_refuses_every_message_until_pi_starts_again() {
+        let mut core = Core::default();
+        core.started();
+        core.renewer = Some(Box::new(|| Err("The guard couldn't be written again.".to_owned())));
+        assert_eq!(types(&core.new_conversation()), ["new_session"]);
+        let (sink, rx) = channel();
+        assert!(core.send(prompt("hi"), sink).is_empty());
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), [Event::Fail("The guard couldn't be written again.".into())]);
+        core.exited();
+        core.started();
+        let (sink, _rx) = channel();
+        assert_eq!(types(&core.send(prompt("hi"), sink)), ["prompt"], "a pi started again writes it first");
     }
 
     #[test]

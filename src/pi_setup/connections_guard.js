@@ -19,8 +19,9 @@
 //   (UNTRUSTED_CONTEXT, from Ailfred's core) taints it too.
 // - pi's own setup: write or edit of a file in pi's agent folder (PI_CODING_AGENT_DIR as the guard
 //   loads: its extensions, this guard among them, mcp.json, mcp-auth.json, settings.json), and a
-//   bash command that names it (SETUP_WORDS), ask first, tainted or not. Best effort for bash: a
+//   bash command that names it (namesSetup), ask first, tainted or not. Best effort for bash: a
 //   command can reach a path without naming it.
+// - Each dialog gets the run's abort signal: stopping the run settles it as "no".
 // - Read-only mode (the AILFRED_CONNECTIONS variable as the guard loads: any value but none, ""
 //   or "ask") blocks, without asking, all that would ask above, tainted or not.
 // - With no one to ask (no UI), what would ask is blocked.
@@ -52,8 +53,12 @@ const SETUP_TITLE = `${LOCAL_ONLY}allow this change to pi's own setup? It can tu
 // pi's tools that change a file, and the arguments naming it.
 const WRITERS = new Set(["write", "edit"]);
 const PATH_ARGS = ["path", "file_path", "filePath"];
-// What a bash command names when it reaches pi's own setup (besides the agent folder's path).
-const SETUP_WORDS = ["mcp-auth", AGENT_DIR, "ailfred-connections-guard", "mcp.json"];
+// What a bash command names when it reaches pi's own setup (besides a path to it, namesSetup).
+const SETUP_WORDS = ["mcp-auth", "auth.json", AGENT_DIR, `${COMMAND}.js`];
+// A path segment `agent` (pi's agent folder sits next to its HOME and the folder it works in),
+// and a command climbing out of a folder (`..`) or starting from a home folder (`~`).
+const AGENT_SEGMENT = /(^|[\s=:(/;|&<>])agent($|[\s/;|&<>)])/;
+const CLIMBS = /\.\.|(^|[\s=:(;|&<>])~/;
 // pi's tools that read or list MCP servers' resources (`server` names the server; none: all).
 const RESOURCES = new Set(["read_mcp_resource", "list_mcp_resources", "list_mcp_resource_templates"]);
 
@@ -384,7 +389,9 @@ async function ask(ctx, title, actions, names) {
   if (!ctx?.hasUI) return { block: true, reason: `Blocked (no one to ask): ${names}` };
   const dialog = describe(actions);
   if (dialog.tooLarge) return { block: true, reason: `Blocked: ${dialog.tooLarge}. ${TOO_LARGE}` };
-  const ok = await ctx.ui.confirm(title, dialog.text);
+  // Stopping the run settles the dialog as "no".
+  const ok = await ctx.ui.confirm(title, dialog.text, { signal: ctx.signal });
+  if (ctx.signal?.aborted) return { block: true, reason: `Blocked (the run was stopped): ${names}` };
   if (!ok) return { block: true, reason: `The user declined: ${names}` };
   return undefined;
 }
@@ -437,8 +444,29 @@ function touchesSetup(name, input, ctx, setup) {
     });
   }
   if (name !== "bash") return false;
-  const command = typeof input?.command === "string" ? input.command.toLowerCase() : "";
-  return command.includes(setup) || SETUP_WORDS.some((word) => command.includes(word.toLowerCase()));
+  return typeof input?.command === "string" && namesSetup(input.command, setup);
+}
+
+// `text` names the folder `path` (not one whose name only starts so).
+function mentions(text, path) {
+  if (path === "" || path === "/") return false;
+  for (let at = text.indexOf(path); at >= 0; at = text.indexOf(path, at + 1)) {
+    if (!/[\w.-]/.test(text[at + path.length] ?? "")) return true;
+  }
+  return false;
+}
+
+// The bash `command` names pi's own setup in `setup` (its agent folder), any case, quotes and
+// backslashes left out: the agent folder's path or that of the folder holding it (pi's HOME and
+// working folder are there too), SETUP_WORDS, `extensions/` with `..`, or a path segment `agent`
+// reached through `..` or `~` (`../agent`, `~/../agent`, `$HOME/../agent`). Best effort: a
+// command can reach them without naming them (a variable, a glob, a script it runs).
+function namesSetup(command, setup) {
+  const text = command.toLowerCase().replace(/\\(.)/gs, "$1").replace(/["'`]/g, "");
+  if (mentions(text, setup) || mentions(text, setup.slice(0, setup.lastIndexOf("/")))) return true;
+  if (SETUP_WORDS.some((word) => text.includes(word.toLowerCase()))) return true;
+  if (text.includes("..") && text.includes("extensions/")) return true;
+  return CLIMBS.test(text) && AGENT_SEGMENT.test(text);
 }
 
 // What the call `event` gets: undefined (it runs) or `{ block, reason }`.

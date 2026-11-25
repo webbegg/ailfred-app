@@ -381,17 +381,22 @@ impl crate::model::Model for Pi {
         }
     }
 
-    /// Cmd+N: the guard is written again and checked first (an untainted session's bash or write
-    /// could have changed it), as pi's new session loads its extensions afresh; pi then asks it
-    /// for its command again (`PiEngine::new_conversation`).
+    /// Cmd+N: the guard is written again and checked as pi's new session goes, once the run going
+    /// settled (an untainted session's bash or write could have changed it), as that session
+    /// loads its extensions afresh; pi is then asked for its command again
+    /// (`PiEngine::new_conversation`). Failing, pi takes no message until it starts again.
     fn new_conversation(&mut self) {
-        if let Some(data) = &self.data
-            && let Err(e) = connections::renew_guard(data)
-        {
-            eprintln!("Ailfred: pi's guard couldn't be written again: {e}");
-        }
-        if let PiState::Up(engine) = &mut *self.state.lock().unwrap_or_else(|e| e.into_inner()) {
-            engine.new_conversation();
+        let data = self.data.clone();
+        match &mut *self.state.lock().unwrap_or_else(|e| e.into_inner()) {
+            PiState::Up(engine) => engine.new_conversation(move || data.map_or(Ok(()), |data| connections::renew_guard(&data).map_err(|e| connections::not_renewed(&e)))),
+            // pi writes it as it starts; written now all the same.
+            _ => {
+                if let Some(data) = &data
+                    && let Err(e) = connections::renew_guard(data)
+                {
+                    eprintln!("Ailfred: pi's guard couldn't be written again: {e}");
+                }
+            }
         }
     }
 }
@@ -800,6 +805,25 @@ process.stdout.write(JSON.stringify(out));
         let mut pi = Pi { data: Some(data.clone()), ..Pi::with(PiState::Failed("down".into())) };
         pi.new_conversation();
         assert_eq!(std::fs::read_to_string(&guard).unwrap(), connections::GUARD, "an untainted session's bash could have changed it");
+    }
+
+    #[test]
+    fn a_guard_that_cant_be_written_again_on_cmd_n_refuses_the_next_message() {
+        use crate::model::{Item, Model};
+        let data = scratch("pi-new-session-guard-fails");
+        // A folder where the guard goes: it can't be written there.
+        std::fs::create_dir_all(Layout::under(&data).agent.join("extensions/ailfred-connections-guard.js")).unwrap();
+        let mut fake = Command::new("/bin/sh");
+        fake.arg("-c").arg("cat > /dev/null");
+        let engine = crate::pi::PiEngine::spawn(fake).unwrap();
+        let mut pi = Pi { data: Some(data), ..Pi::with(PiState::Up(engine)) };
+        pi.new_conversation();
+        let (s, rx) = sink();
+        pi.send(pi_request("hi"), s);
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(Item::Event(crate::reply::Event::Fail(why))) => assert!(why.contains("guard"), "{why}"),
+            other => panic!("refused, not sent to pi: {other:?}"),
+        }
     }
 
     fn sink() -> (crate::model::Sink, std::sync::mpsc::Receiver<crate::model::Item>) {

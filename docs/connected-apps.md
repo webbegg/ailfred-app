@@ -19,10 +19,14 @@ what would run.
   plain JavaScript). It is always there, on or off: it costs nothing without the server, a
   Composio server added by hand is guarded too, and it guards computer control's screenshots
   either way. It's written beside its place (`.js.new`), moved in, and read back byte for byte
-  before each pi start and again on Cmd+N (pi's new session loads its extensions afresh); only
-  then does the server go into `mcp.json`. If that fails, every Composio server is taken out of
-  `mcp.json` (the `composio` entry, and any other whose `url`'s host is `composio.dev` or under
-  it, whatever its name, hand-made ones too), the switch shows off again, and Settings' line
+  before each pi start and again on Cmd+N, as pi's new session goes, once the run going settled
+  (pi's new session loads its extensions afresh, and a `bash` still running could change it
+  before); only then does the server go into `mcp.json`. If that fails on Cmd+N, pi takes no
+  message until it starts again, as when the guard didn't load (below). Failing either way, every
+  Composio server is taken out of `mcp.json` (the `composio` entry, and any other whose `url`
+  says `composio` anywhere, percent-decoded, any case, fullwidth letters as ASCII: fail-closed,
+  so `composio%2Edev` or `composio。dev` count, whatever its name, hand-made ones too), the
+  switch shows off again, and Settings' line
   under it names them and says why. Taking them out, rather than refusing to start pi, keeps the
   rest of the assistant working; an entry the user made by hand has to be added again.
 - **The `composio` server** in `mcp.json`: `https://connect.composio.dev/mcp`, `direct` exposure,
@@ -31,7 +35,7 @@ what would run.
   there while Settings' switch is on and taken out when off; the other servers stay. Ailfred
   owns the entry: edits to it are replaced.
 - **The check that the guard loaded.** The guard registers the command `/ailfred-connections-guard`.
-  Each time Ailfred starts pi with a Composio server (by name or by host, above) or computer
+  Each time Ailfred starts pi with a Composio server (by name or by url, above) or computer
   control's `computer` server in its `mcp.json`, and again after each Cmd+N's new session, it
   asks pi for its commands (`get_commands`) before any message. The command counts only as an
   extension's, registered from the guard's own file (`sourceInfo.path`, as written or as its
@@ -102,12 +106,20 @@ Tainted or not, the guard asks before a change that could switch it off or reach
   `~/.pi/agent`): its `extensions/` (this guard among them), `mcp.json`, `mcp-auth.json`,
   `settings.json`, anything there. The path is resolved as pi reads it (`@`, `~`, relative to
   pi's folder, `.` and `..`), any case; symlinks aren't followed.
-- A `bash` command that names the agent folder's path, `mcp-auth`, `mcp.json`,
-  `ailfred-connections-guard` or `PI_CODING_AGENT_DIR` (any case). This is best effort: a
-  command can reach those files without naming them (a variable, a glob, a script it runs).
+- A `bash` command that names (any case, quotes and backslashes left out) the agent folder's
+  path or that of the folder holding it (pi's HOME and working folder sit there too, next to
+  `agent/`), a path segment `agent` reached through `..` or `~` (`../agent`, `~/../agent`,
+  `$HOME/../agent`, `cd .. && ls agent`), `extensions/` together with `..`, `mcp-auth`,
+  `auth.json`, `ailfred-connections-guard.js` or `PI_CODING_AGENT_DIR`. A bare `mcp.json`
+  doesn't count (`cat .mcp.json`, `.vscode/mcp.json` in a repo run as before); one in pi's
+  agent folder comes with a path to it. This is best effort: a command can reach those files
+  without naming them (a variable, a glob, a script it runs).
 
 On top of that, Ailfred writes the guard again and checks its bytes before each pi start and on
 Cmd+N, then asks pi for its command (above).
+
+Each of the guard's dialogs gets the run's abort signal (`ctx.signal`): stopping the run settles
+an open one as "no", so the action is blocked rather than left waiting.
 
 ## The dialog
 
@@ -162,8 +174,8 @@ can't open the writes. The chat's pi doesn't set it; background routines will (w
   runs, an approved `bash` command included, and by pi's `read` tool, which the guard doesn't
   gate. The guard stops the model from writing there, or naming it in `bash`, unasked; it
   doesn't hide it from the user's own programs.
-- **Composio servers by another name, in the guard.** Ailfred finds a server at Composio's host
-  whatever its name, but the guard knows Composio's tools by name (`mcp__composio__…`, or
+- **Composio servers by another name, in the guard.** Ailfred finds a server whose url says
+  `composio` whatever its name, but the guard knows Composio's tools by name (`mcp__composio__…`, or
   `…__COMPOSIO_…`): an app tool such a server served under a name without `COMPOSIO_` would be
   another server's tool to it, gated only once tainted.
 - **The replay's taint** sees Composio and computer-control steps by tool name; a resource read
