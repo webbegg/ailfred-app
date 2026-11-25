@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
+pub mod connections;
+
 /// Where Ailfred's pi keeps its things.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Layout {
@@ -64,8 +66,16 @@ pub fn command(pi: &Path, layout: &Layout, real_home: &Path, path: &OsString, in
         "You are Ailfred, the user's personal assistant on their Mac. The user's home folder is {}: their own files are there. Use absolute paths for them.",
         real_home.display()
     );
+    let mut command = with_layout(pi, layout, real_home, path, inherited);
+    command.arg("--mode").arg("rpc").arg("--session-dir").arg(&layout.sessions).arg("--append-system-prompt").arg(note);
+    command
+}
+
+/// pi (`pi`), with no arguments yet, set up as [`command`] sets it up: `layout`'s folders, the
+/// app's environment (`inherited`) without pi's own variables, `path` as its `PATH`.
+fn with_layout(pi: &Path, layout: &Layout, real_home: &Path, path: &OsString, inherited: impl IntoIterator<Item = (OsString, OsString)>) -> Command {
     let mut command = Command::new(pi);
-    command.arg("--mode").arg("rpc").arg("--session-dir").arg(&layout.sessions).arg("--append-system-prompt").arg(note).current_dir(&layout.workspace);
+    command.current_dir(&layout.workspace);
     let mut data_home = real_home.join(".local/share");
     for (key, value) in inherited {
         if key == "XDG_DATA_HOME" && !value.is_empty() {
@@ -137,10 +147,22 @@ pub fn forget_computer_token(data: &Path) -> io::Result<()> {
 }
 
 /// The `computer` server in pi's `mcp.json` while `endpoint` serves the tools, else taken out.
-/// A file pi can't read either (see [`pi_reads`]) is left as it is, with an error: replacing it
-/// would drop the user's other servers.
 fn computer_server(layout: &Layout, endpoint: Option<&crate::computer::server::Endpoint>) -> io::Result<()> {
-    use serde_json::json;
+    let entry = endpoint.map(|endpoint| {
+        serde_json::json!({
+            "url": endpoint.url,
+            "headers": {"Authorization": format!("Bearer {}", endpoint.token)},
+            "exposure": "direct",
+            "description": "See this Mac's screen and click, type and open apps in it, behind the user's approval.",
+        })
+    });
+    set_server(layout, COMPUTER_SERVER, entry, "computer control's server")
+}
+
+/// The server `name` in pi's `mcp.json` as `entry`, or taken out (None); its other servers and
+/// settings stay. A file pi can't read either (see [`pi_reads`]) is left as it is, with an error
+/// naming `what`: replacing it would drop the user's other servers.
+fn set_server(layout: &Layout, name: &str, entry: Option<serde_json::Value>, what: &str) -> io::Result<()> {
     let path = layout.agent.join("mcp.json");
     let saved = match std::fs::read_to_string(&path) {
         Ok(text) => Some(text),
@@ -149,33 +171,25 @@ fn computer_server(layout: &Layout, endpoint: Option<&crate::computer::server::E
     };
     let mut config = match saved {
         // Off, with no file to take the server out of.
-        None if endpoint.is_none() => return Ok(()),
+        None if entry.is_none() => return Ok(()),
         None => serde_json::Map::new(),
         Some(text) => pi_reads(&text).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "{} is not JSON pi can read (an object whose \"mcpServers\" is an object), so it was left as it is; once it is fixed, computer control's server is added or taken out when pi next starts",
+                    "{} is not JSON pi can read (an object whose \"mcpServers\" is an object), so it was left as it is; once it is fixed, {what} is added or taken out when pi next starts",
                     path.display()
                 ),
             )
         })?,
     };
-    let servers = config.entry("mcpServers").or_insert_with(|| json!({})).as_object_mut().expect("checked by pi_reads");
-    match endpoint {
-        Some(endpoint) => {
-            servers.insert(
-                COMPUTER_SERVER.into(),
-                json!({
-                    "url": endpoint.url,
-                    "headers": {"Authorization": format!("Bearer {}", endpoint.token)},
-                    "exposure": "direct",
-                    "description": "See this Mac's screen and click, type and open apps in it, behind the user's approval.",
-                }),
-            );
+    let servers = config.entry("mcpServers").or_insert_with(|| serde_json::json!({})).as_object_mut().expect("checked by pi_reads");
+    match entry {
+        Some(entry) => {
+            servers.insert(name.into(), entry);
         }
         None => {
-            servers.remove(COMPUTER_SERVER);
+            servers.remove(name);
         }
     }
     write_owner_only(&path, &serde_json::to_string_pretty(&config).unwrap_or_default())
@@ -245,22 +259,30 @@ pub fn start(pi: &Path, data: &Path, real_home: &Path) -> io::Result<crate::pi::
     let layout = Layout::under(data);
     prepare(&layout, &real_home.join(".pi/agent"))?;
     let path = login_path(&std::env::var_os("PATH").unwrap_or_default());
-    let (pi, real_home) = (pi.to_owned(), real_home.to_owned());
+    let (pi, real_home, data) = (pi.to_owned(), real_home.to_owned(), data.to_owned());
+    // With Composio's server in the mcp.json it reads, pi must have loaded the guard.
+    let require = move || connections::required(&data);
     let make = move || {
         let mut command = command(&pi, &layout, &real_home, &path, std::env::vars_os());
         // As computer control is now: on, its tools; off, none.
         if let Err(e) = computer_tools(&mut command, &layout, crate::computer::endpoint_now().as_ref()) {
             eprintln!("Ailfred: pi's computer tools couldn't be set up: {e}");
         }
+        // The connected apps as Settings has them; their guard either way, first.
+        if let Err(e) = connections::apply(&layout, connections::now()) {
+            eprintln!("Ailfred: pi's connected apps couldn't be set up: {e}");
+        }
         command
     };
-    crate::pi::PiEngine::supervised(make, crate::pi::SHUTDOWN_GRACE)
+    crate::pi::PiEngine::supervised_requiring(make, require, crate::pi::SHUTDOWN_GRACE)
 }
 
 /// Ailfred's pi as a [`Model`](crate::model::Model): started off the main thread; a message
 /// sent meanwhile waits for it.
 pub struct Pi {
     state: Arc<Mutex<PiState>>,
+    /// Its folders' root, with pi installed: Cmd+N writes the guard there again.
+    data: Option<PathBuf>,
 }
 
 enum PiState {
@@ -298,7 +320,7 @@ impl Pi {
         let Some(pi) = pi else {
             return Pi::with(PiState::Failed("pi isn't installed (~/.pi/agent/bin/pi, or set AILFRED_PI).".into()));
         };
-        let pi_ = Pi::with(PiState::Starting(Vec::new()));
+        let pi_ = Pi { data: Some(data.clone()), ..Pi::with(PiState::Starting(Vec::new())) };
         let state = pi_.state.clone();
         std::thread::spawn(move || {
             let started = start(&pi, &data, &real_home).map_err(|e| {
@@ -311,7 +333,7 @@ impl Pi {
     }
 
     fn with(state: PiState) -> Pi {
-        Pi { state: Arc::new(Mutex::new(state)) }
+        Pi { state: Arc::new(Mutex::new(state)), data: None }
     }
 
     #[cfg(test)]
@@ -335,7 +357,7 @@ impl crate::model::Model for Pi {
         use crate::model::Item;
         use crate::reply::Event;
         let context = crate::pi::context(&request.history);
-        let prompt = crate::pi::Prompt { text: request.text, pngs: request.pngs, answer: request.answer, decline: request.decline, steer: request.steer, context };
+        let prompt = crate::pi::Prompt { text: request.text, pngs: request.pngs, answers: request.answers, decline: request.decline, steer: request.steer, context };
         let sink: crate::pi::Sink = Arc::new(move |event| sink(Item::Event(event)));
         match &mut *self.state.lock().unwrap_or_else(|e| e.into_inner()) {
             PiState::Up(engine) => engine.send(prompt, sink),
@@ -359,9 +381,22 @@ impl crate::model::Model for Pi {
         }
     }
 
+    /// Cmd+N: the guard is written again and checked as pi's new session goes, once the run going
+    /// settled (an untainted session's bash or write could have changed it), as that session
+    /// loads its extensions afresh; pi is then asked for its command again
+    /// (`PiEngine::new_conversation`). Failing, pi takes no message until it starts again.
     fn new_conversation(&mut self) {
-        if let PiState::Up(engine) = &mut *self.state.lock().unwrap_or_else(|e| e.into_inner()) {
-            engine.new_conversation();
+        let data = self.data.clone();
+        match &mut *self.state.lock().unwrap_or_else(|e| e.into_inner()) {
+            PiState::Up(engine) => engine.new_conversation(move || data.map_or(Ok(()), |data| connections::renew_guard(&data).map_err(|e| connections::not_renewed(&e)))),
+            // pi writes it as it starts; written now all the same.
+            _ => {
+                if let Some(data) = &data
+                    && let Err(e) = connections::renew_guard(data)
+                {
+                    eprintln!("Ailfred: pi's guard couldn't be written again: {e}");
+                }
+            }
         }
     }
 }
@@ -424,7 +459,7 @@ mod tests {
     use crate::reply::Event;
 
     /// A fresh folder for one test.
-    fn scratch(name: &str) -> PathBuf {
+    pub(super) fn scratch(name: &str) -> PathBuf {
         static N: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!("ailfred-setup-{}-{name}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
         let _ = std::fs::remove_dir_all(&dir);
@@ -432,7 +467,7 @@ mod tests {
         dir
     }
 
-    fn settings(path: &Path) -> serde_json::Value {
+    pub(super) fn settings(path: &Path) -> serde_json::Value {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 
@@ -760,6 +795,37 @@ process.stdout.write(JSON.stringify(out));
         }
     }
 
+    #[test]
+    fn cmd_n_writes_the_guard_again_before_pis_new_session_loads_it() {
+        use crate::model::Model;
+        let data = scratch("pi-new-session-guard");
+        let guard = Layout::under(&data).agent.join("extensions/ailfred-connections-guard.js");
+        std::fs::create_dir_all(guard.parent().unwrap()).unwrap();
+        std::fs::write(&guard, "export default function () {}").unwrap();
+        let mut pi = Pi { data: Some(data.clone()), ..Pi::with(PiState::Failed("down".into())) };
+        pi.new_conversation();
+        assert_eq!(std::fs::read_to_string(&guard).unwrap(), connections::GUARD, "an untainted session's bash could have changed it");
+    }
+
+    #[test]
+    fn a_guard_that_cant_be_written_again_on_cmd_n_refuses_the_next_message() {
+        use crate::model::{Item, Model};
+        let data = scratch("pi-new-session-guard-fails");
+        // A folder where the guard goes: it can't be written there.
+        std::fs::create_dir_all(Layout::under(&data).agent.join("extensions/ailfred-connections-guard.js")).unwrap();
+        let mut fake = Command::new("/bin/sh");
+        fake.arg("-c").arg("cat > /dev/null");
+        let engine = crate::pi::PiEngine::spawn(fake).unwrap();
+        let mut pi = Pi { data: Some(data), ..Pi::with(PiState::Up(engine)) };
+        pi.new_conversation();
+        let (s, rx) = sink();
+        pi.send(pi_request("hi"), s);
+        match rx.recv_timeout(std::time::Duration::from_secs(5)) {
+            Ok(Item::Event(crate::reply::Event::Fail(why))) => assert!(why.contains("guard"), "{why}"),
+            other => panic!("refused, not sent to pi: {other:?}"),
+        }
+    }
+
     fn sink() -> (crate::model::Sink, std::sync::mpsc::Receiver<crate::model::Item>) {
         let (tx, rx) = std::sync::mpsc::channel();
         let tx = Mutex::new(tx);
@@ -767,7 +833,7 @@ process.stdout.write(JSON.stringify(out));
     }
 
     fn pi_request(text: &str) -> crate::model::Request {
-        crate::model::Request { model: crate::model::PI.into(), history: Vec::new(), text: text.into(), pngs: Vec::new(), session: None, answer: false, decline: false, steer: false }
+        crate::model::Request { model: crate::model::PI.into(), history: Vec::new(), text: text.into(), pngs: Vec::new(), session: None, answers: None, decline: false, steer: false }
     }
 
     #[test]

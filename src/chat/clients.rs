@@ -6,8 +6,9 @@
 //! The chat's conversation is the truth: a run's `messages` aren't replayed into the model;
 //! its last one, the user's, is sent as a message typed here would be (a steer, queued or
 //! asked at once, to the model picked). A `resume` answers or declines the open questions of the
-//! latest reply instead, each by an interrupt id it was sent. A Retry or a new conversation does
-//! what the window's Retry or Cmd+N does.
+//! latest reply instead, each by an interrupt id it was sent; one of Ailfred's guard
+//! (`reply::LOCAL_ONLY`) only the window answers, a client can only decline it. A Retry or a new
+//! conversation does what the window's Retry or Cmd+N does.
 
 use std::sync::mpsc::SyncSender;
 use std::time::Instant;
@@ -351,6 +352,11 @@ impl Chat {
             if !waits || !matches!(&reply.parts[part], Part::Question(q) if q.open()) {
                 return conflict("that question takes no answer: answered, or closed");
             }
+            // Ailfred's guard asks it: it approves an action on the user's accounts or computer,
+            // so only the window answers it. A decline only blocks the action.
+            if entry.status == ResumeStatus::Resolved && matches!(&reply.parts[part], Part::Question(q) if q.local_only()) {
+                return Err(Answer::error(403, "Answer in Ailfred's window: this question approves an action on the user's accounts or computer"));
+            }
             let text = match entry.status {
                 ResumeStatus::Cancelled => None,
                 ResumeStatus::Resolved => match entry.payload.as_ref().and_then(|p| p.get("answer")).and_then(Value::as_str).filter(|t| !t.trim().is_empty()) {
@@ -367,6 +373,8 @@ impl Chat {
             }
         }
         let token = reply.token;
+        // pi's dialog a declined question stands for: the decline dismisses that one alone.
+        let dialog = declined.iter().find_map(|&part| if let Part::Question(q) = &reply.parts[part] { q.dialog.clone() } else { None });
         for &part in &declined {
             if let Some(q) = self.question_mut(token, part) {
                 q.closed = true;
@@ -378,7 +386,7 @@ impl Chat {
             let id = self.next_id();
             self.client_run = Some(run.to_owned());
             self.push(Message::text(id, DECLINED));
-            self.start_reply_as(id, DECLINED.into(), true, true);
+            self.start_reply_as(id, DECLINED.into(), true, dialog, true);
             self.client_run = None;
         } else if answers.is_empty() {
             feed.with(|hub| hub.claim(run));

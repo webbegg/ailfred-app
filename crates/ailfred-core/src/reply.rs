@@ -19,7 +19,8 @@ pub enum Event {
     /// A change to a file, as a unified diff.
     Diff { path: String, patch: String },
     /// It asks the user to pick (`multi`: one or more) of `options`, or write something else.
-    Ask { prompt: String, options: Vec<String>, multi: bool },
+    /// pi's names the dialog it waits on (`dialog`): only an answer naming it answers it.
+    Ask { prompt: String, options: Vec<String>, multi: bool, dialog: Option<String> },
     /// It broke off.
     Fail(String),
     /// The model's process ended mid-reply (why): what came stays, and the reply is
@@ -161,6 +162,12 @@ pub struct Diff {
     pub applied: bool,
 }
 
+/// How every dialog of Ailfred's guard (the pi extension `connections_guard.js`) starts: it
+/// approves an action on the user's accounts or computer, so only Ailfred's own window answers
+/// it, never the local server or the web view. Another extension could start its dialog so too;
+/// that only makes it stricter.
+pub const LOCAL_ONLY: &str = "Ailfred guard: ";
+
 pub struct Question {
     pub prompt: String,
     pub options: Vec<String>,
@@ -171,6 +178,8 @@ pub struct Question {
     /// Nothing waits for its answer any more (it was asked in a reply loaded from disk, and the
     /// model's process is a new one): read only, unanswered.
     pub closed: bool,
+    /// pi's dialog it stands for: its answer goes to that one only (`pi::Prompt::answers`).
+    pub dialog: Option<String>,
 }
 
 // A reply holds a handful of parts: boxing the big ones would buy nothing.
@@ -221,6 +230,12 @@ impl Reply {
     /// It ended with a question the user hasn't answered, and can.
     pub fn asks(&self) -> bool {
         self.parts.iter().any(|p| matches!(p, Part::Question(q) if q.open()))
+    }
+
+    /// A step of it read the connected apps or the screen (`pi::untrusted_tool`, by the tool's
+    /// name, which is the target of a step of a tool with no kind of its own).
+    pub fn untrusted(&self) -> bool {
+        self.parts.iter().any(|p| matches!(p, Part::Agent(a) if a.steps.iter().any(|s| crate::pi::untrusted_tool(&s.target))))
     }
 
     /// What the model is told it answered, in a later message's history: its text, if it
@@ -280,8 +295,8 @@ impl Reply {
                 let open = added + removed <= DIFF_OPEN_LINES;
                 self.parts.push(Part::Diff(Diff { path, patch, added, removed, open, applied: false }));
             }
-            Event::Ask { prompt, options, multi } => {
-                self.parts.push(Part::Question(Question { prompt, options, multi, picked: Vec::new(), answered: None, closed: false }));
+            Event::Ask { prompt, options, multi, dialog } => {
+                self.parts.push(Part::Question(Question { prompt, options, multi, picked: Vec::new(), answered: None, closed: false, dialog }));
             }
             Event::Fail(message) => {
                 self.end_steps(StepStatus::Failed);
@@ -402,6 +417,11 @@ impl Question {
     /// It still takes an answer: not answered, not closed.
     pub fn open(&self) -> bool {
         self.answered.is_none() && !self.closed
+    }
+
+    /// Only Ailfred's window answers it ([`LOCAL_ONLY`]).
+    pub fn local_only(&self) -> bool {
+        self.prompt.starts_with(LOCAL_ONLY)
     }
 
     /// Option `i` clicked: picked alone (single) or toggled (multi).
@@ -535,7 +555,7 @@ mod tests {
 
     #[test]
     fn a_question_answers_with_its_picks_in_order_or_the_users_words_once() {
-        let ask = |multi| Event::Ask { prompt: "Which?".into(), options: vec!["A".into(), "B".into(), "C".into()], multi };
+        let ask = |multi| Event::Ask { prompt: "Which?".into(), options: vec!["A".into(), "B".into(), "C".into()], multi, dialog: None };
         let mut r = run(vec![ask(true), ask(false), ask(false)]);
         fn q(r: &mut Reply, i: usize) -> &mut Question {
             match &mut r.parts[i] {
@@ -556,7 +576,7 @@ mod tests {
 
     #[test]
     fn a_closed_question_takes_no_pick_and_no_answer_and_asks_nothing() {
-        let mut r = run(vec![Event::Ask { prompt: "Which?".into(), options: vec!["A".into(), "B".into()], multi: false }, Event::Done]);
+        let mut r = run(vec![Event::Ask { prompt: "Which?".into(), options: vec!["A".into(), "B".into()], multi: false, dialog: None }, Event::Done]);
         assert!(r.asks());
         let Part::Question(q) = &mut r.parts[0] else { panic!("question") };
         q.closed = true;

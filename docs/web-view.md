@@ -19,7 +19,7 @@ The web view does not use the local server (`docs/local-server.md`): it needs no
 From the app to the page, the app calls (`evaluateJavaScript`):
 
 - `window.ailfred.receive(events)`: `events` is an array of AG-UI event objects, in order, exactly as `GET /v1/events` would send them (one frame may hold several: the first one after a join holds the `MESSAGES_SNAPSHOT` and the run in progress from its `RUN_STARTED`). A `MESSAGES_SNAPSHOT` replaces everything the page holds; the thread id is in `metadata.ailfred.threadId`.
-- `window.ailfred.answer(id, status, body)`: the answer to the page's command `id`: `status` is the HTTP status `POST /v1/commands` would give (202, 400, 409, 413, 503), `body` its JSON body (`{threadId, runId}` on 202, `{error}` otherwise).
+- `window.ailfred.answer(id, status, body)`: the answer to the page's command `id`: `status` is the HTTP status `POST /v1/commands` would give (202, 400, 403, 409, 413, 503; 403: an answer to a question of Ailfred's guard, which the page shows as "Answer in Ailfred's window" with Decline only), `body` its JSON body (`{threadId, runId}` on 202, `{error}` otherwise).
 
 Both calls are one statement each, their arguments JSON in which `<`, U+2028 and U+2029 are always written as JSON's backslash-u escapes, so nothing in a message can end the script.
 

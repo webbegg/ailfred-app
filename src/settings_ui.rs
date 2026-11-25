@@ -2,7 +2,8 @@
 //! with what happened to a saved one that was taken at startup), the save folder, the model
 //! (Claude's version and the Anthropic API key, which lives in the Keychain), whether Screen
 //! Recording is on (with the way to System Settings), whether the model may control the Mac (and
-//! then whether Accessibility is on), whether apps on this Mac may reach the conversation (the local
+//! then whether Accessibility is on), whether it may use the connected apps (and whether pi is
+//! signed in to Composio), whether apps on this Mac may reach the conversation (the local
 //! server), and whether animations play under the system's Reduce Motion.
 
 use std::path::PathBuf;
@@ -17,10 +18,14 @@ use crate::model;
 use crate::settings::{HotKey, Settings, ShortcutFor};
 
 /// The window's size in points.
-pub const SIZE: (f32, f32) = (480.0, 840.0);
+pub const SIZE: (f32, f32) = (860.0, 700.0);
+/// Its two columns' width, and the gap between them, inside its 24-point padding.
+const COLUMN_GAP: f32 = 28.0;
+const COLUMN: f32 = (SIZE.0 - 48.0 - COLUMN_GAP) / 2.0;
 
 pub const COMPUTER_CONTROL_LABEL: &str = "Let the model control this Mac";
 pub const LOCAL_SERVER_LABEL: &str = "Local server";
+pub const CONNECTED_APPS_LABEL: &str = "Connected apps";
 
 pub struct SettingsUi {
     settings: Settings,
@@ -54,6 +59,20 @@ pub struct SettingsUi {
     check_accessibility: fn() -> bool,
     /// Settings' local-server switch.
     local_server: bool,
+    /// Settings' connected-apps switch, whether pi is signed in to Composio as last checked
+    /// (only while the switch is on), how that's checked, and whether a sign-in is going on.
+    connected_apps: bool,
+    signed_in: Option<bool>,
+    check_signed_in: fn() -> bool,
+    signing_in: bool,
+    /// Why the connected apps couldn't be set up, last time they were switched on.
+    connections_error: Option<String>,
+}
+
+/// Whether Ailfred's pi has Composio's tokens (names in a file only: cheap, nothing asked).
+fn composio_signed_in() -> bool {
+    let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    crate::pi_setup::connections::signed_in(&crate::pi_data(&home))
 }
 
 /// Where replies come from with pi picked.
@@ -74,9 +93,15 @@ impl SettingsUi {
         let model = settings.model();
         let computer_control = settings.computer_control();
         let local_server = settings.local_server();
+        let connected_apps = settings.connected_apps(|| false);
         SettingsUi {
             computer_control,
             local_server,
+            connected_apps,
+            signed_in: None,
+            check_signed_in: composio_signed_in,
+            signing_in: false,
+            connections_error: None,
             accessibility: None,
             check_accessibility: crate::app_env::accessibility_allowed_quiet,
             settings,
@@ -107,6 +132,7 @@ impl SettingsUi {
     /// Asks whether Screen Recording is on (cheap, no prompt); a change shows in the menu too.
     fn check_permissions(&mut self) {
         self.accessibility = self.computer_control.then(|| (self.check_accessibility)());
+        self.signed_in = self.connected_apps.then(|| (self.check_signed_in)());
         let allowed = (self.check_screen_recording)();
         if self.screen_recording.replace(allowed) == Some(allowed) {
             return;
@@ -211,6 +237,54 @@ impl SettingsUi {
         }
     }
 
+    /// The connected-apps switch: kept, and handed to the app, which puts Composio's server in
+    /// pi's setup or takes it out (pi starts again for the next message); turned on, the
+    /// sign-in is looked at.
+    fn toggle_connected_apps(&mut self) {
+        self.connected_apps = !self.connected_apps;
+        self.connections_error = None;
+        self.settings.set_connected_apps(self.connected_apps);
+        self.check_permissions();
+        let on = self.connected_apps;
+        if let Some(host) = &self.host {
+            host.update(move |host, _| host.set_connected_apps(on));
+        }
+    }
+
+    /// The connected apps couldn't be set up (their guard couldn't be written, say): the switch
+    /// shows off again, is kept off, and their line says why.
+    pub fn connected_apps_failed(&mut self, reason: String) {
+        self.connected_apps = false;
+        self.settings.set_connected_apps(false);
+        self.signed_in = None;
+        self.connections_error = Some(reason);
+    }
+
+    /// Sign in…: the app runs pi's sign-in, which opens the browser; [`Self::signed_in`] comes
+    /// back once it's over.
+    fn sign_in(&mut self) {
+        if self.signing_in {
+            return;
+        }
+        self.signing_in = true;
+        self.error = None;
+        if let Some(host) = &self.host {
+            host.update(|host, _| host.sign_in_to_connected_apps());
+        }
+    }
+
+    /// pi's sign-in to Composio is over: done, or why not (with the command to run by hand).
+    pub fn signed_in(&mut self, result: Result<(), String>) {
+        self.signing_in = false;
+        self.error = result.err().map(|why| {
+            let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+            let pi = crate::pi_setup::pi_binary(&home);
+            let by_hand = crate::pi_setup::connections::sign_in_by_hand(pi.as_deref(), &crate::pi_data(&home), &home);
+            format!("Signing in to Composio didn't finish: {why}. Try again, or run this in Terminal: {by_hand}")
+        });
+        self.check_permissions();
+    }
+
     fn toggle_reduce_motion(&mut self) {
         self.ignore_reduce_motion = !self.ignore_reduce_motion;
         self.settings.set_ignore_reduce_motion(self.ignore_reduce_motion);
@@ -225,6 +299,11 @@ impl SettingsUi {
         SettingsUi {
             computer_control: settings.computer_control(),
             local_server: settings.local_server(),
+            connected_apps: settings.connected_apps(|| false),
+            signed_in: None,
+            check_signed_in: composio_signed_in,
+            signing_in: false,
+            connections_error: None,
             accessibility: None,
             check_accessibility: crate::app_env::accessibility_allowed_quiet,
             quick_recorder,
@@ -298,6 +377,30 @@ pub fn view(s: &SettingsUi, cx: &mut Cx<SettingsUi>) -> El {
     if !s.status.is_empty() {
         model_section = model_section.child(text(s.status.clone()).key("status").font(k.ty.small).color(k.c.text_weak));
     }
+    // Two columns, so it fits a 900-point screen: what the user sets up (shortcuts, folder,
+    // model), and what the Mac and the model may do.
+    let left = col().key("left").w(COLUMN).gap(18.0).child(shortcuts).child(col().gap(8.0).child(label("Save screenshots to")).child(folder)).child(model_section);
+    let mut right = col().key("right").w(COLUMN).gap(18.0);
+    if let Some(allowed) = s.screen_recording {
+        right = right.child(permissions(allowed, s.accessibility, k, label("Permissions")));
+    }
+    right = right
+        .child(switch(
+            Checkbox::new(s.computer_control).label(COMPUTER_CONTROL_LABEL).on_toggle(|s: &mut SettingsUi| s.toggle_computer_control()),
+            "With pi or Claude Code, the model can see the screen, click and type. Each 30-minute session asks you first, and so does every action that sends, pays, buys or deletes.",
+            k,
+        ))
+        .child(connected_apps(s, k))
+        .child(switch(
+            Checkbox::new(s.local_server).label(LOCAL_SERVER_LABEL).on_toggle(|s: &mut SettingsUi| s.toggle_local_server()),
+            "Lets apps on this Mac show and continue your conversation. They need the key Ailfred writes for them.",
+            k,
+        ))
+        .child(switch(
+            Checkbox::new(s.ignore_reduce_motion).label("Show animations even with Reduce Motion on").on_toggle(|s: &mut SettingsUi| s.toggle_reduce_motion()),
+            "Ignores Reduce Motion in System Settings › Accessibility › Display.",
+            k,
+        ));
     let mut page = col()
         .w_full()
         .h_full()
@@ -310,34 +413,7 @@ pub fn view(s: &SettingsUi, cx: &mut Cx<SettingsUi>) -> El {
                 s.check_permissions();
             }
         })
-        .child(shortcuts)
-        .child(col().gap(8.0).child(label("Save screenshots to")).child(folder))
-        .child(model_section);
-    if let Some(allowed) = s.screen_recording {
-        page = page.child(permissions(allowed, s.accessibility, k, label("Permissions")));
-    }
-    page = page
-        .child(
-            Checkbox::new(s.computer_control)
-                .label(COMPUTER_CONTROL_LABEL)
-                .description("With pi or Claude Code, the model can see the screen, click and type. Each 30-minute session asks you first, and so does every action that sends, pays, buys or deletes.")
-                .on_toggle(|s: &mut SettingsUi| s.toggle_computer_control())
-                .build(k),
-        )
-        .child(
-            Checkbox::new(s.local_server)
-                .label(LOCAL_SERVER_LABEL)
-                .description("Lets apps on this Mac show and continue your conversation. They need the key Ailfred writes for them.")
-                .on_toggle(|s: &mut SettingsUi| s.toggle_local_server())
-                .build(k),
-        )
-        .child(
-            Checkbox::new(s.ignore_reduce_motion)
-                .label("Show animations even with Reduce Motion on")
-                .description("Ignores Reduce Motion in System Settings › Accessibility › Display.")
-                .on_toggle(|s: &mut SettingsUi| s.toggle_reduce_motion())
-                .build(k),
-        );
+        .child(row().w_full().items_start().gap(COLUMN_GAP).child(left).child(right));
     if let Some(error) = &s.error {
         page = page.child(text(error.clone()).wrap().font(k.ty.small).color(k.c.text_weak));
     }
@@ -384,6 +460,41 @@ fn permissions(allowed: bool, accessibility: Option<bool>, k: &Kit, title: El) -
                 .build(k);
             section = section.child(row().child(open));
         }
+    }
+    section
+}
+
+/// A switch, `checkbox` (its label and action set) with `description` wrapped under its label to
+/// the column's width (the kit's own description stays on one line).
+fn switch(checkbox: Checkbox, description: &str, k: &Kit) -> El {
+    col()
+        .gap(2.0)
+        .child(checkbox.build(k))
+        .child(text(description.to_owned()).key("description").wrap().font(k.ty.text_xsmall.lh(15.6)).color(k.c.std_text).pl(28.0))
+}
+
+/// The connected-apps switch; on, whether pi is signed in to Composio, with Sign in… when not.
+fn connected_apps(s: &SettingsUi, k: &Kit) -> El {
+    let switch = switch(
+        Checkbox::new(s.connected_apps).label(CONNECTED_APPS_LABEL).on_toggle(|s: &mut SettingsUi| s.toggle_connected_apps()),
+        "With pi, your apps in Composio: Gmail, Calendar, GitHub, Jira, Slack. Once the conversation has read them, or the screen, anything but a read asks you first, pi's commands and file edits included.",
+        k,
+    );
+    let mut section = col().gap(8.0).child(switch);
+    let failed = s.connections_error.as_ref().map(|why| format!("Connected apps couldn't be set up: {why}. Turn them on to try again."));
+    let line = match (s.connected_apps, s.signing_in, s.signed_in) {
+        (false, ..) => failed,
+        (true, false, None) => None,
+        (true, true, _) => Some("Composio: signing in. Finish in your browser.".to_owned()),
+        (true, false, Some(true)) => Some("Composio: Signed in.".to_owned()),
+        (true, false, Some(false)) => Some("Composio: Not signed in.".to_owned()),
+    };
+    if let Some(line) = line {
+        let mut status = row().gap(10.0).items_center().child(text(line).key("connections").wrap().font(k.ty.small).color(k.c.text_weak).grow(1.0));
+        if !s.signing_in && s.signed_in == Some(false) {
+            status = status.child(Button::new("Sign in…").on_press(|s: &mut SettingsUi| s.sign_in()).build(k));
+        }
+        section = section.child(status);
     }
     section
 }
@@ -578,12 +689,76 @@ mod tests {
     }
 
     #[test]
+    fn connected_apps_are_off_and_turned_on_say_whether_pi_is_signed_in_to_composio_with_a_way_to_sign_in() {
+        let says = |rt: &Runtime<SettingsUi>| shown(rt).iter().find(|e| e.key.as_deref() == Some("connections")).and_then(|e| e.text.clone());
+        let sign_in_button = |rt: &Runtime<SettingsUi>| shown(rt).iter().any(|e| e.role == "button" && e.label.as_deref() == Some("Sign in…"));
+        let mut s = ui();
+        s.check_signed_in = || false;
+        s.refresh_status();
+        let rt = frames(s);
+        assert!(shown(&rt).iter().any(|e| e.role == "checkbox" && e.label.as_deref() == Some(CONNECTED_APPS_LABEL)), "the switch is there");
+        assert_eq!(says(&rt), None, "off: nothing to say");
+        assert!(!sign_in_button(&rt));
+
+        let mut s = ui();
+        assert!(!s.connected_apps, "off by default");
+        s.check_signed_in = || false;
+        s.refresh_status();
+        s.toggle_connected_apps();
+        assert!(s.connected_apps && s.settings.connected_apps(|| false), "on, and kept");
+        let mut rt = frames(s);
+        assert!(says(&rt).is_some_and(|t| t.contains("Not signed in")), "{:?}", says(&rt));
+        assert!(sign_in_button(&rt), "a way to sign in");
+
+        rt.update(|s, _| s.sign_in());
+        rt.frame(1.0 / 60.0);
+        assert!(says(&rt).is_some_and(|t| t.contains("browser")), "{:?}", says(&rt));
+        assert!(!sign_in_button(&rt), "once at a time");
+        rt.update(|s, _| s.signed_in(Err("timed out".into())));
+        rt.frame(1.0 / 60.0);
+        let error = shown(&rt).iter().filter_map(|e| e.text.clone()).find(|t| t.contains("timed out"));
+        assert!(error.is_some_and(|t| t.contains("pi mcp login composio")), "why, and the command to run by hand");
+        assert!(sign_in_button(&rt), "try again");
+
+        rt.update(|s, _| {
+            s.check_signed_in = || true;
+            s.signed_in(Ok(()));
+        });
+        rt.frame(1.0 / 60.0);
+        assert!(says(&rt).is_some_and(|t| t.contains("Signed in")), "{:?}", says(&rt));
+        assert!(!sign_in_button(&rt));
+        rt.update(|s, _| {
+            assert!(s.error.is_none(), "the old error goes");
+            s.toggle_connected_apps();
+            assert!(!s.connected_apps && !s.settings.connected_apps(|| true), "off again, and kept off");
+        });
+    }
+
+    #[test]
+    fn connected_apps_that_couldnt_be_set_up_show_the_switch_off_and_say_why_in_their_line() {
+        let says = |rt: &Runtime<SettingsUi>| shown(rt).iter().find(|e| e.key.as_deref() == Some("connections")).and_then(|e| e.text.clone());
+        let mut s = ui();
+        s.check_signed_in = || true;
+        s.toggle_connected_apps();
+        s.connected_apps_failed("the connected apps' guard couldn't be written to x (Is a directory)".into());
+        assert!(!s.connected_apps && !s.settings.connected_apps(|| true), "off again, and kept off");
+        let mut rt = frames(s);
+        let line = says(&rt);
+        assert!(line.as_ref().is_some_and(|t| t.contains("couldn't be set up") && t.contains("guard couldn't be written")), "{line:?}");
+        rt.update(|s, _| s.toggle_connected_apps());
+        rt.frame(1.0 / 60.0);
+        assert!(says(&rt).is_some_and(|t| t.contains("Signed in")), "turned on again, the old error goes: {:?}", says(&rt));
+    }
+
+    #[test]
     fn the_worst_case_fits_screen_recording_off_and_both_shortcuts_taken() {
         let mut s = ui();
         s.check_screen_recording = || false;
         s.check_accessibility = || false;
+        s.check_signed_in = || false;
         s.refresh_status();
         s.toggle_computer_control();
+        s.toggle_connected_apps();
         let taken = |s: &str| -> Shortcut { s.parse().unwrap() };
         let started = crate::settings::start_shortcuts(
             &[(Some(taken("ctrl+alt+shift+cmd+j")), crate::settings::DEFAULT_SHORTCUT), (Some(taken("ctrl+alt+shift+cmd+k")), crate::settings::DEFAULT_QUICK_SHORTCUT)],

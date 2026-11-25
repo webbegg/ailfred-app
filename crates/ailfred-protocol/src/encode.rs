@@ -128,7 +128,7 @@ impl Encoder {
                 let content = object(json!({ "patch": patch, "path": path }));
                 out.push(agui::Event::ActivitySnapshot { message_id: format!("{}-diff-{}", self.run, self.diffs), activity_type: DIFF.into(), content, replace: None, base: Base::at(at) });
             }
-            Event::Ask { prompt, options, multi } => {
+            Event::Ask { prompt, options, multi, .. } => {
                 let id = format!("{}-ask-{}", self.run, self.asks.len() + 1);
                 let response_schema = object(json!({ "properties": { "answer": { "type": "string" } }, "required": ["answer"], "type": "object" }));
                 let metadata = object(json!({ "ailfred": { "multi": multi, "options": options } }));
@@ -297,7 +297,7 @@ mod tests {
     #[test]
     fn a_question_goes_out_where_it_was_asked_and_again_in_the_run_finished() {
         let mut e = Encoder::new("t", "r");
-        let ask = Event::Ask { prompt: "Which?".into(), options: vec!["A".into()], multi: true };
+        let ask = Event::Ask { prompt: "Which?".into(), options: vec!["A".into()], multi: true, dialog: None };
         let out = lines(e.encode(&ask, 1));
         assert_eq!(out[1], r#"{"type":"CUSTOM","name":"ailfred:ask","value":{"interruptId":"r-ask-1","message":"Which?","multi":true,"options":["A"]},"timestamp":1}"#);
         let done = lines(e.encode(&Event::Done, 2));

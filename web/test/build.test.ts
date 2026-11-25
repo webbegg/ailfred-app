@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { build } from "vite";
 
-/// The CSP the build writes, `<hash>` the inlined script's.
+/// The CSP the build writes, `<hash>` the inlined script's. `img-src data:`: no image from the
+/// network, so an injected reply can't send data out in an image's url.
 const CSP = `default-src 'none'; script-src 'sha256-<hash>'; style-src 'unsafe-inline'; img-src data:; base-uri 'none'; form-action 'none'`;
 
 /// The base64 SHA-256 of `text`'s UTF-8 bytes, as a CSP hash source has it.
@@ -38,6 +39,8 @@ describe("the production build", () => {
     const scriptSrc = html.match(/script-src ([^;"]*)/)![1];
     expect(scriptSrc).not.toContain("'unsafe-inline'");
     expect(scriptSrc.trim().split(/\s+/)).toHaveLength(1);
+    // Images only from data: urls, none from the network.
+    expect(html.match(/img-src ([^;"]*)/)![1].trim()).toBe("data:");
     // The markup outside the inlined script and style links to no file.
     const markup = html.replace(/<script>[\s\S]*?<\/script>/g, "<script></script>").replace(/<style>[\s\S]*?<\/style>/g, "<style></style>");
     expect(markup).not.toMatch(/\s(src|href)=/);

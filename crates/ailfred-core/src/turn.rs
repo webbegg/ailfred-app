@@ -9,6 +9,9 @@ pub struct Turn {
     pub text: String,
     pub pngs: Vec<Arc<Vec<u8>>>,
     pub reply: String,
+    /// Its reply read the connected apps or the screen ([`crate::pi::untrusted_tool`]): what
+    /// came back may carry instructions that aren't the user's.
+    pub untrusted: bool,
 }
 
 /// Standard base64 of `bytes`, padded.

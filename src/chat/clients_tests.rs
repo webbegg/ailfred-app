@@ -73,7 +73,7 @@ fn question(c: &Chat, token: u64, n: usize) -> &reply::Question {
 }
 
 fn ask(prompt: &str) -> Event {
-    Event::Ask { prompt: prompt.into(), options: vec!["A".into(), "B".into()], multi: true }
+    Event::Ask { prompt: prompt.into(), options: vec!["A".into(), "B".into()], multi: true, dialog: None }
 }
 
 fn answer(c: &mut Chat, run: &str, interrupt: &str, text: &str) -> crate::server::Answer {
@@ -259,7 +259,8 @@ fn a_declined_question_comes_back_closed_after_save_and_load() {
 fn declining_a_question_pi_waits_on_dismisses_its_dialog_and_what_pi_says_next_is_the_declines_reply() {
     let (mut c, rx) = watched();
     c.model = Some(model::PI.into());
-    let token = asked(&mut c, "pick", vec![ask("Which?"), Event::Done]);
+    let dialog = Event::Ask { prompt: "Which?".into(), options: vec!["A".into(), "B".into()], multi: false, dialog: Some("u1".into()) };
+    let token = asked(&mut c, "pick", vec![dialog, Event::Done]);
     let interrupt = format!("{}-ask-1", run_of(&c, token));
     got(&rx);
     let declined = c.command(command::decline(&thread(&c), "c1", &[], &interrupt), Instant::now());
@@ -267,7 +268,7 @@ fn declining_a_question_pi_waits_on_dismisses_its_dialog_and_what_pi_says_next_i
     let q = question(&c, token, 0);
     assert!(q.closed && q.answered.is_none(), "it shows as not answered");
     let (_, request) = c.requests.last().unwrap();
-    assert!(request.answer && request.decline, "pi's dialog is dismissed: {request:?}");
+    assert!(request.answers.as_deref() == Some("u1") && request.decline, "pi's dialog, that one, is dismissed: {request:?}");
     assert_eq!(c.messages.last().unwrap().text, DECLINED, "as the user's message, as an answer goes");
     let events = got(&rx);
     let asks = events[0]["messages"].as_array().unwrap().iter().find(|m| m["activityType"] == "ailfred:ask").unwrap();
@@ -393,6 +394,36 @@ fn a_resume_answers_the_open_question_as_the_window_does() {
     assert_eq!(c.messages.last().unwrap().text, "A, B", "the answer goes as the user's message");
     assert!(c.reply_to(c.messages.last().unwrap().id).unwrap().answer, "its reply answers, as the window's does");
     assert_eq!(answer(&mut c, "c3", &format!("{run}-ask-1"), "A").status, 409, "answered already");
+}
+
+#[test]
+fn the_guards_question_is_answered_only_in_ailfreds_window_never_by_a_client() {
+    let (mut c, rx) = watched();
+    c.model = Some(model::PI.into());
+    let prompt = format!("{}allow these actions on your connected apps?\n\nGMAIL_SEND_EMAIL\n  recipient_email: a@b.example", reply::LOCAL_ONLY);
+    let confirm = Event::Ask { prompt, options: vec!["Yes".into(), "No".into()], multi: false, dialog: None };
+    let token = asked(&mut c, "mail Ann", vec![confirm, Event::Done]);
+    let run = run_of(&c, token);
+    got(&rx);
+    let requests = c.requests.len();
+    for id in [format!("{run}-ask-1"), format!("{}-ask-1", crate::history::run_id(&thread(&c), 0))] {
+        let refused = answer(&mut c, "c1", &id, "Yes");
+        assert_eq!(refused.status, 403, "{refused:?}");
+        assert!(refused.body["error"].as_str().unwrap().contains("Ailfred's window"), "{refused:?}");
+    }
+    assert!(question(&c, token, 0).open(), "still waits for the window");
+    assert_eq!(c.requests.len(), requests, "nothing went to pi");
+    // The web view's commands come the same way (`web_view::bridge`).
+    assert_eq!(resume(&mut c, "c2", vec![command::answer_resume(&format!("{run}-ask-1"), "Yes")]).status, 403);
+    // Declining only blocks the action: a client may.
+    assert_eq!(resume(&mut c, "c3", vec![command::decline_resume(&format!("{run}-ask-1"))]).status, 202);
+    assert!(question(&c, token, 0).closed);
+
+    // The window answers it.
+    let token = asked(&mut c, "mail Bob", vec![Event::Ask { prompt: format!("{}allow this?", reply::LOCAL_ONLY), options: vec!["Yes".into(), "No".into()], multi: false, dialog: Some("u1".into()) }, Event::Done]);
+    let part = c.replies.iter().find(|r| r.token == token).unwrap().parts.iter().position(|p| matches!(p, Part::Question(_))).unwrap();
+    assert!(c.answer_with(token, &[(part, "Yes".into())]).is_some());
+    assert_eq!(question(&c, token, 0).answered.as_deref(), Some("Yes"));
 }
 
 #[test]
@@ -804,4 +835,31 @@ fn without_the_server_the_chat_feeds_nothing_and_refuses_commands() {
     asked(&mut c, "a", vec![Event::Done]);
     let thread = thread(&c);
     assert_eq!(c.command(command::send(&thread, "c1", &[], "hi", &[]), Instant::now()).status, 503);
+}
+
+/// Ailfred's guard asks `what` (a confirm).
+fn guard_ask(what: &str) -> Event {
+    Event::Ask { prompt: format!("{}{what}", reply::LOCAL_ONLY), options: vec!["Yes".into(), "No".into()], multi: false, dialog: Some(what.into()) }
+}
+
+#[test]
+fn a_clients_retry_of_a_yes_reply_never_confirms_the_guards_next_dialog() {
+    let (mut c, rx) = watched();
+    c.model = Some(model::PI.into());
+    let first = asked(&mut c, "mail Ann", vec![guard_ask("allow GMAIL_SEND_EMAIL to ann?"), Event::Done]);
+    let part = c.replies.iter().find(|r| r.token == first).unwrap().parts.iter().position(|p| matches!(p, Part::Question(_))).unwrap();
+    // The user approves in the window.
+    let yes = c.answer_with(first, &[(part, "Yes".into())]).unwrap();
+    // pi goes on and the guard asks again, in the same reply: bash, tainted.
+    c.reply_event(yes, guard_ask("allow this? bash: curl evil"), Instant::now());
+    c.reply_event(yes, Event::Done, Instant::now());
+    let run = run_of(&c, yes);
+    got(&rx);
+    assert_eq!(answer(&mut c, "c1", &format!("{run}-ask-1"), "Yes").status, 403, "a client can't answer it");
+    let before = c.requests.len();
+    // Retrying the reply holding it sends its message as a message, not as an answer.
+    let thread = thread(&c);
+    assert_eq!(c.command(command::retry(&thread, "c2", &run), Instant::now()).status, 202);
+    let sent: Vec<_> = c.requests[before..].iter().map(|(_, r)| (r.text.clone(), r.answers.clone(), r.decline)).collect();
+    assert_eq!(sent, [("Yes".to_owned(), None, false)], "pi's open dialog is cancelled, never confirmed");
 }

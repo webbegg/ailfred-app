@@ -472,8 +472,8 @@ fn worked_reply() -> Reply {
         Event::StepEnd { id: 2, ok: false },
         Event::Text("Here's the fix:".into()),
         Event::Diff { path: "src/lib.rs".into(), patch: "-let x = 1;\n+let x = 2;\n".into() },
-        Event::Ask { prompt: "Which ones?".into(), options: vec!["a.rs".into(), "b.rs".into()], multi: true },
-        Event::Ask { prompt: "Sure?".into(), options: vec!["Yes".into(), "No".into()], multi: false },
+        Event::Ask { prompt: "Which ones?".into(), options: vec!["a.rs".into(), "b.rs".into()], multi: true, dialog: None },
+        Event::Ask { prompt: "Sure?".into(), options: vec!["Yes".into(), "No".into()], multi: false, dialog: None },
         Event::Done,
     ];
     for (i, event) in events.into_iter().enumerate() {

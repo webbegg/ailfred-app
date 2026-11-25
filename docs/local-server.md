@@ -152,7 +152,10 @@ answer **202** `{"threadId","runId"}`; the run's events come on the stream.
     partial resume answers the ones it names. An answered or closed question, a reply that
     failed or was stopped, or an unknown `interruptId` gets **409**; a question named twice
     **400**. The answers go as one user message, as in the chat, so a later snapshot shows them
-    as the answering run's `{run}-user` message.
+    as the answering run's `{run}-user` message. A question of Ailfred's guard (its text starts
+    with `Ailfred guard: `, `docs/connected-apps.md`) approves an action on the user's accounts
+    or computer: only Ailfred's window answers it, and an answer to it gets **403**. A client
+    may still decline it.
   - `status: "cancelled"` (no payload) declines a question: it closes and shows as "Not
     answered" in the chat; clients get a fresh `MESSAGES_SNAPSHOT` with the question
     `"closed": true`. **202** `{"threadId","runId"}`. With pi, whose dialog waits for the
@@ -176,7 +179,9 @@ answer **202** `{"threadId","runId"}`; the run's events come on the stream.
   stopped or failed: the footer's, or the error's), not on one streaming or queued, so
   `replyRunId` names the reply by its run: the live run's `runId` (its `RUN_STARTED`), or the
   snapshot's `{run}` (its user message's id without `-user`), matched whole. Retrying stops a
-  reply that streams. **202** `{"threadId","runId"}`, then a snapshot without the retried
+  reply that streams. A retried reply to an answer goes to the model as a message of the
+  answer's words, never as an answer: with pi, its dialog open then is cancelled, not answered
+  (`docs/connected-apps.md`). **202** `{"threadId","runId"}`, then a snapshot without the retried
   message, then the new run. A wrong thread, a used `runId`, or a `replyRunId` naming no reply
   that ended (one streaming or queued, one already retried, after Cmd+N) gets **409**. Live
   run ids and saved ones can't clash: a client's `runId` never has the saved shape.

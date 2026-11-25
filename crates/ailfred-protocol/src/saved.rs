@@ -124,7 +124,7 @@ pub fn part_events(reply: &Reply) -> Vec<(Event, u64)> {
                 }
             }
             Part::Diff(d) => put(Event::Diff { path: d.path.clone(), patch: d.patch.clone() }, at),
-            Part::Question(q) => put(Event::Ask { prompt: q.prompt.clone(), options: q.options.clone(), multi: q.multi }, at),
+            Part::Question(q) => put(Event::Ask { prompt: q.prompt.clone(), options: q.options.clone(), multi: q.multi, dialog: None }, at),
             // The run's end says it.
             Part::Error(_) => {}
         }

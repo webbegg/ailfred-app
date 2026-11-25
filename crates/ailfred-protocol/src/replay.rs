@@ -200,7 +200,7 @@ impl Replayer {
             A::Custom { name, value, .. } if name == ASK => {
                 let Ok(Ask { interrupt_id, message, options, multi }) = Ask::deserialize(value) else { return Vec::new() };
                 self.asked.push(interrupt_id);
-                vec![ev(Event::Ask { prompt: message, options: options.unwrap_or_default(), multi: multi.unwrap_or(false) })]
+                vec![ev(Event::Ask { prompt: message, options: options.unwrap_or_default(), multi: multi.unwrap_or(false), dialog: None })]
             }
             A::RunFinished { outcome, .. } => match outcome {
                 Some(RunOutcome::Interrupt { interrupts }) => {
@@ -263,6 +263,7 @@ fn ask(interrupt: &Interrupt) -> Event {
         prompt: interrupt.message.clone().unwrap_or_default(),
         options: options.iter().filter_map(|o| o.as_str().map(str::to_owned)).collect(),
         multi: ours.and_then(|a| a.get("multi")?.as_bool()).unwrap_or(false),
+        dialog: None,
     }
 }
 
@@ -373,7 +374,7 @@ mod tests {
         let ours = r#"{"type":"CUSTOM","name":"ailfred:ask","value":{"interruptId":"i","message":"Which?","multi":null,"options":null}}"#;
         let interrupt = r#"{"id":"i","reason":"input_required","message":"Which?"}"#;
         let finished = format!(r#"{{"type":"RUN_FINISHED","threadId":"t","runId":"r","outcome":{{"type":"interrupt","interrupts":[{interrupt}]}}}}"#);
-        let ask = Kind::Event(Event::Ask { prompt: "Which?".into(), options: Vec::new(), multi: false });
+        let ask = Kind::Event(Event::Ask { prompt: "Which?".into(), options: Vec::new(), multi: false, dialog: None });
         assert_eq!(replay_lines(&[STARTED, ours, TEXT, &finished]).unwrap(), [Kind::Event(Event::Taken), ask, Kind::Event(Event::Text(String::new())), Kind::Event(Event::Done)]);
     }
 
@@ -407,7 +408,7 @@ mod tests {
     fn a_question_another_producer_asks_only_at_the_end_still_replays_once() {
         let interrupt = r#"{"id":"i","reason":"input_required","message":"Which?"}"#;
         let finished = format!(r#"{{"type":"RUN_FINISHED","threadId":"t","runId":"r","outcome":{{"type":"interrupt","interrupts":[{interrupt}]}}}}"#);
-        let ask = Kind::Event(Event::Ask { prompt: "Which?".into(), options: Vec::new(), multi: false });
+        let ask = Kind::Event(Event::Ask { prompt: "Which?".into(), options: Vec::new(), multi: false, dialog: None });
         assert_eq!(replay_lines(&[STARTED, &finished]).unwrap(), [Kind::Event(Event::Taken), ask.clone(), Kind::Event(Event::Done)]);
         let ours = r#"{"type":"CUSTOM","name":"ailfred:ask","value":{"interruptId":"i","message":"Which?","multi":false,"options":[]}}"#;
         assert_eq!(replay_lines(&[STARTED, ours, &finished]).unwrap(), [Kind::Event(Event::Taken), ask, Kind::Event(Event::Done)]);

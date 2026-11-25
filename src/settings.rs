@@ -50,6 +50,7 @@ const FOLDER: &str = "folder";
 const IGNORE_REDUCE_MOTION: &str = "ignore_reduce_motion";
 const COMPUTER_CONTROL: &str = "computer_control";
 const LOCAL_SERVER: &str = "local_server";
+const CONNECTED_APPS: &str = "connected_apps";
 const MODEL: &str = "model";
 
 /// Whether the views animate even under the system's Reduce Motion, until set (also before the
@@ -182,6 +183,18 @@ impl Settings {
     pub fn set_computer_control(&mut self, on: bool) {
         if let Err(e) = self.prefs.set(COMPUTER_CONTROL, &on) {
             eprintln!("Ailfred: saving the computer control setting failed: {e}");
+        }
+    }
+
+    /// Let the model use the user's connected apps (Composio, `pi_setup::connections`). Until
+    /// set, on only if pi already has the server (`found`: set up by hand before the switch).
+    pub fn connected_apps(&self, found: impl FnOnce() -> bool) -> bool {
+        self.prefs.get::<bool>(CONNECTED_APPS).unwrap_or_else(found)
+    }
+
+    pub fn set_connected_apps(&mut self, on: bool) {
+        if let Err(e) = self.prefs.set(CONNECTED_APPS, &on) {
+            eprintln!("Ailfred: saving the connected apps setting failed: {e}");
         }
     }
 
@@ -568,6 +581,17 @@ mod tests {
         assert!(s.computer_control());
         s.set_computer_control(false);
         assert!(!s.computer_control());
+    }
+
+    #[test]
+    fn connected_apps_are_on_until_set_only_when_pi_already_has_composio_and_stay_as_set() {
+        let mut s = Settings::with(Prefs::memory());
+        assert!(!s.connected_apps(|| false), "off by default: the model reaches none of the user's accounts");
+        assert!(s.connected_apps(|| true), "a composio server set up by hand keeps working");
+        s.set_connected_apps(false);
+        assert!(!s.connected_apps(|| true), "switched off, off, the server still there or not");
+        s.set_connected_apps(true);
+        assert!(s.connected_apps(|| false));
     }
 
     #[test]

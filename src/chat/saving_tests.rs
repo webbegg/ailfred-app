@@ -392,12 +392,12 @@ fn a_reopened_conversation_keeps_its_steps_diffs_and_questions_and_one_nobody_an
     c.reply_event(first, Event::Step { id: 1, tool: reply::Tool::Read, target: "src/lib.rs".into() }, now());
     c.reply_event(first, Event::StepEnd { id: 1, ok: true }, now());
     c.reply_event(first, Event::Diff { path: "src/lib.rs".into(), patch: "-a\n+b\n".into() }, now());
-    c.reply_event(first, Event::Ask { prompt: "Apply it?".into(), options: vec!["Yes".into(), "No".into()], multi: false }, now());
+    c.reply_event(first, Event::Ask { prompt: "Apply it?".into(), options: vec!["Yes".into(), "No".into()], multi: false, dialog: None }, now());
     c.reply_event(first, Event::Done, now());
     c.pick(first, 2, 0);
     let second = c.answer(first, 2).expect("answered");
     c.reply_event(second, Event::Text("Applied.".into()), now());
-    c.reply_event(second, Event::Ask { prompt: "Anything else?".into(), options: vec!["Tests".into(), "No".into()], multi: false }, now());
+    c.reply_event(second, Event::Ask { prompt: "Anything else?".into(), options: vec!["Tests".into(), "No".into()], multi: false, dialog: None }, now());
     c.reply_event(second, Event::Done, now());
     let snapshot = c.snapshot().unwrap();
     history::write_snapshot(&dir, &snapshot).unwrap();

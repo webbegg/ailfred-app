@@ -25,7 +25,7 @@ pub(super) fn script(path: &Path, body: &str, mode: u32) {
 }
 
 fn request(text: &str) -> Request {
-    Request { model: DEFAULT_MODEL.into(), history: Vec::new(), text: text.into(), pngs: Vec::new(), session: None, answer: false, decline: false, steer: false }
+    Request { model: DEFAULT_MODEL.into(), history: Vec::new(), text: text.into(), pngs: Vec::new(), session: None, answers: None, decline: false, steer: false }
 }
 
 fn png(bytes: &[u8]) -> Arc<Vec<u8>> {
@@ -116,8 +116,8 @@ fn a_message_goes_as_its_captures_then_its_text_and_a_capture_alone_has_no_text_
 fn conversation() -> Request {
     Request {
         history: vec![
-            Turn { text: "first".into(), pngs: vec![png(b"foo")], reply: "one".into() },
-            Turn { text: "second".into(), pngs: Vec::new(), reply: "two".into() },
+            Turn { text: "first".into(), pngs: vec![png(b"foo")], reply: "one".into(), untrusted: false },
+            Turn { text: "second".into(), pngs: Vec::new(), reply: "two".into(), untrusted: false },
         ],
         pngs: vec![png(b"foob")],
         ..request("third")
@@ -265,8 +265,8 @@ fn claudes_stdin_is_one_json_line_with_the_capture_and_the_text() {
 #[test]
 fn without_a_session_claude_code_gets_the_earlier_turns_as_a_transcript() {
     let history = vec![
-        Turn { text: "first question".into(), pngs: vec![png(b"foo")], reply: "first answer".into() },
-        Turn { text: "second question".into(), pngs: Vec::new(), reply: "second answer".into() },
+        Turn { text: "first question".into(), pngs: vec![png(b"foo")], reply: "first answer".into(), untrusted: false },
+        Turn { text: "second question".into(), pngs: Vec::new(), reply: "second answer".into(), untrusted: false },
     ];
     let fresh = Request { history: history.clone(), ..request("third question") };
     let v: Value = serde_json::from_str(&claude_code::input(&fresh)).unwrap();

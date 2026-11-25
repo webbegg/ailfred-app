@@ -72,8 +72,8 @@ fn every_part() -> Vec<Event> {
         Event::StepEnd { id: 9, ok: true },
         Event::Text("Here's the fix:".into()),
         Event::Diff { path: "src/lib.rs".into(), patch: "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -1 +1 @@\n-let x = 1;\n+let x = 2;\n".into() },
-        Event::Ask { prompt: "Which ones?".into(), options: vec!["a.rs".into(), "b.rs".into()], multi: true },
-        Event::Ask { prompt: "Sure?".into(), options: Vec::new(), multi: false },
+        Event::Ask { prompt: "Which ones?".into(), options: vec!["a.rs".into(), "b.rs".into()], multi: true, dialog: None },
+        Event::Ask { prompt: "Sure?".into(), options: Vec::new(), multi: false, dialog: None },
     ]
 }
 

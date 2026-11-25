@@ -110,9 +110,10 @@ pub struct Request {
     pub pngs: Vec<Arc<Vec<u8>>>,
     /// Claude Code's session of this conversation, once it has one.
     pub session: Option<String>,
-    /// The user's answer to the model's question (pi waits for it), not a new message.
-    pub answer: bool,
-    /// With `answer`: the user declined pi's question, whose dialog is dismissed (pi only).
+    /// The user's answer to pi's question: the id of the dialog it answers (pi waits for it),
+    /// not a new message. Only an answer the user gave to that question carries it.
+    pub answers: Option<String>,
+    /// With `answers`: the user declined pi's question, whose dialog is dismissed (pi only).
     pub decline: bool,
     /// Sent while pi replies: it goes into the run going (pi only).
     pub steer: bool,

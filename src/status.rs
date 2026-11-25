@@ -209,7 +209,7 @@ mod tests {
         let mut t = Tracker::default();
         t.shown(true);
         t.start(1, false);
-        t.event(1, &Event::Ask { prompt: "Which layout?".into(), options: vec!["A".into()], multi: false });
+        t.event(1, &Event::Ask { prompt: "Which layout?".into(), options: vec!["A".into()], multi: false, dialog: None });
         t.event(1, &Event::Done);
         assert_eq!(t.status(), Status::NeedsYou("Which layout?".into()));
         t.shown(false);
@@ -217,7 +217,7 @@ mod tests {
         assert_eq!(t.status(), Status::NeedsYou("Which layout?".into()), "seeing it doesn't answer it");
         t.start(2, false);
         assert_eq!(t.status(), Status::Thinking, "the answer is the next message");
-        t.event(2, &Event::Ask { prompt: "Sure?".into(), options: vec![], multi: false });
+        t.event(2, &Event::Ask { prompt: "Sure?".into(), options: vec![], multi: false, dialog: None });
         t.stop();
         assert_eq!(t.status(), Status::Idle, "Cmd+N");
     }

@@ -125,6 +125,7 @@ fn ask_layout() -> Event {
         prompt: "Which layout should the settings use?".into(),
         options: vec!["Tabs at the top".into(), "One long page".into(), "Sidebar with sections".into()],
         multi: false,
+        dialog: None,
     }
 }
 
@@ -141,6 +142,7 @@ fn showcase(s: &mut Script) {
             prompt: "What should I do next?".into(),
             options: vec!["Add a test for it".into(), "Document the change".into(), "Open a pull request".into()],
             multi: true,
+            dialog: None,
         },
     ));
 }
