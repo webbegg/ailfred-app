@@ -988,13 +988,22 @@ impl Host {
     pub fn set_connected_apps(&mut self, on: bool) {
         let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
         let was = pi_setup::connections::now();
-        if let Err(e) = pi_setup::connections::set(&pi_data(&home), on) {
+        let set = pi_setup::connections::set(&pi_data(&home), on);
+        if let Err(e) = &set {
+            // Off, then: Composio's server is out of pi's mcp.json (`connections::apply`).
             eprintln!("Ailfred: pi's connected apps couldn't be set up: {e}");
+            if let Some(ui) = &self.settings_ui {
+                let why = e.to_string();
+                ui.update(move |ui, _| ui.connected_apps_failed(why));
+            }
         }
-        if was != on && self.pi.is_some() {
+        let now = pi_setup::connections::now();
+        // Its mcp.json changed (a failure may have taken a hand-made server out): pi reads it as
+        // it starts.
+        if (was != now || set.is_err()) && self.pi.is_some() {
             self.pi_stale = true;
         }
-        eprintln!("Ailfred: connected apps {}", if on { "on" } else { "off" });
+        eprintln!("Ailfred: connected apps {}", if now { "on" } else { "off" });
     }
 
     /// Settings' Sign in…: pi's sign-in to Composio, off the main thread (it waits for the

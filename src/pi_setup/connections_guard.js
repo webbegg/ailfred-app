@@ -1,33 +1,62 @@
-// Ailfred's guard for the connected apps: the tools of the `composio` server in the mcp.json of
-// Ailfred's pi. What the model reads there (an email, an issue, a calendar invite) can carry
-// instructions that aren't the user's, so only what this table knows to be a read runs on its
-// own; anything else, unknown slugs included, waits for the user's yes in the chat.
+// Ailfred's guard for the connected apps (the tools of Composio's server in the mcp.json of
+// Ailfred's pi) and for what the model does once it has read them. What the model reads there
+// (an email, an issue, a calendar invite), or sees on the screen, can carry instructions that
+// aren't the user's.
 //
-// - READS and META_READS run without asking.
-// - Every other action asks: each Composio tool slug run through COMPOSIO_MULTI_EXECUTE_TOOL that
-//   isn't in READS, and each Composio tool that isn't in META_READS (COMPOSIO_MANAGE_CONNECTIONS,
-//   one Composio adds later). With no one to ask (no UI), or in read-only mode, it's blocked.
-// - Read-only mode: the AILFRED_CONNECTIONS variable, set by Ailfred, is "readonly". Any value
-//   but none, "" or "ask" counts as read-only, so a typo doesn't open the writes.
-// - The tools Ailfred hides from the model (BLOCKED) are blocked even when called, also as a
-//   slug inside a batch; so is a call whose actions can't be read.
+// - Composio: READS and META_READS run without asking. Every other action asks: each slug run
+//   through COMPOSIO_MULTI_EXECUTE_TOOL that isn't in READS (or carries more than its slug and
+//   arguments), each Composio tool that isn't in META_READS, and a call that would keep
+//   `memory` or a workbench copy at Composio. The tools Ailfred hides (BLOCKED) are blocked,
+//   also as a slug in a batch; so is a batch whose actions can't be read. A Composio tool is
+//   known by its name (`…__COMPOSIO_…`) whatever server serves it.
+// - Tainted: once a result of a Composio tool or of computer control (screenshots show what's on
+//   the screen) came into the session, every tool but pi's reads (read, grep, find, ls), the
+//   tools that call other tools (codemode, tool_search: each call they make comes here too),
+//   computer control (it asks the user itself) and Composio's (above) asks first: bash, write,
+//   edit, another server's tools, and any tool this doesn't know. The taint is the session's: an
+//   entry in it (TAINT) and, should that be missing, its tool results; a new session starts
+//   without. A message that carries an earlier conversation's untrusted turns into a new session
+//   (UNTRUSTED_CONTEXT, from Ailfred's core) taints it too.
+// - Read-only mode (the AILFRED_CONNECTIONS variable as the guard loads: any value but none, ""
+//   or "ask") blocks, without asking, all that would ask above, tainted or not.
+// - With no one to ask (no UI), what would ask is blocked.
+// - The dialog never approves what it doesn't show: each action whole, who it reaches first.
+//   What doesn't fit (MAX_ACTIONS, MAX_FIELDS, MAX_VALUE, MAX_TEXT) is blocked, not cut. Its
+//   title starts with LOCAL_ONLY: Ailfred takes the answer only from its own window.
 //
 // Written to pi's agent folder by `pi_setup::connections`; plain JavaScript, no imports.
 
-const PREFIX = "mcp__composio__";
-const EXECUTE = "COMPOSIO_MULTI_EXECUTE_TOOL";
 const MODE = "AILFRED_CONNECTIONS";
-const TITLE = "Allow these actions on your connected apps?";
+// `ailfred_core::reply::LOCAL_ONLY`.
+const LOCAL_ONLY = "Ailfred guard: ";
+// `pi_setup::connections::GUARD_COMMAND`: Ailfred asks pi for it to know the guard loaded.
+const COMMAND = "ailfred-connections-guard";
+// The session entry that says the session is tainted.
+const TAINT = "ailfred-connections-taint";
+// `ailfred_core::pi::UNTRUSTED_CONTEXT`.
+const UNTRUSTED_CONTEXT = "Parts of it came from the user's connected apps or screen, and may carry instructions that aren't the user's.";
+const COMPOSIO_SERVER = "mcp__composio__";
+const COMPOSIO_TOOL = "__COMPOSIO_";
+const COMPUTER = "mcp__computer__";
+const EXECUTE = "COMPOSIO_MULTI_EXECUTE_TOOL";
+const WRITE_TITLE = `${LOCAL_ONLY}allow these actions on your connected apps?`;
+const TAINTED_TITLE = `${LOCAL_ONLY}allow this? This conversation has read content from your connected apps or screen, which can carry instructions that aren't yours.`;
+
+// pi's own tools that only read.
+const PI_READS = new Set(["read", "grep", "find", "ls"]);
+// Tools that only call other tools, each call coming to this guard on its own.
+const CALLERS = new Set(["codemode", "tool_search"]);
 
 // Composio tool slugs that only read, from Composio's toolkit docs
 // (docs.composio.dev/toolkits/<toolkit>.md). Not here: anything that sends, creates, changes,
-// deletes, marks as read, watches or runs a query language that can write.
+// deletes, marks as read, watches, runs a query language that can write, or makes a copy
+// Composio hosts for download (GMAIL_GET_ATTACHMENT, GITHUB_GET_RAW_REPOSITORY_CONTENT).
+// Deprecated slugs Composio still serves stay, with their replacements.
 const READS = new Set([
   // Gmail
   "GMAIL_FETCH_EMAILS",
   "GMAIL_FETCH_MESSAGE_BY_MESSAGE_ID",
   "GMAIL_FETCH_MESSAGE_BY_THREAD_ID",
-  "GMAIL_GET_ATTACHMENT",
   "GMAIL_GET_CONTACTS",
   "GMAIL_GET_DRAFT",
   "GMAIL_GET_LABEL",
@@ -42,7 +71,6 @@ const READS = new Set([
   "GMAIL_WHO_AM_I",
   // Google Calendar
   "GOOGLECALENDAR_CALENDAR_LIST_GET",
-  "GOOGLECALENDAR_CALENDAR_LIST_LIST",
   "GOOGLECALENDAR_COLORS_GET",
   "GOOGLECALENDAR_EVENTS_GET",
   "GOOGLECALENDAR_EVENTS_INSTANCES",
@@ -68,7 +96,6 @@ const READS = new Set([
   "GITHUB_GET_A_WORKFLOW_RUN",
   "GITHUB_GET_AN_ISSUE",
   "GITHUB_GET_AN_ISSUE_COMMENT",
-  "GITHUB_GET_RAW_REPOSITORY_CONTENT",
   "GITHUB_GET_REPOSITORY_CONTENT",
   "GITHUB_GET_THE_AUTHENTICATED_USER",
   "GITHUB_GET_THE_LATEST_RELEASE",
@@ -79,6 +106,7 @@ const READS = new Set([
   "GITHUB_LIST_ISSUE_COMMENTS",
   "GITHUB_LIST_ISSUES_ASSIGNED_TO_THE_AUTHENTICATED_USER",
   "GITHUB_LIST_LABELS_FOR_A_REPOSITORY",
+  "GITHUB_LIST_NOTIFICATIONS",
   "GITHUB_LIST_NOTIFICATIONS_FOR_THE_AUTHENTICATED_USER",
   "GITHUB_LIST_PULL_REQUESTS",
   "GITHUB_LIST_PULL_REQUESTS_FILES",
@@ -95,6 +123,7 @@ const READS = new Set([
   "GITHUB_SEARCH_USERS",
   // Jira
   "JIRA_FIND_USERS",
+  "JIRA_FIND_USERS2",
   "JIRA_GET_ALL_PROJECTS",
   "JIRA_GET_ALL_STATUSES",
   "JIRA_GET_COMMENT",
@@ -107,6 +136,7 @@ const READS = new Set([
   "JIRA_GET_PROJECT",
   "JIRA_GET_SPRINT",
   "JIRA_GET_TRANSITIONS",
+  "JIRA_GET_WORKLOG",
   "JIRA_LIST_BOARDS",
   "JIRA_LIST_ISSUE_COMMENTS",
   "JIRA_LIST_PRIORITIES",
@@ -146,40 +176,65 @@ const READS = new Set([
 const META_READS = new Set(["COMPOSIO_SEARCH_TOOLS", "COMPOSIO_GET_TOOL_SCHEMAS", "COMPOSIO_WAIT_FOR_CONNECTIONS"]);
 
 // The tools Ailfred hides in mcp.json (`toolExposure`): code and raw requests run on Composio's
-// side, feedback sent out, skills. Never run, however they're reached.
-const BLOCKED = [/^COMPOSIO_PROXY_EXECUTE$/, /^COMPOSIO_REMOTE_BASH_TOOL$/, /^COMPOSIO_REMOTE_WORKBENCH$/, /^COMPOSIO_SUBMIT_FEEDBACK$/, /^COMPOSIO_.*_SKILL/];
+// side, feedback sent out, skills. Never run, however they're reached (a hash suffix pi adds to
+// names that collide included).
+const BLOCKED = [/^COMPOSIO_PROXY_EXECUTE/, /^COMPOSIO_REMOTE_BASH_TOOL/, /^COMPOSIO_REMOTE_WORKBENCH/, /^COMPOSIO_SUBMIT_FEEDBACK/, /^COMPOSIO_.*SKILL/];
 
-// How much of an action the dialog shows.
-const MAX_ACTIONS = 10;
-const MAX_FIELDS = 12;
-const MAX_VALUE = 160;
+// The arguments of Composio's tools that keep something at Composio: `memory` is given back to
+// later runs, and a workbench copy stays there.
+const KEPT = ["memory", "sync_response_to_workbench"];
+
+// How much the dialog shows; what doesn't fit is blocked, never cut.
+const MAX_ACTIONS = 8;
+const MAX_FIELDS = 24;
+const MAX_VALUE = 2000;
+const MAX_NAME = 100;
+const MAX_TEXT = 20000;
+const TOO_LARGE = "Too large to show for approval: ask for one action at a time.";
+
+// Field names shown first, in this order: who or what the action reaches; then its subject or
+// title; then its body; then the rest as they came.
+const FIRST = [
+  /^(to|from|cc|bcc|reply_to)$/,
+  /^recipient/,
+  /^extra_recipients$/,
+  /^attendee/,
+  /^invitee/,
+  /^channel/,
+  /^user/,
+  /^email/,
+  /^member/,
+  /^team/,
+  /^owner$/,
+  /^org/,
+  /^repo/,
+  /^project/,
+  /^issue/,
+  /^assignee/,
+  /^reviewer/,
+  /^calendar/,
+  /^(command|path|file_path|url|cwd)$/,
+];
+const SUBJECT = /^(subject|title|summary|name)$/;
+const BODY = /^(body|message|text|markdown_text|html|content|description|comment)$/;
 
 const isBlocked = (name) => BLOCKED.some((pattern) => pattern.test(name));
+const isExecute = (tool) => tool === EXECUTE || tool.startsWith(`${EXECUTE}_`);
 const named = (slug) => slug || "(no tool named)";
+const length = (text) => Array.from(text).length;
 
-// What a call is: not the connected apps' ("other"), a read, a write (with its `actions`, each
-// `{ slug, args }`), or blocked (with its `reason`).
-function classify(toolName, input) {
-  if (typeof toolName !== "string" || !toolName.startsWith(PREFIX)) return { kind: "other" };
-  const tool = toolName.slice(PREFIX.length);
-  if (isBlocked(tool)) return { kind: "blocked", reason: `Blocked: ${tool} isn't available to the assistant.` };
-  if (META_READS.has(tool)) return { kind: "read" };
-  if (tool !== EXECUTE) return { kind: "write", actions: [{ slug: tool, args: input }] };
-  // `{ tools: [{ tool_slug, arguments }], ... }`. A slug that isn't a string is empty: a write.
-  const tools = input?.tools;
-  if (!Array.isArray(tools) || tools.length === 0) {
-    return { kind: "blocked", reason: "Blocked: no tool slug found in the call, so it can't be checked." };
-  }
-  const actions = tools.map((tool) => ({
-    slug: typeof tool?.tool_slug === "string" ? tool.tool_slug.trim().toUpperCase() : "",
-    args: tool?.arguments,
-  }));
-  const hidden = actions.filter((action) => isBlocked(action.slug));
-  if (hidden.length > 0) {
-    return { kind: "blocked", reason: `Blocked: ${hidden.map((a) => a.slug).join(", ")} isn't available to the assistant.` };
-  }
-  const writes = actions.filter((action) => !READS.has(action.slug));
-  return writes.length === 0 ? { kind: "read" } : { kind: "write", actions: writes };
+// The Composio tool `name` calls (`COMPOSIO_…`, or what Composio's server calls it), or null.
+function composioTool(name) {
+  if (!name.startsWith("mcp__")) return null;
+  const at = name.lastIndexOf(COMPOSIO_TOOL);
+  if (at >= 0) return name.slice(at + 2);
+  if (name.startsWith(COMPOSIO_SERVER)) return name.slice(COMPOSIO_SERVER.length);
+  return null;
+}
+
+// What tool `name` returns can carry instructions that aren't the user's.
+function untrusted(name) {
+  return typeof name === "string" && (composioTool(name) !== null || name.startsWith(COMPUTER));
 }
 
 function readOnly(mode) {
@@ -187,23 +242,56 @@ function readOnly(mode) {
   return value !== "" && value !== "ask";
 }
 
-// `text` on one line, without control or direction-changing characters (so a value can't fake
-// another line or reorder what's shown), cut to `max` characters.
-function oneLine(text, max = MAX_VALUE) {
-  const flat = Array.from(String(text), (ch) => (visible(ch) ? ch : " "))
-    .join("")
-    .replace(/\s+/g, " ")
-    .trim();
-  const chars = Array.from(flat);
-  return chars.length > max ? `${chars.slice(0, max - 1).join("")}…` : flat;
+// Holds something: not null, false, 0, "", or an object or array of only such.
+function holds(value) {
+  if (value === undefined || value === null || value === false || value === 0) return false;
+  if (typeof value === "string") return value.trim() !== "";
+  if (Array.isArray(value)) return value.some(holds);
+  if (typeof value === "object") return Object.values(value).some(holds);
+  return true;
 }
 
-// Not a control character (C0, DEL, C1), a line or paragraph separator, or a mark or override
-// that changes the text's direction.
-function visible(ch) {
-  const c = ch.codePointAt(0);
-  const hidden = c <= 0x1f || (c >= 0x7f && c <= 0x9f) || c === 0x200e || c === 0x200f || (c >= 0x2028 && c <= 0x202e) || (c >= 0x2066 && c <= 0x2069);
-  return !hidden;
+// What a call to Composio's tool `tool` is: a read, an action to ask about (`actions`, each
+// `{ slug, args }`, and whether any is a write), or blocked (with its `reason`).
+function classify(tool, input) {
+  if (isBlocked(tool)) return { kind: "blocked", reason: `Blocked: ${escaped(tool)} isn't available to the assistant.` };
+  const kept = KEPT.filter((name) => holds(input?.[name]));
+  const keeps = kept.length > 0 ? [{ slug: `${tool} (kept at Composio)`, args: Object.fromEntries(kept.map((name) => [name, input[name]])) }] : [];
+  if (META_READS.has(tool)) return keeps.length > 0 ? { kind: "ask", actions: keeps, writes: false } : { kind: "read" };
+  if (!isExecute(tool)) return { kind: "ask", actions: [{ slug: tool, args: input }], writes: true };
+  // `{ tools: [{ tool_slug, arguments }], ... }`. A slug that isn't a string is empty: a write.
+  const tools = input?.tools;
+  if (!Array.isArray(tools) || tools.length === 0) {
+    return { kind: "blocked", reason: "Blocked: no tool slug found in the call, so it can't be checked." };
+  }
+  const actions = tools.map((entry) => {
+    const slug = typeof entry?.tool_slug === "string" ? entry.tool_slug.trim().toUpperCase() : "";
+    // More than its slug and arguments: what else it says is shown, and it asks.
+    const rest = entry && typeof entry === "object" ? Object.keys(entry).filter((key) => key !== "tool_slug" && key !== "arguments") : [];
+    const args = rest.length > 0 ? Object.fromEntries(Object.entries(entry).filter(([key]) => key !== "tool_slug")) : entry?.arguments;
+    return { slug, args, plain: rest.length === 0 };
+  });
+  const hidden = actions.filter((action) => isBlocked(action.slug));
+  if (hidden.length > 0) {
+    return { kind: "blocked", reason: `Blocked: ${hidden.map((a) => escaped(a.slug)).join(", ")} isn't available to the assistant.` };
+  }
+  const writes = actions.filter((action) => !(action.plain && READS.has(action.slug)));
+  if (writes.length === 0 && keeps.length === 0) return { kind: "read" };
+  return { kind: "ask", actions: [...keeps, ...writes], writes: writes.length > 0 };
+}
+
+// A character that would hide, reorder or fake text: a control or format character (C0, DEL,
+// C1, zero-width ones, direction marks and overrides, tags, the soft hyphen, the BOM, …), or a
+// line or paragraph separator.
+const INVISIBLE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u;
+
+// `text` with each invisible character written out as `\u{…}`, so the dialog shows it on one
+// line, as it is.
+function escaped(text) {
+  return Array.from(String(text), (ch) => {
+    const c = ch.codePointAt(0);
+    return INVISIBLE.test(ch) || (c >= 0xe0000 && c <= 0xe007f) ? `\\u{${c.toString(16)}}` : ch;
+  }).join("");
 }
 
 function shown(value) {
@@ -215,41 +303,154 @@ function shown(value) {
   }
 }
 
-// An action's arguments, one `name: value` line each, the empty ones left out.
+function rank(name) {
+  const key = name.toLowerCase();
+  const first = FIRST.findIndex((pattern) => pattern.test(key));
+  if (first >= 0) return first;
+  if (SUBJECT.test(key)) return FIRST.length;
+  if (BODY.test(key)) return FIRST.length + 1;
+  return FIRST.length + 2;
+}
+
+// An action's arguments, one `name: value` line each, who it reaches first, the empty ones left
+// out; or what's too large to show.
 function fields(args) {
-  if (args === undefined || args === null || args === "") return [];
-  if (typeof args !== "object" || Array.isArray(args)) return [oneLine(shown(args))];
-  const entries = Object.entries(args).filter(([, value]) => value !== undefined && value !== null && value !== "");
-  const lines = entries.slice(0, MAX_FIELDS).map(([name, value]) => `${oneLine(name, 40)}: ${oneLine(shown(value))}`);
-  if (entries.length > MAX_FIELDS) lines.push(`…and ${entries.length - MAX_FIELDS} more`);
-  return lines;
-}
-
-// What the dialog says: each action's slug, then its arguments indented under it.
-function describe(actions) {
+  if (args === undefined || args === null || args === "") return { lines: [] };
+  const entries =
+    typeof args === "object" && !Array.isArray(args)
+      ? Object.entries(args).filter(([, value]) => value !== undefined && value !== null && value !== "")
+      : [["value", args]];
+  if (entries.length > MAX_FIELDS) return { tooLarge: `${entries.length} arguments, more than ${MAX_FIELDS}` };
+  const ordered = entries.map((entry, i) => ({ entry, i, rank: rank(entry[0]) })).sort((a, b) => a.rank - b.rank || a.i - b.i);
   const lines = [];
-  for (const action of actions.slice(0, MAX_ACTIONS)) {
-    lines.push(oneLine(named(action.slug), 80));
-    for (const line of fields(action.args)) lines.push(`  ${line}`);
+  for (const { entry } of ordered) {
+    const [name, value] = entry;
+    const text = shown(value);
+    if (length(name) > MAX_NAME) return { tooLarge: "an argument's name is too long" };
+    if (length(text) > MAX_VALUE) return { tooLarge: `${escaped(name)} is longer than ${MAX_VALUE} characters` };
+    lines.push(`${escaped(name)}: ${escaped(text)}`);
   }
-  if (actions.length > MAX_ACTIONS) lines.push(`…and ${actions.length - MAX_ACTIONS} more actions`);
-  return lines.join("\n");
+  return { lines };
 }
 
-async function guard(event, ctx, mode) {
-  const call = classify(event?.toolName, event?.input);
-  if (call.kind === "other" || call.kind === "read") return undefined;
-  if (call.kind === "blocked") return { block: true, reason: call.reason };
-  const names = call.actions.map((action) => oneLine(named(action.slug), 80)).join(", ");
-  if (readOnly(mode)) {
-    return { block: true, reason: `Blocked: the connected apps are read-only here, and ${names} isn't a known read.` };
+// What the dialog says: each action's slug, then its arguments indented under it, all whole;
+// or what's too large to show.
+function describe(actions) {
+  if (actions.length > MAX_ACTIONS) return { tooLarge: `${actions.length} actions, more than ${MAX_ACTIONS}` };
+  const lines = [];
+  for (const action of actions) {
+    const slug = named(action.slug);
+    if (length(slug) > MAX_NAME) return { tooLarge: "a tool's name is too long" };
+    lines.push(escaped(slug));
+    const shownFields = fields(action.args);
+    if (shownFields.tooLarge) return shownFields;
+    for (const line of shownFields.lines) lines.push(`  ${line}`);
   }
+  const text = lines.join("\n");
+  if (length(text) > MAX_TEXT) return { tooLarge: "more than the dialog shows" };
+  return { text };
+}
+
+// Asks the user about `actions` in a dialog titled `title`, `names` naming them to the model;
+// blocked when there's no one to ask, the user declines, or it can't be shown whole.
+async function ask(ctx, title, actions, names) {
   if (!ctx?.hasUI) return { block: true, reason: `Blocked (no one to ask): ${names}` };
-  const ok = await ctx.ui.confirm(TITLE, describe(call.actions));
+  const dialog = describe(actions);
+  if (dialog.tooLarge) return { block: true, reason: `Blocked: ${dialog.tooLarge}. ${TOO_LARGE}` };
+  const ok = await ctx.ui.confirm(title, dialog.text);
   if (!ok) return { block: true, reason: `The user declined: ${names}` };
   return undefined;
 }
 
+// Composio's tool `tool` called with `input`.
+function connected(tool, input, ctx, readonly) {
+  const call = classify(tool, input);
+  if (call.kind === "read") return undefined;
+  if (call.kind === "blocked") return { block: true, reason: call.reason };
+  const names = call.actions.map((action) => escaped(named(action.slug)).slice(0, 120)).join(", ");
+  if (readonly) {
+    const what = call.writes ? `${names} isn't a known read` : `this call would keep memory or a workbench copy at Composio`;
+    return { block: true, reason: `Blocked: the connected apps are read-only here, and ${what}.` };
+  }
+  return ask(ctx, WRITE_TITLE, call.actions, names);
+}
+
+// What the call `event` gets: undefined (it runs) or `{ block, reason }`.
+async function guard(event, ctx, readonly, tainted) {
+  const name = typeof event?.toolName === "string" ? event.toolName : "";
+  const tool = composioTool(name);
+  if (tool !== null) return connected(tool, event.input, ctx, readonly);
+  if (PI_READS.has(name) || CALLERS.has(name) || name.startsWith(COMPUTER)) return undefined;
+  // bash, write, edit, another server's tools, any other tool.
+  const shownName = escaped(named(name)).slice(0, 120);
+  if (readonly) {
+    return { block: true, reason: `Blocked: ${shownName} doesn't run in read-only mode, where only the connected apps' known reads and read, grep, find and ls do.` };
+  }
+  if (!tainted()) return undefined;
+  return ask(ctx, TAINTED_TITLE, [{ slug: name, args: event.input }], shownName);
+}
+
+// The session holds what taints it: the guard's entry, or a result of a tool that taints
+// (also one called from another tool, in its result's `nestedCalls`).
+function taintedIn(entries) {
+  return entries.some((entry) => {
+    if (entry?.type === "custom" && entry.customType === TAINT) return true;
+    const message = entry?.type === "message" ? entry.message : undefined;
+    if (message?.role !== "toolResult") return false;
+    if (untrusted(message.toolName)) return true;
+    let nested = "";
+    try {
+      nested = JSON.stringify(message.nestedCalls ?? "");
+    } catch {}
+    return /"mcp__(composio__|computer__|[^"]*__COMPOSIO_)/.test(nested);
+  });
+}
+
+function entriesOf(ctx) {
+  try {
+    const entries = ctx?.sessionManager?.getEntries?.();
+    return Array.isArray(entries) ? entries : [];
+  } catch {
+    return [];
+  }
+}
+
 export default function (pi) {
-  pi.on("tool_call", (event, ctx) => guard(event, ctx, process.env[MODE]));
+  // Read once, as the guard loads.
+  const readonly = readOnly(process.env[MODE]);
+  // This session's (pi loads the guard afresh for each one).
+  let tainted = false;
+  const taint = (why) => {
+    if (tainted) return;
+    tainted = true;
+    try {
+      pi.appendEntry(TAINT, { why: String(why).slice(0, 200) });
+    } catch {}
+  };
+  const isTainted = (ctx) => {
+    if (!tainted && taintedIn(entriesOf(ctx))) tainted = true;
+    return tainted;
+  };
+
+  pi.registerCommand?.(COMMAND, {
+    description: "Ailfred's guard for the connected apps is loaded (says whether this session is tainted)",
+    handler: async (_args, ctx) => {
+      ctx?.ui?.notify?.(isTainted(ctx) ? "Tainted: bash, write and edit ask first." : "Not tainted.", "info");
+    },
+  });
+  pi.on("session_start", (_event, ctx) => {
+    tainted = taintedIn(entriesOf(ctx));
+  });
+  pi.on("input", (event) => {
+    if (typeof event?.text === "string" && event.text.includes(UNTRUSTED_CONTEXT)) taint("an earlier conversation");
+  });
+  pi.on("tool_result", (event) => {
+    if (untrusted(event?.toolName)) taint(event.toolName);
+  });
+  pi.on("tool_call", async (event, ctx) => {
+    const verdict = await guard(event, ctx, readonly, () => isTainted(ctx));
+    // Let through, its result comes in: tainted before it runs.
+    if (verdict === undefined && untrusted(event?.toolName)) taint(event.toolName);
+    return verdict;
+  });
 }

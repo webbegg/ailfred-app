@@ -161,6 +161,12 @@ pub struct Diff {
     pub applied: bool,
 }
 
+/// How every dialog of Ailfred's guard (the pi extension `connections_guard.js`) starts: it
+/// approves an action on the user's accounts or computer, so only Ailfred's own window answers
+/// it, never the local server or the web view. Another extension could start its dialog so too;
+/// that only makes it stricter.
+pub const LOCAL_ONLY: &str = "Ailfred guard: ";
+
 pub struct Question {
     pub prompt: String,
     pub options: Vec<String>,
@@ -221,6 +227,12 @@ impl Reply {
     /// It ended with a question the user hasn't answered, and can.
     pub fn asks(&self) -> bool {
         self.parts.iter().any(|p| matches!(p, Part::Question(q) if q.open()))
+    }
+
+    /// A step of it read the connected apps or the screen (`pi::untrusted_tool`, by the tool's
+    /// name, which is the target of a step of a tool with no kind of its own).
+    pub fn untrusted(&self) -> bool {
+        self.parts.iter().any(|p| matches!(p, Part::Agent(a) if a.steps.iter().any(|s| crate::pi::untrusted_tool(&s.target))))
     }
 
     /// What the model is told it answered, in a later message's history: its text, if it
@@ -402,6 +414,11 @@ impl Question {
     /// It still takes an answer: not answered, not closed.
     pub fn open(&self) -> bool {
         self.answered.is_none() && !self.closed
+    }
+
+    /// Only Ailfred's window answers it ([`LOCAL_ONLY`]).
+    pub fn local_only(&self) -> bool {
+        self.prompt.starts_with(LOCAL_ONLY)
     }
 
     /// Option `i` clicked: picked alone (single) or toggled (multi).

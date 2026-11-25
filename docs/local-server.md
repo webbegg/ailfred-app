@@ -152,7 +152,10 @@ answer **202** `{"threadId","runId"}`; the run's events come on the stream.
     partial resume answers the ones it names. An answered or closed question, a reply that
     failed or was stopped, or an unknown `interruptId` gets **409**; a question named twice
     **400**. The answers go as one user message, as in the chat, so a later snapshot shows them
-    as the answering run's `{run}-user` message.
+    as the answering run's `{run}-user` message. A question of Ailfred's guard (its text starts
+    with `Ailfred guard: `, `docs/connected-apps.md`) approves an action on the user's accounts
+    or computer: only Ailfred's window answers it, and an answer to it gets **403**. A client
+    may still decline it.
   - `status: "cancelled"` (no payload) declines a question: it closes and shows as "Not
     answered" in the chat; clients get a fresh `MESSAGES_SNAPSHOT` with the question
     `"closed": true`. **202** `{"threadId","runId"}`. With pi, whose dialog waits for the

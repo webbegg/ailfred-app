@@ -228,6 +228,12 @@ fn a_bundle_without_its_page_says_it_isnt_built_even_with_the_repos_build_there(
 }
 
 #[test]
+fn the_page_knows_the_guards_questions_by_the_same_start_the_server_refuses_answers_to() {
+    let question = include_str!("../../web/src/components/Question.tsx");
+    assert!(question.contains(&format!("export const LOCAL_ONLY = \"{}\";", crate::reply::LOCAL_ONLY)), "web/src/components/Question.tsx");
+}
+
+#[test]
 fn the_page_is_the_first_one_found_else_a_note_on_how_to_build_it() {
     let dir = std::env::temp_dir().join(format!("ailfred-web-view-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

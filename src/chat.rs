@@ -341,8 +341,9 @@ impl Chat {
         let turns: Vec<(u64, model::Turn)> = self.messages[..at]
             .iter()
             .filter_map(|m| {
-                let reply = self.replies.iter().find(|r| r.id == m.id)?.history_text()?;
-                Some((m.id, model::Turn { text: m.text.clone(), pngs: m.pngs.clone(), reply }))
+                let saved = self.replies.iter().find(|r| r.id == m.id)?;
+                let reply = saved.history_text()?;
+                Some((m.id, model::Turn { text: m.text.clone(), pngs: m.pngs.clone(), reply, untrusted: saved.untrusted() }))
             })
             .collect();
         // Resumed only when it ends where this message's history does: a retry's session

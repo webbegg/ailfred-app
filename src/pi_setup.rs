@@ -259,20 +259,22 @@ pub fn start(pi: &Path, data: &Path, real_home: &Path) -> io::Result<crate::pi::
     let layout = Layout::under(data);
     prepare(&layout, &real_home.join(".pi/agent"))?;
     let path = login_path(&std::env::var_os("PATH").unwrap_or_default());
-    let (pi, real_home) = (pi.to_owned(), real_home.to_owned());
+    let (pi, real_home, data) = (pi.to_owned(), real_home.to_owned(), data.to_owned());
+    // With Composio's server in the mcp.json it reads, pi must have loaded the guard.
+    let require = move || connections::required(&data);
     let make = move || {
         let mut command = command(&pi, &layout, &real_home, &path, std::env::vars_os());
         // As computer control is now: on, its tools; off, none.
         if let Err(e) = computer_tools(&mut command, &layout, crate::computer::endpoint_now().as_ref()) {
             eprintln!("Ailfred: pi's computer tools couldn't be set up: {e}");
         }
-        // The connected apps as Settings has them; their guard either way.
+        // The connected apps as Settings has them; their guard either way, first.
         if let Err(e) = connections::apply(&layout, connections::now()) {
             eprintln!("Ailfred: pi's connected apps couldn't be set up: {e}");
         }
         command
     };
-    crate::pi::PiEngine::supervised(make, crate::pi::SHUTDOWN_GRACE)
+    crate::pi::PiEngine::supervised_requiring(make, require, crate::pi::SHUTDOWN_GRACE)
 }
 
 /// Ailfred's pi as a [`Model`](crate::model::Model): started off the main thread; a message

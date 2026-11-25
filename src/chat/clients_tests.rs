@@ -396,6 +396,36 @@ fn a_resume_answers_the_open_question_as_the_window_does() {
 }
 
 #[test]
+fn the_guards_question_is_answered_only_in_ailfreds_window_never_by_a_client() {
+    let (mut c, rx) = watched();
+    c.model = Some(model::PI.into());
+    let prompt = format!("{}allow these actions on your connected apps?\n\nGMAIL_SEND_EMAIL\n  recipient_email: a@b.example", reply::LOCAL_ONLY);
+    let confirm = Event::Ask { prompt, options: vec!["Yes".into(), "No".into()], multi: false };
+    let token = asked(&mut c, "mail Ann", vec![confirm, Event::Done]);
+    let run = run_of(&c, token);
+    got(&rx);
+    let requests = c.requests.len();
+    for id in [format!("{run}-ask-1"), format!("{}-ask-1", crate::history::run_id(&thread(&c), 0))] {
+        let refused = answer(&mut c, "c1", &id, "Yes");
+        assert_eq!(refused.status, 403, "{refused:?}");
+        assert!(refused.body["error"].as_str().unwrap().contains("Ailfred's window"), "{refused:?}");
+    }
+    assert!(question(&c, token, 0).open(), "still waits for the window");
+    assert_eq!(c.requests.len(), requests, "nothing went to pi");
+    // The web view's commands come the same way (`web_view::bridge`).
+    assert_eq!(resume(&mut c, "c2", vec![command::answer_resume(&format!("{run}-ask-1"), "Yes")]).status, 403);
+    // Declining only blocks the action: a client may.
+    assert_eq!(resume(&mut c, "c3", vec![command::decline_resume(&format!("{run}-ask-1"))]).status, 202);
+    assert!(question(&c, token, 0).closed);
+
+    // The window answers it.
+    let token = asked(&mut c, "mail Bob", vec![Event::Ask { prompt: format!("{}allow this?", reply::LOCAL_ONLY), options: vec!["Yes".into(), "No".into()], multi: false }, Event::Done]);
+    let part = c.replies.iter().find(|r| r.token == token).unwrap().parts.iter().position(|p| matches!(p, Part::Question(_))).unwrap();
+    assert!(c.answer_with(token, &[(part, "Yes".into())]).is_some());
+    assert_eq!(question(&c, token, 0).answered.as_deref(), Some("Yes"));
+}
+
+#[test]
 fn a_question_can_be_answered_by_its_snapshot_id_too() {
     let (mut c, _rx) = watched();
     let token = asked(&mut c, "pick", vec![ask("Which?"), Event::Done]);

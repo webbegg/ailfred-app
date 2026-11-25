@@ -717,12 +717,30 @@ fn a_second_messages_request_carries_the_first_message_its_capture_and_its_reply
     let second = sent(&mut c, "and its name?");
     let request = c.request_for(second, "claude-opus-5-5").expect("a request");
     assert_eq!((request.model.as_str(), request.text.as_str()), ("claude-opus-5-5", "and its name?"));
-    assert_eq!(request.history, vec![model::Turn { text: "what is this?".into(), pngs: vec![Arc::new(vec![1, 2, 3])], reply: "A cat.".into() }]);
+    assert_eq!(request.history, vec![model::Turn { text: "what is this?".into(), pngs: vec![Arc::new(vec![1, 2, 3])], reply: "A cat.".into(), untrusted: false }]);
     assert!(request.pngs.is_empty());
     let again = c.request_for(first, "m").expect("the first one's own");
     assert!(again.history.is_empty(), "nothing came before it");
     assert_eq!(again.pngs, vec![Arc::new(vec![1, 2, 3])], "its capture goes to the model");
     assert_eq!(c.request_for(99, "m"), None);
+}
+
+#[test]
+fn a_turn_whose_reply_read_the_connected_apps_or_the_screen_goes_into_the_history_as_untrusted() {
+    let mut c = Chat::new(None);
+    let mut ids = Vec::new();
+    for (text, tool) in [("mail?", "mcp__composio__COMPOSIO_MULTI_EXECUTE_TOOL"), ("screen?", "mcp__computer__screenshot"), ("code?", "read"), ("other?", "mcp__composio2__COMPOSIO_SEARCH_TOOLS")] {
+        let id = sent(&mut c, text);
+        let token = c.ask(id).unwrap();
+        let (kind, target) = crate::pi::step_of(tool, &serde_json::json!({"path": "a.rs"}));
+        for e in [Event::Step { id: 1, tool: kind, target }, Event::StepEnd { id: 1, ok: true }, Event::Text("Done.".into()), Event::Done] {
+            c.reply_event(token, e, Instant::now());
+        }
+        ids.push(id);
+    }
+    let next = sent(&mut c, "next");
+    let history = c.request_for(next, "m").unwrap().history;
+    assert_eq!(history.iter().map(|t| t.untrusted).collect::<Vec<_>>(), [true, true, false, true]);
 }
 
 #[test]

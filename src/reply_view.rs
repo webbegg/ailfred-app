@@ -798,6 +798,11 @@ mod tests {
         // broken-image placeholder: a glyph and its alt text, written out.
         assert!(els.iter().any(|e| e.role == "image" && e.label.as_deref() == Some("your inbox summary")));
         assert!(els.iter().any(|e| e.role == "text" && e.text.as_deref() == Some("your inbox summary")), "its alt text shows, as the placeholder");
+        // No link handler: a link is styled text only, no link a click or Enter would open, and
+        // not a Tab stop (`Markdown::on_link`).
+        assert!(els.iter().any(|e| e.text.as_deref().is_some_and(|t| t.contains("the docs"))), "the link's words show");
+        assert!(!els.iter().any(|e| e.role == "link"), "nothing to open");
+        assert!(!els.iter().any(|e| e.focusable && e.text.as_deref().is_some_and(|t| t.contains("the docs"))), "not a Tab stop");
     }
 
     #[test]

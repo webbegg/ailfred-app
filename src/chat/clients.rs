@@ -6,8 +6,9 @@
 //! The chat's conversation is the truth: a run's `messages` aren't replayed into the model;
 //! its last one, the user's, is sent as a message typed here would be (a steer, queued or
 //! asked at once, to the model picked). A `resume` answers or declines the open questions of the
-//! latest reply instead, each by an interrupt id it was sent. A Retry or a new conversation does
-//! what the window's Retry or Cmd+N does.
+//! latest reply instead, each by an interrupt id it was sent; one of Ailfred's guard
+//! (`reply::LOCAL_ONLY`) only the window answers, a client can only decline it. A Retry or a new
+//! conversation does what the window's Retry or Cmd+N does.
 
 use std::sync::mpsc::SyncSender;
 use std::time::Instant;
@@ -350,6 +351,11 @@ impl Chat {
             };
             if !waits || !matches!(&reply.parts[part], Part::Question(q) if q.open()) {
                 return conflict("that question takes no answer: answered, or closed");
+            }
+            // Ailfred's guard asks it: it approves an action on the user's accounts or computer,
+            // so only the window answers it. A decline only blocks the action.
+            if entry.status == ResumeStatus::Resolved && matches!(&reply.parts[part], Part::Question(q) if q.local_only()) {
+                return Err(Answer::error(403, "Answer in Ailfred's window: this question approves an action on the user's accounts or computer"));
             }
             let text = match entry.status {
                 ResumeStatus::Cancelled => None,
