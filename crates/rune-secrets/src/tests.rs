@@ -60,7 +60,16 @@ fn the_keychain_refuses_an_empty_service_or_account_before_asking_the_system() {
 #[test]
 #[ignore = "uses the real login Keychain"]
 fn the_login_keychain_saves_replaces_and_forgets_secrets_per_account() {
+    /// Deletes the test's items even when an assertion fails, so no run leaves any behind.
+    struct Cleanup(Keychain);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = self.0.delete("one");
+            let _ = self.0.delete("two");
+        }
+    }
+
     let service = format!("com.rune-secrets.test.{}", std::process::id());
-    let keychain = Keychain::new(&service).unwrap();
-    keeps_secrets(&keychain);
+    let keychain = Cleanup(Keychain::new(&service).unwrap());
+    keeps_secrets(&keychain.0);
 }
