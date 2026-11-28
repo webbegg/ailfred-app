@@ -5,9 +5,10 @@ edition = "2024"
 
 # The app at the root; its engine and conversation model, without UI, in crates/ailfred-core;
 # the wire protocol its clients speak (AG-UI events), in crates/ailfred-protocol; secrets in the
-# OS credential store, for any Rune app, in crates/rune-secrets.
+# OS credential store, for any Rune app, in crates/rune-secrets; an app's identity per build
+# channel in crates/rune-product.
 [workspace]
-members = ["crates/ailfred-core", "crates/ailfred-protocol", "crates/rune-secrets"]
+members = ["crates/ailfred-core", "crates/ailfred-protocol", "crates/rune-product", "crates/rune-secrets"]
 resolver = "3"
 
 [dependencies]
@@ -37,6 +38,8 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = [
     "WKWindowFeatures",
 ] }
 png = "0.18"
+# The build's identity per channel (stable, dev).
+rune-product = { path = "crates/rune-product" }
 # The API key in the login Keychain.
 rune-secrets = { path = "crates/rune-secrets" }
 serde = { version = "1", features = ["derive"] }

@@ -11,6 +11,9 @@
 # Usage: scripts/check [test name filter]
 set -euo pipefail
 cd "$(dirname "$0")/.."
+# Always a dev build: a stray AILFRED_CHANNEL=stable would give the tests the installed app's
+# folders (src/settings.rs, `product`).
+unset AILFRED_CHANNEL
 
 step() { printf '\n== %s\n' "$1"; }
 

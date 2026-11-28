@@ -93,4 +93,15 @@ mod tests {
         let name = format!("NAME={BUNDLE_NAME}");
         assert!(script.lines().any(|l| l == name), "bundle-mac has no line {name}");
     }
+
+    #[test]
+    fn the_bundle_script_builds_the_stable_channel_under_its_id() {
+        let script = include_str!("../scripts/bundle-mac");
+        let stable = crate::settings::ailfred(rune_product::Channel::Stable);
+        assert!(script.lines().any(|l| l == format!("ID={}", stable.id())), "bundle-mac's ID isn't {}", stable.id());
+        assert!(
+            script.lines().any(|l| l.starts_with("AILFRED_CHANNEL=stable ") && l.contains("cargo build --release")),
+            "bundle-mac's release build doesn't set AILFRED_CHANNEL=stable: it would keep a dev build's settings"
+        );
+    }
 }

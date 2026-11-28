@@ -149,6 +149,7 @@ dependencies = [
  "png 0.18.1",
  "rune",
  "rune-kit",
+ "rune-product",
  "rune-secrets",
  "serde",
  "serde_json",
@@ -3522,6 +3523,10 @@ dependencies = [
 
 [[package]]
 name = "rune-motion"
+version = "0.1.0"
+
+[[package]]
+name = "rune-product"
 version = "0.1.0"
 
 [[package]]

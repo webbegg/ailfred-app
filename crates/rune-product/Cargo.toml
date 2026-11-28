@@ -1,0 +1,7 @@
+[package]
+name = "rune-product"
+version = "0.1.0"
+edition = "2024"
+description = "A Rune app's identity per build channel: its name, id, URL scheme and folder name, so dev and beta builds never share a release's files, links or settings."
+
+[dependencies]
