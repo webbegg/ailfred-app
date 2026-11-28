@@ -32,6 +32,9 @@ own window) with Claude. Words used here and in the UI: see `CONTEXT.md`.
   (`UPDATE_FIXTURES=1` rewrites them), a saved reply's events (`saved.rs`) and the messages
   snapshot a joining client gets (`snapshot.rs`). It depends on the core only; the app uses it
   to save replies whole (`src/history/convert.rs`).
+  `crates/rune-secrets` keeps secrets in the OS credential store (the login Keychain on macOS)
+  behind a `SecretStore` trait, with a `MemoryStore` for tests; it knows nothing of Ailfred, so
+  other Rune apps can use it (`src/keychain.rs` is Ailfred's API key on top of it).
 - `server.rs` (with `src/server/`) is the local server, off until Settings turns it on: other
   apps watch and drive the chat's conversation over AG-UI on `127.0.0.1` (`docs/local-server.md`);
   the chat feeds its hub, its commands reach the chat through the `Host`.

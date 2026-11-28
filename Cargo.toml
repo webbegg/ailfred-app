@@ -4,9 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 # The app at the root; its engine and conversation model, without UI, in crates/ailfred-core;
-# the wire protocol its clients speak (AG-UI events), in crates/ailfred-protocol.
+# the wire protocol its clients speak (AG-UI events), in crates/ailfred-protocol; secrets in the
+# OS credential store, for any Rune app, in crates/rune-secrets.
 [workspace]
-members = ["crates/ailfred-core", "crates/ailfred-protocol"]
+members = ["crates/ailfred-core", "crates/ailfred-protocol", "crates/rune-secrets"]
 resolver = "3"
 
 [dependencies]
@@ -28,7 +29,6 @@ objc2-core-graphics = "0.3.2"
 objc2-core-text = "0.3.2"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSError", "NSGeometry", "NSNotification", "NSString", "NSURL", "NSURLRequest", "NSValue"] }
 objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = ["std", "block2", "objc2-core-foundation", "objc2-core-graphics", "SCShareableContent", "SCStream", "SCScreenshotManager", "libc"] }
-objc2-security = { version = "0.3.2", default-features = false, features = ["std", "SecItem", "SecBase"] }
 objc2-service-management = "0.3.2"
 # The web view window (T21): a WKWebView showing the React client in web/.
 objc2-web-kit = { version = "0.3.2", default-features = false, features = [
@@ -37,6 +37,8 @@ objc2-web-kit = { version = "0.3.2", default-features = false, features = [
     "WKWindowFeatures",
 ] }
 png = "0.18"
+# The API key in the login Keychain.
+rune-secrets = { path = "crates/rune-secrets" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rune = { version = "0.0.1", path = "../_references/rune/crates/rune", features = ["native-file-dialog"] }
