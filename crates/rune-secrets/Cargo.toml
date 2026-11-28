@@ -1,0 +1,9 @@
+[package]
+name = "rune-secrets"
+version = "0.1.0"
+edition = "2024"
+description = "Secrets for Rune apps in the OS credential store (the login Keychain on macOS), with an in-memory store for tests."
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-core-foundation = "0.3.2"
+objc2-security = { version = "0.3.2", default-features = false, features = ["std", "SecItem", "SecBase"] }

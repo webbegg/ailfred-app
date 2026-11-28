@@ -144,12 +144,12 @@ dependencies = [
  "objc2-core-text",
  "objc2-foundation 0.3.2",
  "objc2-screen-capture-kit",
- "objc2-security",
  "objc2-service-management",
  "objc2-web-kit",
  "png 0.18.1",
  "rune",
  "rune-kit",
+ "rune-secrets",
  "serde",
  "serde_json",
  "tray-icon",
@@ -3523,6 +3523,14 @@ dependencies = [
 [[package]]
 name = "rune-motion"
 version = "0.1.0"
+
+[[package]]
+name = "rune-secrets"
+version = "0.1.0"
+dependencies = [
+ "objc2-core-foundation",
+ "objc2-security",
+]
 
 [[package]]
 name = "rune-spell"
