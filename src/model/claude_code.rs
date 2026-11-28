@@ -149,7 +149,7 @@ pub fn private_dir(home: &Path, app_id: &str) -> PathBuf {
 /// Where this build's Claude Code runs.
 pub fn private_dir_now() -> PathBuf {
     let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    private_dir(&home, crate::settings::app_id(crate::app_env::in_bundle()))
+    private_dir(&home, crate::settings::app_id())
 }
 
 /// Creates `dir` (and its parents) owner-only.

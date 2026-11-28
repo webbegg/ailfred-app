@@ -210,13 +210,13 @@ pub fn dir(home: &Path, app_id: &str) -> PathBuf {
 /// Where this build keeps its files.
 pub fn app_dir_now() -> PathBuf {
     let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    app_dir(&home, crate::settings::app_id(crate::app_env::in_bundle()))
+    app_dir(&home, crate::settings::app_id())
 }
 
 /// Where this build keeps its conversations.
 pub fn dir_now() -> PathBuf {
     let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    dir(&home, crate::settings::app_id(crate::app_env::in_bundle()))
+    dir(&home, crate::settings::app_id())
 }
 
 pub fn now_secs() -> u64 {

@@ -1458,7 +1458,7 @@ fn main() {
                 .animate_reveal(),
             QuickInput::new(Some(handle.clone())),
         );
-        let mut settings = Settings::open(installed);
+        let mut settings = Settings::open();
         let computer_control = settings.computer_control();
         // Until set, on only if the user's pi already has Composio's server (set up by hand
         // before the switch); kept, so it doesn't change once Ailfred manages the server.

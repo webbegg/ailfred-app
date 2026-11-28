@@ -34,8 +34,10 @@ its own window).
    Recording** when asked (Settings › Permissions shows whether it's on, with a button there),
    then quit and reopen it.
 
-`cargo run` runs a development build. It keeps its own settings (`com.ailfred.dev`), but it shares
-the global shortcuts with the installed app, so quit one before starting the other.
+`cargo run` runs a development build. It keeps its own settings and files (`com.ailfred.dev`), but
+it shares the global shortcuts with the installed app, so quit one before starting the other. Only
+a build made with `AILFRED_CHANNEL=stable` (as `scripts/bundle-mac` does) uses the installed app's
+(`com.ailfred`); any other build, wherever it runs from, is a development build.
 
 ## A disk image for another Mac
 

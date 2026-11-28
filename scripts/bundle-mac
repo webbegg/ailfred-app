@@ -27,8 +27,10 @@ done
 IDENTITY=${MAC_APP_SIGN:--}
 [ "$IDENTITY" = "-" ] && echo "bundle-mac: signing ad hoc; Screen Recording will be asked again after each reinstall" >&2
 
-# Settings shows it (src/settings_ui.rs); cargo rebuilds when it changes.
-AILFRED_BUILD="$BUILD" cargo build --release --locked -p ailfred >&2
+# AILFRED_BUILD: Settings shows it (src/settings_ui.rs). AILFRED_CHANNEL=stable: the installed
+# app's identity and folders (`com.ailfred`); a build without it is a dev build (src/settings.rs,
+# `product`). Cargo rebuilds when either changes.
+AILFRED_CHANNEL=stable AILFRED_BUILD="$BUILD" cargo build --release --locked -p ailfred >&2
 # The web view's page: one self-contained web/dist/index.html (docs/web-view.md), always from a
 # clean install of the lockfile (never a stale or changed web/node_modules), no install scripts.
 npm --prefix web ci --ignore-scripts >&2
