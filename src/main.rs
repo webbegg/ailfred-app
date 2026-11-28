@@ -1416,6 +1416,10 @@ fn main() {
     if installed {
         app_env::log_to_file();
     }
+    // The channel comes from the build, the bundle's features from where it runs: say both, so a
+    // stable build run from target/ (or a dev build copied into a bundle) shows in the log.
+    let product = settings::product();
+    eprintln!("Ailfred: {} build ({}), files in {}, in a bundle: {installed}", product.channel().as_str(), product.id(), product.folder());
     // accessory: no Dock icon and no activation at launch.
     rune::run_windows_with(RunOptions { accessory: true }, move |_displays| {
         let mut app = App::new(AppSpec::new("Ailfred", (1.0, 1.0), host_init, host_view)).windowless().on_open_url(on_link);

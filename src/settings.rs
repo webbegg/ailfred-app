@@ -633,10 +633,10 @@ mod tests {
     }
 
     #[test]
-    fn a_build_that_names_no_channel_is_a_dev_build() {
-        if option_env!("AILFRED_CHANNEL").is_none() {
-            assert_eq!(app_id(), "com.ailfred.dev", "cargo run and cargo test never touch the installed app's settings");
-        }
+    fn tests_never_build_with_the_installed_apps_settings() {
+        // Fails, rather than skips, when a stray AILFRED_CHANNEL=stable reached the build: the
+        // tests would then read and write ~/Library/Application Support/com.ailfred.
+        assert_eq!(app_id(), "com.ailfred.dev", "built with AILFRED_CHANNEL={:?}", option_env!("AILFRED_CHANNEL"));
     }
 
     #[test]
